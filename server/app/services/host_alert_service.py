@@ -44,6 +44,7 @@ import ssl
 import asyncio
 import json
 import logging
+import math
 from types import SimpleNamespace
 import re
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ from app.services.server_health_service import (
 )
 from app.services.filesystem_monitoring import ch_capacity_filter
 from app.services.host_metric_service import telemetry_freshness_seconds
+from app.services import host_depth_metrics as hdm
 
 logger = logging.getLogger("zenplus.host_alerts")
 
@@ -69,7 +71,7 @@ MIN_LOOKBACK_S = 900          # history floor so short holds still see context
 # max(min_duration, AVERAGE_WINDOW_S), as before 1.24.16: a "> 90% for 5 min"
 # rule fires on a 5-minute average, so one dip below 90% does not reset it.
 AVERAGE_WINDOW_S = 120
-AVERAGED_METRICS = frozenset({"host_cpu_pct", "host_memory_pct", "host_disk_util_pct"})
+AVERAGED_METRICS = frozenset({"host_cpu_pct", "host_memory_pct", "host_disk_util_pct"}) | hdm.AVERAGED
 # One agent with a very long upload interval must not stretch every rule's
 # history query (and hit HISTORY_ROW_LIMIT, which would skip the rule).
 MAX_LOOKBACK_BUDGET_S = 900
@@ -130,7 +132,12 @@ _HISTORY_SQL = {
         "ORDER BY server_id, mount, timestamp LIMIT {limit}"
     ),
 }
-THRESHOLD_METRICS = frozenset(_HISTORY_SQL)
+# Server depth metrics (alerting plan G-9): swap, disk latency, NIC errors.
+_HISTORY_SQL.update(hdm.HISTORY_SQL)
+# Judged on per-sample history; host_clock_skew_s reads PostgreSQL.
+THRESHOLD_METRICS = frozenset(_HISTORY_SQL) | {hdm.CLOCK_SKEW}
+# Judged on one reading per pass (host_depth_metrics.Snap).
+SNAPSHOT_METRICS = hdm.SNAPSHOT_METRICS
 
 
 def fetch_host_history(metric: str, since: float, until: float) -> dict[str, dict[str, list]]:
@@ -366,10 +373,23 @@ def _mail_ctx(ctx: dict) -> dict:
     }
     # Incident identity and lifecycle (alert_phrasing.incident_context).
     mail_ctx.update({k: ctx[k] for k in ap.INCIDENT_KEYS if ctx.get(k)})
+    # Every alert mail about a known incident links to it ("View incident",
+    # "Acknowledge"), also from senders that build no incident context.
+    if not mail_ctx.get("incident_id") and ctx.get("alert_id"):
+        mail_ctx["incident_id"] = str(ctx["alert_id"])
     # A sender whose mail differs from its webhook payload
     # (the service path's mail has no IP line) says so here.
     mail_ctx.update(ctx.get("email_overrides") or {})
     return mail_ctx
+
+
+def _alerts_url(branding) -> str:
+    """The dashboard's alert list ("" when the dashboard URL is unknown), in
+    alert_engine._dashboard_url's order: APP_BASE_URL, then the company
+    base_url (already loaded with the notification branding)."""
+    from app.core.config import get_settings
+    base = (get_settings().APP_BASE_URL or "").strip() or (getattr(branding, "base_url", "") or "").strip()
+    return base.rstrip("/") + "/alerts" if base else ""
 
 
 async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
@@ -410,12 +430,21 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
     from app.services import alert_delivery_log as dl
     from app.services.alert_phrasing import sms_with_timestamp
+    from app.services.sms_text import warn_if_long
     from app.services import alert_storm
     from app.services import notification_grouping as ng
     from app.services.email_render import alert_subject, build_alert_email_html, build_alert_email_text
     from app.services.regional_time import notification_branding, localize_text
 
     branding = await notification_branding(db)
+    if not ctx.get("action_url"):
+        # Senders that set no link (server, SNMP, APM, NetPath, UDT, syslog,
+        # reminders) still get "View incident" / "Acknowledge" in the mail.
+        ctx = {**ctx, "action_url": _alerts_url(branding)}
+    # Every family: {site}/{group} filled, Site/Group detail rows, and the
+    # regional event time for chat and webhook payloads (notification_context).
+    from app.services import notification_context
+    ctx = await notification_context.prepare(db, ctx, branding)
 
     kind = dl.kind_from_ctx(ctx)
     keyed = _key_context(ctx)
@@ -441,13 +470,15 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             self.timer = dl.Timer()
             self.claimed: list[str] = []
             self.in_flight: list[str] = []
+            self.sent: dict = {}    # what was handed to the transport (migrate-197)
 
         async def log(self, outcome: str, error=None):
             await dl.record(
                 db, alert_id=ctx.get("alert_id"), rule_id=ctx.get("rule_id"),
                 channel_id=self.id, channel_name=self.name, channel_type=self.type, kind=kind,
                 outcome=outcome, error=error,
-                latency_ms=self.timer.ms if outcome not in ("skipped", "held") else None)
+                latency_ms=self.timer.ms if outcome not in ("skipped", "held") else None,
+                **(self.sent if outcome in ("accepted", "failed") else {}))
 
         async def claim(self, targets: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], bool]:
             """Claim targets: (targets to send to, any already delivered).
@@ -500,14 +531,18 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                     mail_ctx[key] = localize_text(str(mail_ctx.get(key) or ''), branding)
                 mail_ctx['details'] = [(label, localize_text(str(value), branding))
                                        for label, value in mail_ctx.get('details', [])]
-                ok = await _send_email(gw, rcpt, localize_text(alert_subject(ctx["subject"], ctx), branding),
-                                       localize_text(ctx.get('body') or '', branding) if ctx.get('html_body') else build_alert_email_text(mail_ctx),
+                subject = localize_text(alert_subject(ctx["subject"], ctx), branding)
+                body = localize_text(ctx.get('body') or '', branding) if ctx.get('html_body') else build_alert_email_text(mail_ctx)
+                self.sent = dl.sent(subject=subject, content=body, recipients_count=len(targets))
+                ok = await _send_email(gw, rcpt, subject, body,
                                        html_body=ctx.get("html_body") or build_alert_email_html(mail_ctx))
                 skip_reason = "config: SMTP gateway has no host"
             else:
                 # Gateway template placeholders the sender offers
                 # (device path: {hostname}, {ip_address}, {status}).
                 message = sms_with_timestamp(ctx["message"], ctx.get("triggered_at"), branding)
+                warn_if_long(message)
+                self.sent = dl.sent(content=message, recipients_count=len(targets))
                 ok = await _send_sms(gw, rcpt, message,
                                      values=ctx.get("sms_template_values"))
                 skip_reason = "config: SMS gateway is not a usable HTTP gateway"
@@ -611,6 +646,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                         credited.add(ch_id)
                     await route.log("skipped", "duplicate: already delivered for this event")
                     continue
+                route.sent = dl.webhook_sent(ch.type, ctx)
                 ok, err = await _dispatch_channel_result(ch.type, cfg, ctx)
                 if ok:
                     credited.add(ch_id)
@@ -743,9 +779,21 @@ def _float(value) -> float | None:
         return None
 
 
+def _dim_key(rule) -> str:
+    """The dimension's part of the dedupe key and metadata: "mount" for
+    filesystems, "disk", "nic" or "service" for the depth metrics."""
+    return hdm.DIMENSION_KEYS.get(getattr(rule, "metric", None), "mount")
+
+
 def _dedupe(rule, dimension: str | None) -> str:
-    """The incident identity: one per rule + server (+ mount)."""
-    return f"rule:{rule.id}" + (f":mount:{dimension}" if dimension else "")
+    """The incident identity: one per rule + server (+ mount, disk, NIC or service)."""
+    return f"rule:{rule.id}" + (f":{_dim_key(rule)}:{dimension}" if dimension else "")
+
+
+def _dims_open(rule, sid: str, opened: dict) -> set[str]:
+    """Dimensions of this rule with an open incident on the server."""
+    marker = f":{_dim_key(rule)}:"
+    return {d.split(marker, 1)[1] for (osid, d) in opened if osid == sid and marker in d}
 
 
 def _rule_conditions(rule) -> list[dict]:
@@ -783,14 +831,16 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
                        duration: str = "", alert_id=None, first_seen=None,
                        event: str | None = None, ip_address: str = "",
                        context: dict | None = None, branding=None,
-                       lifecycle: str | None = None) -> int:
+                       lifecycle: str | None = None, dimension: str | None = None) -> int:
     """Send a host metric alert, or its all-clear, in the shared house style.
     Returns how many channels accepted it. ``context`` carries a restart or
     shutdown's own facts; ``lifecycle`` "changed" announces a further event
-    on an open incident."""
+    on an open incident; ``dimension`` is the filesystem's mount, which the
+    sentence and the subject name ("Filesystem D: on Server srv-a ...")."""
     sev = rule.severity or "warning"
     threshold = _float(rule.threshold)
-    numeric = value is not None and rule.metric in THRESHOLD_METRICS
+    numeric = (value is not None and rule.metric in THRESHOLD_METRICS | {hdm.FS_DAYS_LEFT}
+               and math.isfinite(value))
     reading = ap.format_reading(rule.metric, value, rule.operator, threshold) if numeric else ""
     now = datetime.now(timezone.utc)
     incident = ap.incident_context(alert_id=alert_id, first_seen=first_seen, now=now,
@@ -802,27 +852,41 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
         status_detail = f"service {target} " + ("is running again" if is_recovery else "has stopped")
     elif target and rule.metric == "host_process_down":
         status_detail = f"process {target} " + ("is running again" if is_recovery else "is not running")
+    elif dimension and rule.metric == hdm.AUTO_SERVICE_STOPPED:
+        status_detail = (f"automatic service {dimension} "
+                         + ("is running again" if is_recovery else "has stopped unexpectedly"))
+    noun = _dimension_noun(rule, dimension)
     v = ap.rule_phrasing(_phrasing_rule(rule), hostname=label, is_recovery=is_recovery,
                          reading=reading, duration=duration,
                          value=value if numeric else None, value_context=context,
                          asset_type="Server", branding=branding, now=now,
-                         status_detail=status_detail)
+                         status_detail=status_detail, noun=noun)
+    if dimension:
+        # "[WARNING] ALERT: Disk space — D: on srv-a (10.0.0.5)"
+        v["host_suffix"] = f" — {dimension} on {label}"
     v.update({"rule_name": rule.name or "Alert", "hostname": hostname,
               "ip_address": ip_address or "", "severity": sev.upper(),
               "status": "RESOLVED" if is_recovery else "ALERT"})
     v.update(incident)
+    # {site}, {group}, {site_suffix} of the server (notification_context).
+    from app.services import notification_context
+    v.update(await notification_context.asset_place(db, {"alert_id": alert_id}))
     return await dispatch_to_channels(db, rule.notify_channels or [], {
         "subject": _render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
                            else ap.DEFAULT_EMAIL_SUBJECT, v),
         "body": _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery
                         else ap.DEFAULT_EMAIL_BODY, v),
         "message": _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v),
+        "event_sentence": v.get("event_sentence"),
         "hostname": hostname, "ip_address": ip_address or "",
         "status": "RESOLVED" if is_recovery else "ALERT",
         "severity": sev, "resolved": is_recovery,
-        "headline_metric": ap.headline_metric(rule.metric, value, rule.operator, threshold)
+        "headline_metric": ap.headline_metric(rule.metric, value, rule.operator, threshold,
+                                              label=noun)
                            if numeric else None,
         "details": [("Alert rule", rule.name),
+                    (hdm.DIMENSION_NOUNS[_dim_key(rule)] if rule.metric in hdm.DIMENSION_KEYS
+                     else "Instance", dimension),
                     ("Condition", v.get("condition_label")),
                     # `detail` carries what the evaluator measured — which
                     # filesystem, which service — and nothing else knows it.
@@ -852,12 +916,26 @@ def _funnel_fields(severity, rule_priority, *, trigger: bool) -> dict:
     return alert_funnel.notification_fields(severity, rule_priority, trigger=trigger)
 
 
+def _dimension_noun(rule, dimension: str | None) -> str | None:
+    """"Filesystem D:" for a filesystem rule's mount; None without one."""
+    if not dimension:
+        return None
+    if rule.metric in hdm.DIMENSION_KEYS:
+        return f"{hdm.DIMENSION_NOUNS[_dim_key(rule)]} {dimension}"
+    return f"{ap.metric_noun(rule.metric)} {dimension}"
+
+
 def _detail(rule, value: float | None, dimension: str | None) -> str:
-    """What was measured, for the alert message and the Measured row."""
+    """What was measured, for the alert message and the Measured row, worded
+    like the network alerts: "Host CPU 93.8% (limit 90%)", "Filesystem D:
+    87.8% (limit 85%)"."""
+    noun = _dimension_noun(rule, dimension) or ap.metric_noun(rule.metric)
     if value is None:
-        return "no current reading"
-    shown = ap.format_reading(rule.metric, value, rule.operator, _float(rule.threshold))
-    return f"{dimension} at {shown}" if dimension else shown
+        return f"{noun}: no current reading"
+    threshold = _float(rule.threshold)
+    shown = ap.format_reading(rule.metric, value, rule.operator, threshold)
+    limit = ap.format_threshold(rule.metric, threshold, rule.operator) if threshold is not None else ""
+    return f"{noun} {shown}" + (f" (limit {limit})" if limit else "")
 
 
 async def _stamp_state(db: AsyncSession, alert_id, meta: dict) -> None:
@@ -877,7 +955,7 @@ class _Open:
 
 async def _open_incidents(db: AsyncSession, rule) -> dict[tuple[str, str], _Open]:
     """{(server_id, dedupe): open incident} for one rule, read once per pass:
-    ``rule:<id>`` and, for filesystems, every ``rule:<id>:mount:<m>``."""
+    ``rule:<id>`` and every ``rule:<id>:<dimension key>:<dimension>``."""
     base = _dedupe(rule, None)
     rows = (await db.execute(text(
         """SELECT id, server_id::text, metadata->>'dedupe', metadata->>'notified',
@@ -886,7 +964,7 @@ async def _open_incidents(db: AsyncSession, rule) -> dict[tuple[str, str], _Open
            WHERE server_id IS NOT NULL AND status IN ('active', 'acknowledged')
              AND (metadata->>'dedupe' = :base OR starts_with(metadata->>'dedupe', :mounts))
            ORDER BY triggered_at"""
-    ), {"base": base, "mounts": base + ":mount:"})).all()
+    ), {"base": base, "mounts": f"{base}:{_dim_key(rule)}:"})).all()
     return {(r[1], r[2]): _Open(r[0], r[3], r[4], r[5]) for r in rows}
 
 
@@ -896,31 +974,75 @@ async def _lock(db: AsyncSession, rule, sid: str, dimension: str | None) -> None
                      {"key": f"host:{rule.id}:{sid}:{dimension or ''}"})
 
 
+def _rounded(value) -> float | None:
+    """A reading as metadata stores it (JSON has no infinity)."""
+    return round(value, 2) if value is not None and math.isfinite(value) else None
+
+
+async def _in_cooldown(db: AsyncSession, rule, sid: str, dedupe: str, now: float,
+                       exclude_alert_id=None) -> bool:
+    """True while this rule's last notified trigger for this server (and
+    dimension) is younger than the rule's cooldown (alerting plan 2.8, as
+    network_alert_service._trigger_allowed). The trigger then waits: it is
+    recorded not-notified (pending) and the next pass after the cooldown sends
+    it if the condition still breaches. A trigger that never went out (quiet
+    hours, dependency, an earlier cooldown) does not start a cooldown."""
+    cooldown = int(getattr(rule, "cooldown", 0) or 0)
+    if cooldown <= 0:
+        return False
+    row = (await db.execute(text(
+        """SELECT 1 FROM alerts
+            WHERE server_id = :sid AND metadata->>'dedupe' = :dedupe
+              AND (CAST(:aid AS uuid) IS NULL OR id <> CAST(:aid AS uuid))
+              AND metadata->>'notified' = 'true'
+              AND COALESCE(CASE WHEN metadata->>'notified_at' ~ '^[0-9.]+$'
+                                THEN (metadata->>'notified_at')::float8 END,
+                           extract(epoch FROM triggered_at)) > :since
+            LIMIT 1"""),
+        {"sid": sid, "dedupe": dedupe, "aid": str(exclude_alert_id) if exclude_alert_id else None,
+         "since": now - cooldown})).first()
+    return row is not None
+
+
 async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimension: str | None,
                        breach: bool, value: float | None, detail: str, *, allowed: bool,
                        counts: dict, opened: _Open | None, extra: dict | None = None,
                        availability_now: float | None = None, ip_address: str = "",
                        branding=None, message: str | None = None,
-                       context: dict | None = None) -> None:
+                       context: dict | None = None, now: float | None = None,
+                       suppressed: dict | None = None) -> None:
     """Raise, continue or resolve one rule/server/dimension incident.
 
     ``opened`` is the open incident the pass read (None = none). A new one is
     only inserted under the dimension's advisory lock, and create_server_alert
     re-checks for an open row under it; every send happens after a commit.
+
+    ``suppressed`` is the unhealthy parent device of a device -> server
+    dependency (``_suppressing_parents``): the incident is recorded with
+    ``suppressed_by_dependency`` and not notified, and its trigger is sent
+    late, like a quiet-hours one, if it still breaches once the parent is
+    healthy again. The rule's cooldown delays a trigger the same way.
     """
     dedupe = _dedupe(rule, dimension)
-    say = dict(ip_address=ip_address, branding=branding, context=context)
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    say = dict(ip_address=ip_address, branding=branding, context=context, dimension=dimension)
     if breach:
         if opened is None:
             await _lock(db, rule, sid, dimension)
+            opening = _rounded(value)
             meta = {"rule_id": str(rule.id), "metric": rule.metric,
-                    "value": round(value, 2) if value is not None else None,
+                    # `value` follows the current reading on every pass;
+                    # `trigger_value` keeps the one the incident opened at
+                    # (the stored message quotes it).
+                    "value": opening, "trigger_value": opening,
                     "threshold": float(rule.threshold or 0),
                     # A send in flight is neither pending nor notified, so no
                     # other pass announces it again (alert_notify_state).
                     **ns.sending_metadata(), "data_state": "current", **(extra or {})}
             if dimension:
-                meta["mount"] = dimension
+                meta[_dim_key(rule)] = dimension
+            if suppressed:
+                meta.update(suppressed_by_dependency=True, **suppressed)
             new_id = await create_server_alert(
                 db, sid, severity=rule.severity or "warning",
                 message=message or _message(rule, ap.host_label(hostname, ip_address), detail),
@@ -937,12 +1059,18 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             counts["raised"] += 1
             # Quiet hours: the alert is recorded above; only the outbound
             # notification waits for the rule's schedule window.
+            if allowed and suppressed:
+                allowed = False     # one outage, one page: the parent's
             if allowed and sa.is_availability_rule(rule):
                 allowed = await _availability_still_breaching(db, rule, sid, availability_now)
+            if allowed and await _in_cooldown(db, rule, sid, dedupe, now, exclude_alert_id=new_id):
+                allowed = False
+                await _stamp_state(db, new_id, {"cooldown_until": now + int(rule.cooldown or 0)})
             if allowed:
                 await _notify_rule(db, rule, hostname, value=value, detail=detail,
                                    alert_id=new_id,
                                    first_seen=await _open_alert_started(db, sid, dedupe), **say)
+                await _stamp_state(db, new_id, {"notified_at": now})
             await ns.stamp(db, new_id, allowed)
             await db.commit()
             return
@@ -953,10 +1081,12 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             await db.execute(text("""UPDATE alerts SET message=:message
                 WHERE id=:id AND message IS DISTINCT FROM :message"""),
                              {"id": opened.id, "message": message})
-        await _stamp_state(db, opened.id, {"value": round(value, 2) if value is not None else None,
+        await _stamp_state(db, opened.id, {"value": _rounded(value),
                                            "data_state": "current", **(extra or {})})
-        if (opened.status == "active" and allowed and await ns.is_pending(db, opened.id)
+        if (opened.status == "active" and allowed and not suppressed
+                and await ns.is_pending(db, opened.id)
                 and not await server_condition_silenced(db, sid, dedupe)
+                and not await _in_cooldown(db, rule, sid, dedupe, now, exclude_alert_id=opened.id)
                 and await ns.claim_pending(db, opened.id)):
             # Trigger was suppressed by quiet hours and the host is still
             # breaching — announce it now the window has opened, otherwise the
@@ -970,6 +1100,7 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
                 return
             await _notify_rule(db, rule, hostname, value=value, detail=detail,
                                alert_id=opened.id, first_seen=opened.triggered_at, **say)
+            await _stamp_state(db, opened.id, {"notified_at": now})
             await ns.stamp(db, opened.id, True)
             await db.commit()
         return
@@ -1004,7 +1135,7 @@ async def _adopt_legacy_mount_incident(db: AsyncSession, rule, sid: str,
 
 
 _RULES_SQL = (
-    "SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, "
+    "SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, cooldown, "
     "notify_channels, server_id, target, recovery_alert, conditions, condition_logic, "
     "schedule_start, schedule_end, schedule_days, {prio}, "
     "trigger_on, device_id, group_id, device_type, location, scope_tag, "
@@ -1081,7 +1212,7 @@ async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: 
                            allowed=allowed and not held, counts=counts,
                            opened=opened.get((sid, _dedupe(rule, None))), extra=extra,
                            availability_now=now, ip_address=(ips or {}).get(sid, ""),
-                           branding=branding)
+                           branding=branding, now=now)
         if breach:
             # This incident replaces the sweep's built-in, unrouted alert.
             await resolve_server_alerts(db, sid, "agent_offline")
@@ -1142,7 +1273,7 @@ async def _evaluate_lifecycle(db: AsyncSession, rule, sid: str, hostname: str, i
                  "event_at": ctx.get("event_at"), "hold_seconds": hold_s}
         await _apply_state(db, rule, sid, hostname, None, True, float(ctx["count"]), sentence,
                            allowed=allowed, counts=counts, opened=None, extra=extra,
-                           ip_address=ip, branding=branding, message=sentence, context=ctx)
+                           ip_address=ip, branding=branding, message=sentence, context=ctx, now=now)
         return
 
     meta = meta or {}
@@ -1177,7 +1308,7 @@ async def _evaluate_lifecycle(db: AsyncSession, rule, sid: str, hostname: str, i
         # Still inside the hold: continue (and announce a quiet-hours trigger).
         await _apply_state(db, rule, sid, hostname, None, True, None, "", allowed=allowed,
                            counts=counts, opened=opened, ip_address=ip, branding=branding,
-                           context={**meta, "kind": meta.get("lifecycle_kind")})
+                           context={**meta, "kind": meta.get("lifecycle_kind")}, now=now)
         return
     closing = {"boot_at": meta.get("boot_at"), "event_at": meta.get("event_at"),
                "kind": meta.get("lifecycle_kind"), "heartbeat_at": hb,
@@ -1186,7 +1317,184 @@ async def _evaluate_lifecycle(db: AsyncSession, rule, sid: str, hostname: str, i
                     or hb > float(meta["event_at"]))}
     await _apply_state(db, rule, sid, hostname, None, False, None, "", allowed=allowed,
                        counts=counts, opened=opened, ip_address=ip, branding=branding,
-                       context=closing)
+                       context=closing, now=now)
+
+
+# ── Dependencies (G-13) ──────────────────────────────────────────────────────
+
+# The parent device of a device -> server dependency that suppresses the
+# server's alerts, worst status first (the device path's order).
+_PARENTS_SQL = """
+SELECT DISTINCT ON (td.child_server_id)
+       td.child_server_id::text, td.id::text, td.parent_device_id::text, p.hostname, p.status,
+       td.dependency_type
+  FROM topology_dependencies td JOIN devices p ON p.id = td.parent_device_id
+ WHERE td.child_server_id IS NOT NULL AND td.enabled AND td.suppress_alerts
+   AND p.status IN ('down', 'degraded', 'unknown')
+ ORDER BY td.child_server_id,
+          CASE p.status WHEN 'down' THEN 1 WHEN 'degraded' THEN 2 ELSE 3 END, td.updated_at DESC"""
+
+
+async def _suppressing_parents(db: AsyncSession) -> dict[str, dict]:
+    """{server_id: the unhealthy parent that suppresses its alerts}. Never
+    raises (before migrate-203 there are no device -> server rows)."""
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(_PARENTS_SQL))).all()
+    except Exception:
+        logger.debug("server dependencies unavailable", exc_info=True)
+        return {}
+    return {r[0]: {"dependency_id": r[1], "parent_device_id": r[2], "parent_hostname": r[3],
+                   "parent_status": r[4], "dependency_type": r[5]} for r in rows}
+
+
+# ── Snapshot metrics (host_depth_metrics) ────────────────────────────────────
+
+async def _snapshot_readings(db: AsyncSession, rule, now: float, budgets: dict, default_budget: int,
+                             cache: dict) -> dict:
+    """{server: {dimension: Snap}} for a snapshot rule (None for a server
+    that cannot be judged now). Raises when the source cannot be read."""
+    if rule.metric == hdm.FS_DAYS_LEFT:
+        if "forecast" not in cache:
+            cache["forecast"] = await asyncio.to_thread(hdm.cached_fs_forecast, now)
+        return hdm.fs_days_left_readings(cache["forecast"], budgets, default_budget, now)
+    # host_auto_service_stopped
+    if "services" not in cache:
+        async with db.begin_nested():
+            cache["services"] = await hdm.load_service_snapshots(db)
+    latest, rows = cache["services"]
+    patterns = hdm.exclude_patterns(getattr(rule, "target", None))
+    candidates = hdm.stopped_candidates(rows, patterns)
+    codes = cache.setdefault("exit_codes", {})
+    missing = {p for p in candidates if p not in codes}
+    if missing:
+        found = await asyncio.to_thread(hdm.fetch_exit_codes, missing)
+        codes.update({p: found.get(p, (None, None)) for p in missing})
+    return hdm.auto_service_readings(latest, rows, codes, patterns=patterns, freshness=budgets,
+                                     default_fresh=default_budget, now=now)
+
+
+def _snapshot_condition(rule) -> dict:
+    """{metric, operator, threshold, reset_threshold}: the stored reset level,
+    else one day on the healthy side for the filesystem forecast."""
+    cond = dict(_rule_conditions(rule)[0])
+    if rule.metric == hdm.AUTO_SERVICE_STOPPED:
+        # A condition, not a level: a stopped service reads 1.
+        return {"metric": rule.metric, "operator": ">", "threshold": 0.0, "reset_threshold": None}
+    if cond.get("reset_threshold") is None and cond.get("operator") in ("<", "<=", "lt", "lte"):
+        cond["reset_threshold"] = float(cond["threshold"]) + 1.0
+    return cond
+
+
+def _snapshot_detail(rule, dim: str, snap) -> str:
+    noun = _dimension_noun(rule, dim) or ap.metric_noun(rule.metric)
+    if rule.metric == hdm.AUTO_SERVICE_STOPPED:
+        return f"Automatic service {dim} {snap.detail}".strip()
+    threshold = _float(rule.threshold)
+    limit = f" (limit {ap.format_threshold(rule.metric, threshold, rule.operator)})" if threshold is not None else ""
+    return f"{noun} {snap.detail}{limit}"
+
+
+async def _evaluate_snapshot(db: AsyncSession, rule, targets: list[str], readings: dict, opened: dict, *,
+                             now: float, allowed: bool, counts: dict, servers: dict, ips: dict, branding,
+                             overrides, server_groups: dict, parents: dict) -> None:
+    """Raise, continue or resolve each server/dimension of a snapshot rule.
+
+    The breach hold (min_duration) and clear hold (clear_duration) are kept in
+    service_metric_alert_state; an unknown reading keeps everything as it is.
+    A dimension that is no longer watched (an automatic service excluded,
+    uninstalled or no longer automatic in a current snapshot) is resolved
+    without a recovery notice."""
+    from app.services import service_metric_alert_service as smas
+    from app.services import alert_rule_overrides as ovr
+    from app.services.network_conditions import clear_hold_seconds
+    at = datetime.fromtimestamp(now, timezone.utc)
+    gone_when_absent = rule.metric == hdm.AUTO_SERVICE_STOPPED
+    gone: list[str] = []      # hold rows of dimensions no longer watched
+    # Every hold of this rule, read once (a server has a hundred automatic services).
+    holds = {r[0]: (smas._aware(r[1]), smas._aware(r[2])) for r in (await db.execute(text(
+        "SELECT asset_key, breach_since, clear_since FROM service_metric_alert_state"
+        " WHERE rule_id = :rid AND asset_key LIKE 'host:%'"), {"rid": str(rule.id)})).all()}
+    for sid in targets:
+        per = readings.get(sid)
+        dims = set(per or {}) | _dims_open(rule, sid, opened)
+        for dim in sorted(dims):
+            current = opened.get((sid, _dedupe(rule, dim)))
+            snap = (per or {}).get(dim)
+            if snap is None and per is not None and gone_when_absent:
+                snap = hdm.Snap(None, state=hdm.GONE)
+            key = f"host:{sid}:{dim}"
+            if snap is not None and snap.state == hdm.GONE:
+                if current is not None:
+                    await _resolve_unwatched(db, rule, sid, dim, current)
+                    counts["resolved"] += 1
+                if key in holds:
+                    gone.append(key)
+                continue
+            override = overrides.find(rule.id, server_id=sid, groups=server_groups.get(sid),
+                                      instance=dim) if overrides else None
+            e_rule = ovr.apply(rule, override) if override is not None else rule
+            condition = _snapshot_condition(e_rule)
+            value = snap.value if snap is not None else None
+            breach_since, clear_since = holds.get(key, (None, None))
+            if (current is None and breach_since is None
+                    and (value is None or not smas.cmp(value, condition["operator"], condition["threshold"]))):
+                continue      # healthy or unknown, nothing open, no hold running: nothing to do
+            d = smas.decide(value=value, condition=condition, open_incident=current is not None,
+                            breach_since=breach_since, clear_since=clear_since,
+                            hold_s=int(e_rule.min_duration or 0),
+                            clear_hold_s=clear_hold_seconds(getattr(e_rule, "clear_duration", None)),
+                            now=at)
+            if (d.breach_since, d.clear_since) != (breach_since, clear_since):
+                await smas._save_state(db, rule.id, key, d.breach_since, d.clear_since,
+                                       _rounded(value), at)
+            hostname = servers.get(sid, "server")
+            extra = {"data_state": "current", **(snap.context if snap is not None else {}),
+                     **({"override": override.summary()} if override else {})}
+            if d.action == "raise":
+                await _apply_state(db, e_rule, sid, hostname, dim, True, value,
+                                   _snapshot_detail(e_rule, dim, snap), allowed=allowed, counts=counts,
+                                   opened=None, extra=extra, ip_address=ips.get(sid, ""),
+                                   branding=branding, now=now, suppressed=parents.get(sid))
+            elif d.action == "resolve":
+                await _apply_state(db, e_rule, sid, hostname, dim, False, value,
+                                   _snapshot_detail(e_rule, dim, snap), allowed=allowed, counts=counts,
+                                   opened=current, ip_address=ips.get(sid, ""), branding=branding,
+                                   now=now)
+            elif current is not None:
+                if value is None:
+                    await _stamp_state(db, current.id, {"data_state": (snap.state if snap else "no_data")})
+                elif d.clear_since is not None:
+                    await _stamp_state(db, current.id, {"data_state": "pending_clear", "value": _rounded(value),
+                                       "cleared_seconds": round((at - d.clear_since).total_seconds())})
+                else:
+                    # Still breaching: continue (and send a trigger that waited).
+                    await _apply_state(db, e_rule, sid, hostname, dim, True, value,
+                                       _snapshot_detail(e_rule, dim, snap), allowed=allowed,
+                                       counts=counts, opened=current, extra=extra,
+                                       ip_address=ips.get(sid, ""), branding=branding, now=now,
+                                       suppressed=parents.get(sid))
+            await db.commit()
+    if gone:
+        await db.execute(text("DELETE FROM service_metric_alert_state WHERE rule_id = :rid"
+                              " AND asset_key = ANY(CAST(:keys AS text[]))"),
+                         {"rid": str(rule.id), "keys": gone})
+        await db.commit()
+
+
+async def _resolve_unwatched(db: AsyncSession, rule, sid: str, dim: str, current) -> None:
+    """Close an incident the rule no longer watches, without a recovery notice
+    (it cannot say the condition cleared)."""
+    from app.services import alert_workflow as wf
+    note = f"Rule “{rule.name}” no longer watches {dim} on this server"
+    await db.execute(text(
+        "UPDATE alerts SET status = 'resolved', resolved_at = NOW(),"
+        " metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :id"
+        " AND status IN ('active', 'acknowledged')"),
+        {"id": current.id, "m": json.dumps({"resolved_by": "not_watched", "resolution_note": note})})
+    await wf.record_event(db, current.id, "resolved", source="rule_scope", reason=note,
+                          old_status=current.status, new_status="resolved",
+                          detail={"rule_id": str(rule.id), "server_id": sid, "dimension": dim})
 
 
 async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
@@ -1211,6 +1519,7 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     now = datetime.now(timezone.utc).timestamp() if now is None else now
 
     history_cache: dict[tuple[str, int], dict | None] = {}
+    snapshot_cache: dict = {}
     lifecycle = None
     signals: dict | None = None
     since = 0.0
@@ -1218,6 +1527,13 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     from app.services import alert_rule_exclusions
     from app.services import alert_rule_exclusions as rx
     excluded = await alert_rule_exclusions.load(db)
+    # Maintenance windows (alerting plan 2.7): servers in maintenance now are
+    # not judged at all. Their open incidents stay open, unchanged and quiet;
+    # the first pass after the window judges them again.
+    from app.services import maintenance_windows
+    maintained = await maintenance_windows.active_server_ids(db)
+    # Device -> server dependencies (G-13): servers behind an unhealthy parent.
+    parents = await _suppressing_parents(db)
     scoped_servers: dict | None = None
     # Per-server overrides (migrate-193), once per pass, with server group membership.
     from app.services import alert_rule_overrides as ovr
@@ -1241,6 +1557,9 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         if excluded:
             # A shared rule disabled for single servers (migrate-187) skips them.
             targets = [sid for sid in targets if not excluded.server(rule.id, sid)]
+        if maintained and not sa.is_availability_rule(rule):
+            # Availability rules read maintenance through their own signals.
+            targets = [sid for sid in targets if sid not in maintained]
 
         opened = await _open_incidents(db, rule)
 
@@ -1249,11 +1568,12 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 if signals is None:
                     signals = await sa.load_signals(db)
                     since = await sa.paging_since(db)
-                maintained = [s.server_id for s in signals.values() if s.ping == "maintenance"]
-                if maintained:
+                in_maintenance = [s.server_id for s in signals.values()
+                                  if s.ping == "maintenance" or s.maintenance]
+                if in_maintenance:
                     await db.execute(text("""UPDATE server_lifecycle_events SET maintenance_suppressed=TRUE
                         WHERE server_id=ANY(CAST(:ids AS uuid[])) AND event_time>=:since"""),
-                        {"ids":maintained,"since":datetime.fromtimestamp(now-900,timezone.utc)})
+                        {"ids":in_maintenance,"since":datetime.fromtimestamp(now-900,timezone.utc)})
                 lifecycle = await sev.recent_lifecycle(db, now, lifecycle_window)
             hold_s = sev.lifecycle_hold_seconds(getattr(rule, "clear_duration", None))
             for sid in targets:
@@ -1276,6 +1596,19 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
             await db.commit()
             continue
 
+        if rule.metric in SNAPSHOT_METRICS:
+            try:
+                readings = await _snapshot_readings(db, rule, now, budgets, default_budget, snapshot_cache)
+            except Exception:
+                logger.exception("host rule %s readings unavailable; preserving alerts", rule.id)
+                await db.rollback()
+                continue
+            await _evaluate_snapshot(db, rule, targets, readings, opened, now=now, allowed=allowed,
+                                     counts=counts, servers=servers, ips=ips, branding=branding,
+                                     overrides=overrides, server_groups=server_groups, parents=parents)
+            await db.commit()
+            continue
+
         if rule.metric not in THRESHOLD_METRICS:
             for sid in targets:
                 res = await _current_value(db, rule, sid)
@@ -1285,7 +1618,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 await _apply_state(db, rule, sid, servers.get(sid, "server"), None,
                                    breach, value, detail, allowed=allowed, counts=counts,
                                    opened=opened.get((sid, _dedupe(rule, None))),
-                                   ip_address=ips.get(sid, ""), branding=branding)
+                                   ip_address=ips.get(sid, ""), branding=branding,
+                                   now=now, suppressed=parents.get(sid))
             await db.commit()
             continue
 
@@ -1308,8 +1642,17 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         cache_key = (rule.metric, lookback)
         if cache_key not in history_cache:
             try:
-                history_cache[cache_key] = await asyncio.to_thread(
-                    fetch_host_history, rule.metric, now - lookback, now)
+                if rule.metric == hdm.CLOCK_SKEW:
+                    async with db.begin_nested():
+                        history_cache[cache_key] = await hdm.fetch_clock_skew_history(db, now - lookback, now)
+                else:
+                    history_cache[cache_key] = await asyncio.to_thread(
+                        fetch_host_history, rule.metric, now - lookback, now)
+                if rule.metric == hdm.DISK_LATENCY and history_cache[cache_key]:
+                    # The Windows agent's disk times are whole seconds: not usable.
+                    windows = await hdm.windows_server_ids(db)
+                    history_cache[cache_key] = {sid: dims for sid, dims in history_cache[cache_key].items()
+                                                if sid not in windows}
             except Exception:
                 logger.exception("host rule %s history unavailable; preserving alerts", rule.id)
                 history_cache[cache_key] = None
@@ -1332,6 +1675,10 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 dims = sorted(set(series_by_dim) | {
                     d.split(":mount:", 1)[1] for (osid, d) in opened
                     if osid == sid and ":mount:" in d})
+            elif rule.metric in hdm.DIMENSION_KEYS:
+                # Disks / NICs with samples, plus any with an open incident
+                # whose samples stopped (stamped unknown, never resolved).
+                dims = sorted(set(series_by_dim) | _dims_open(rule, sid, opened))
             else:
                 dims = [None]
             for dim in dims:
@@ -1372,7 +1719,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                                    opened=current,
                                    extra={"held_seconds": round(result.held_seconds),
                                           **({"override": override.summary()} if override else {})},
-                                   ip_address=ips.get(sid, ""), branding=branding)
+                                   ip_address=ips.get(sid, ""), branding=branding,
+                                   now=now, suppressed=parents.get(sid))
         await db.commit()
 
     if counts["raised"] or counts["resolved"]:

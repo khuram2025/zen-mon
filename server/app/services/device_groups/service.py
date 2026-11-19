@@ -109,7 +109,7 @@ async def used_by(db: AsyncSession, gid: str) -> dict:
     return {
         "alert_rules": await rows("SELECT id::text, name, enabled FROM alert_rules WHERE group_id = CAST(:g AS uuid) ORDER BY name"),
         "maintenance": await rows("""SELECT id::text, reason, starts_at, ends_at FROM device_maintenance
-                                     WHERE scope_type = 'group' AND scope_group_id = CAST(:g AS uuid) ORDER BY starts_at DESC"""),
+                                     WHERE scope_type IN ('group', 'server_group') AND scope_group_id = CAST(:g AS uuid) ORDER BY starts_at DESC"""),
         "sensor_assignments": await rows("""SELECT a.sensor_id::text AS id, s.name FROM sensor_assignments a
                                             LEFT JOIN sensors s ON s.id = a.sensor_id
                                             WHERE a.target_type = 'group' AND a.target_id = CAST(:g AS uuid)"""),

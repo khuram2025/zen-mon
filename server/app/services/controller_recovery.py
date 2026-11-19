@@ -130,6 +130,32 @@ async def recovery_loop() -> None:
             logger.exception("Controller monitoring readiness lease failed")
 
 
+def failed_message(state: Recovery) -> str:
+    """The stored alert text: what failed, its effect, and what to check."""
+    return (f"Monitoring has not recovered within {HARD_LIMIT_S // 60} minutes of a "
+            f"{_reason(state)}: alerts for silent agents and missing services or processes "
+            "are on hold. Check that the ZenPlus API and poller services are running.")
+
+
+def failed_body(state: Recovery) -> str:
+    """The notification text for an overdue recovery."""
+    if state.ready_at is None:
+        what = "the monitoring services did not report ready"
+    else:
+        what = "the monitoring services stopped confirming they are running"
+    return (f"ZenPlus monitoring has not recovered within {HARD_LIMIT_S // 60} minutes of a "
+            f"{_reason(state)}: {what}. Until it recovers, alerts that depend on missing data "
+            "(silent agents, stopped services or processes) are held, so outages there may go "
+            "unreported; targets without fresh observations stay unknown. Check that the "
+            "ZenPlus API and poller services are running on the controller, then the network "
+            "path from the agents and sensors.")
+
+
+def _reason(state: Recovery) -> str:
+    reason = (state.reason or "controller restart").strip()
+    return reason if reason.startswith(("planned", "controller")) else "controller restart"
+
+
 async def sync_incident(db, state: Recovery, now: float) -> None:
     """One durable controller incident instead of releasing a blind fleet storm.
 
@@ -147,9 +173,9 @@ monitor is still required while this controller process cannot execute at all.
     failed = state.overdue(now)
     if failed and row is None:
         alert_id = (await db.execute(text("""INSERT INTO alerts(status,severity,message,metadata)
-            VALUES ('active','critical','ZenPlus monitoring recovery exceeded its deadline',
-                    CAST(:meta AS jsonb)) RETURNING id"""),
-            {"meta": json.dumps({"source": "controller_monitoring", "dedupe": "controller_monitoring", "notified": False})})).scalar()
+            VALUES ('active','critical',:message,CAST(:meta AS jsonb)) RETURNING id"""),
+            {"message": failed_message(state),
+             "meta": json.dumps({"source": "controller_monitoring", "dedupe": "controller_monitoring", "notified": False})})).scalar()
         await alert_funnel.stamp_priority(db, alert_id, "P1", "critical")
     elif row:
         alert_id = row.id
@@ -165,17 +191,18 @@ monitor is still required while this controller process cannot execute at all.
     await db.commit()
     if not send:
         return
-    body = ("ZenPlus has not completed monitoring recovery within 30 minutes. "
-            "Targets without fresh observations remain unknown. Check controller services and connectivity."
-            if failed else "ZenPlus monitoring is ready and the agent reconnection window has completed.")
+    body = (failed_body(state) if failed else
+            "ZenPlus monitoring is ready again: the agents had their reconnection window, and alerts "
+            "for silent agents and missing services or processes are evaluated normally.")
     await dispatch_to_channels(db, [], {
         "alert_id": str(alert_id), "delivery_event": "trigger" if failed else "recovery",
         "is_recovery": not failed, "resolved": not failed,
         "subject": "[CRITICAL] ZenPlus monitoring interrupted" if failed else "Resolved: ZenPlus monitoring recovered",
         "rule_name": "ZenPlus monitoring", "hostname": "ZenPlus controller", "severity": "critical",
         "status": "ALERT" if failed else "RESOLVED", "body": body,
-        "message": "ZenPlus monitoring interrupted: recovery deadline exceeded. Check controller health."
-                   if failed else "ZenPlus monitoring recovered: agent reconnection window completed.",
+        "message": ("ZenPlus CRITICAL - monitoring not recovered 30 min after a restart: "
+                    "missing-data alerts are on hold. Check the ZenPlus services."
+                    if failed else "ZenPlus resolved - monitoring recovered; missing-data alerts are active again."),
         "triggered_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         **alert_funnel.notification_fields("critical", "P1", trigger=failed),
     })

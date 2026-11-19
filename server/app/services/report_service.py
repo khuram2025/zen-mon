@@ -2140,22 +2140,20 @@ async def _fetch_device_maintenance_windows(
 ) -> dict[str, list[tuple[datetime, datetime]]]:
     """device_id -> [(start, end), ...] maintenance intervals overlapping the
     report range, clamped to it. Naive-UTC datetimes to match ClickHouse rows.
+    A recurring window gives one interval per occurrence (migrate-207).
     Tolerates the table not existing yet (pre-migrate-053 appliances)."""
+    from app.services import maintenance_windows as mw
     device_filter = "AND d.id = ANY(CAST(:device_ids AS uuid[]))" if device_ids is not None else ""
     try:
         rows = (await db.execute(
             text(f"""
                 SELECT d.id AS device_id,
-                       GREATEST(m.starts_at, :start_ts) AS s,
-                       LEAST(m.ends_at, :end_ts) AS e
+                       GREATEST(o.occ_start, :start_ts) AS s,
+                       LEAST(o.occ_end, :end_ts) AS e
                 FROM device_maintenance m
-                JOIN devices d ON (
-                       (m.scope_type = 'device' AND m.scope_device_id = d.id)
-                    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
-                    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
-                    OR (m.scope_type = 'all')
-                )
-                WHERE m.starts_at < :end_ts AND m.ends_at > :start_ts
+                {mw.occurrences_join(":start_ts", ":end_ts")}
+                JOIN devices d ON {mw.COVERS_DEVICE_SQL}
+                WHERE o.occ_start < :end_ts AND o.occ_end > :start_ts
                 {device_filter}
             """),
             {

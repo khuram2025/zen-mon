@@ -76,6 +76,17 @@ _OPS = {
 }
 
 
+# What an assertion wanted, in words: failures read "status 503, expected
+# 200", never the operator key "status 503 eq 200".
+_EXPECT = {"eq": "expected", "neq": "expected not", "lt": "expected below",
+           "lte": "expected at most", "gt": "expected above", "gte": "expected at least",
+           "contains": "expected to contain"}
+
+
+def _expected(op: str, want, unit: str = "") -> str:
+    return f"{_EXPECT.get(op, 'expected ' + str(op))} {want}{unit}"
+
+
 def _substitute(template: str, variables: dict[str, Any]) -> str:
     def repl(m: re.Match) -> str:
         return str(variables.get(m.group(1), m.group(0)))
@@ -109,10 +120,10 @@ def _check_assertion(a: dict, *, status_code: int, body: str,
     want = a.get("value")
     if typ == "status_code":
         ok = _OPS.get(op, _OPS["eq"])(status_code, int(want or 200))
-        return ok, f"status {status_code} {op} {want}"
+        return ok, f"status {status_code}, {_expected(op, want if want not in (None, '') else 200)}"
     if typ == "latency_ms":
         ok = _OPS.get(op, _OPS["lt"])(latency_ms, float(want or 0))
-        return ok, f"latency {latency_ms:.0f}ms {op} {want}ms"
+        return ok, f"latency {latency_ms:.0f} ms, {_expected(op, want, ' ms')}"
     if typ == "body_contains":
         ok = str(want or "") in body
         return ok, f"body contains {str(want)[:40]!r}"
@@ -131,7 +142,7 @@ def _check_assertion(a: dict, *, status_code: int, body: str,
         except (TypeError, ValueError):
             cmp_val = str(val)
         ok = _OPS.get(op, _OPS["eq"])(cmp_val, want)
-        return ok, f"json {a.get('path')}={str(val)[:40]} {op} {want}"
+        return ok, f"json {a.get('path')} is {str(val)[:40]}, {_expected(op, want)}"
     return False, f"unknown assertion type {typ!r}"
 
 

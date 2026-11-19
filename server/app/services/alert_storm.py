@@ -57,12 +57,15 @@ SETTINGS_KEY = "alert_storm"
 REASON_STORM = "storm"
 SCOPE_CHOICES: tuple[str, ...] = ("all", "site", "device_group", "scope_tag", "appliance")
 FAMILY_CHOICES: tuple[str, ...] = ("reachability", "reboot", "service", "interface", "latency",
-                                   "hardware", "network", "process", "trap", "syslog")
+                                   "hardware", "network", "process", "trap", "syslog", "configuration")
+# Latency/loss and service checks are default families too (1.25.18): on the
+# audited appliances the bursts were device down plus the latency and loss rules
+# firing on the same devices, and service checks failing behind them.
 DEFAULT_SETTINGS: dict[str, Any] = {
     "enabled": False,
     "threshold": 5,
     "window_minutes": 5,
-    "families": ["reachability", "reboot"],
+    "families": ["reachability", "reboot", "latency", "service"],
     "scope": "all",
     "update_minutes": 15,
     "hold_escalations": True,
@@ -86,12 +89,13 @@ FAMILY_PHRASES = {
     "process": ("servers", "reported stopped services or processes"),
     "trap": ("devices", "sent alerting SNMP traps"),
     "syslog": ("devices", "logged alerting syslog messages"),
+    "configuration": ("devices", "raised configuration alerts (changes, failed backups, compliance)"),
 }
 FAMILY_TITLES = {
     "reachability": "Devices down", "reboot": "Reboots and restarts", "service": "Service checks failing",
     "interface": "Interface alerts", "latency": "Latency and packet loss", "hardware": "Hardware alerts",
     "network": "Routing, VPN and HA", "process": "Server services and processes",
-    "trap": "SNMP traps", "syslog": "Syslog alerts",
+    "trap": "SNMP traps", "syslog": "Syslog alerts", "configuration": "Configuration alerts",
 }
 
 
@@ -497,6 +501,32 @@ def _names(rows, limit: int = 3) -> str:
     return ", ".join(names) + (f" and {more} more" if more > 0 else "")
 
 
+# When at least this share of all monitored devices is unreachable in one storm,
+# the cause is more likely the appliance's own network path than each device.
+PATH_HINT_SHARE = 0.5
+PATH_HINT_MIN_DEVICES = 10
+
+
+async def _monitoring_path_hint(db: AsyncSession, storm, affected: int) -> str:
+    """One sentence for a reachability storm covering most of the monitored
+    devices (on a customer appliance 30 of 34 devices went down and came back
+    together for hours: one fault upstream, not thirty)."""
+    # Counted across all assets (scope 'all' stores no scope label).
+    if storm.family != "reachability" or getattr(storm, "scope_label", None):
+        return ""
+    try:
+        async with db.begin_nested():
+            total = (await db.execute(text(
+                "SELECT count(*) FROM devices WHERE COALESCE(ping_enabled, true)"
+                " AND COALESCE(status, '') <> 'disabled'"))).scalar() or 0
+    except Exception:
+        return ""
+    if total < PATH_HINT_MIN_DEVICES or affected < total * PATH_HINT_SHARE:
+        return ""
+    return (f"{affected} of {total} monitored devices are affected: check the ZenPlus appliance's own "
+            "network path (its uplink, gateway or a firewall in between) before the devices themselves.")
+
+
 async def storm_context(db: AsyncSession, d, storm, members: list, items: list, *, final: bool,
                         first: bool) -> dict:
     from app.api.v1.alert_engine import _dashboard_url
@@ -530,6 +560,9 @@ async def storm_context(db: AsyncSession, d, storm, members: list, items: list, 
         reason_line = (f"More than {storm.threshold} {noun} {verb} within {storm.window_minutes} min, so they are "
                        "reported together. Individual notifications for this storm are paused; updates follow "
                        "while it continues.")
+        hint = await _monitoring_path_hint(db, storm, len(down))
+        if hint:
+            reason_line = f"{reason_line} {hint}"
     else:
         new = len(new_ids)
         head = (f"Alert storm update{where}: {total} {noun} affected since {since}"

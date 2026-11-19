@@ -86,6 +86,9 @@ DEFAULT_HEARTBEAT_S = 30
 DEFAULT_CONFIG_POLL_S = 60
 DEFAULT_UPLOAD_S = 60
 STALE_AFTER_HEARTBEATS = 3
+# Advertised by Linux agents that read systemd services (ZenPlus_Agent
+# internal/agent/platform_capabilities.go).
+SYSTEMD_SERVICES_CAPABILITY = "systemd_services_v1"
 HOST_RESULTS_LEDGER_RETENTION_DAYS = 7
 HOST_RESULTS_LEDGER_CLEANUP_MODULUS = 256
 # Keep the application deadline comfortably below the current Windows agent's
@@ -356,6 +359,9 @@ async def _config_etag_for_agent(agent_row: dict, db: AsyncSession) -> tuple[str
         event_log_policy.CONFIG_REVISION,
         str("event_details_v1" in _capability_list(agent_row.get("capabilities"))),
     ]
+    if SYSTEMD_SERVICES_CAPABILITY in _capability_list(agent_row.get("capabilities")):
+        # Appended only when present, so other agents keep their ETag.
+        parts.append(SYSTEMD_SERVICES_CAPABILITY)
     etag = _sha256("|".join(parts))
     return etag, dict(policy)
 
@@ -1093,6 +1099,12 @@ async def get_config(
     flags["event_details"] = detailed and flags.get("event_details", True)
     if supports_details and agent.get("platform") != "windows":
         flags["event_log"] = flags["collect_event_log"] = False
+    if agent.get("platform") == "linux" and SYSTEMD_SERVICES_CAPABILITY in _capability_list(agent.get("capabilities")):
+        # Linux agents that read systemd collect services unless the policy
+        # turns them off; their local install default had them off because
+        # older Linux agents could not read services.
+        if "service_state" not in flags and "collect_service_state" not in flags:
+            flags["service_state"] = True
     return AgentConfigResponse(
         config_version=policy.get("config_version") or 1,
         policy_id=str(policy["id"]),

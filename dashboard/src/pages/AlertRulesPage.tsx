@@ -17,23 +17,48 @@ import { roleLabel, ruleTakesOverrides } from '@/components/alerts/thresholdMode
 import { exclusionBadge } from '@/components/alerts/exclusionModel'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
-import { downRuleCoversServers, isServerMetric, serverMetricLabel, serverRuleCondition, serverRuleCopy, serverScopeLabel } from '@/components/forms/serverAlertRule'
+import { downRuleCoversServers, isServerMetric, serverRuleCopy, serverScopeLabel } from '@/components/forms/serverAlertRule'
 import { groupsApi } from '@/pages/groups/api'
 import { effectivePriority, policyForPriority, ruleEscalationSummary, ruleRouteSource } from '@/features/escalation/model'
 import { usePolicies } from '@/features/escalation/api'
 import type { EscalationPolicy } from '@/features/escalation/types'
 import { PriorityBadge } from '@/features/escalation/ui'
-import { APM_EVENT_TRIGGERS, apmEventScope, isApmEvent } from '@/components/forms/apmEventTriggers'
+import { apmEventScope, isApmEvent } from '@/components/forms/apmEventTriggers'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
+import {
+  RULE_SOURCES, closesText, metricSpec, routingNote, ruleSource, templateIndex, timersText, triggerSummary,
+  type RouteSourceLike, type RuleSource,
+} from '@/components/forms/alertRuleCatalog'
+import { eventExpiryFromApi, expiryWindowLabel } from '@/features/escalation/eventExpiry'
+import { RecommendedRulesPanel } from '@/pages/alertRules/RecommendedRulesPanel'
 
-const TRIGGER_LABELS: Record<string, string> = {
-  down: 'Goes down',
-  up: 'Comes up',
-  degraded: 'Degraded',
-  any: 'Any change',
-}
-
-function scopeLabel(r: any, serverNames: Map<string, string>, groupNames: Map<string, string>): string {
+function scopeLabel(r: any, serverNames: Map<string, string>, groupNames: Map<string, string>, channelNames?: Map<string, string>): string {
   if (isApmEvent(r.metric)) return r.target ? (r.metric === 'apm_synthetic_down' ? 'One scenario' : 'One SLO') : apmEventScope(r.metric).all
+  const family = ruleSource(r)
+  // The families added in the alerting audit: their scope is not the device one.
+  if (family === 'appliance') {
+    const kind = metricSpec(r.metric)?.target
+    if (kind && r.target) return kind === 'channel' ? `Channel ${channelNames?.get(r.target) || r.target}` : `Sensor ${r.target.length > 12 ? 'one sensor' : r.target}`
+    return 'ZenPlus appliance'
+  }
+  if (family === 'virtualization') {
+    if (r.target) return 'One virtualisation source'
+    if (r.device_id) return 'Linked device'
+    if (r.scope_tag) return `#${r.scope_tag}`
+    return 'All sources'
+  }
+  if (family === 'netpath') return r.target ? `Probe ${r.target}` : 'All probes'
+  if (r.metric === 'agent_no_metrics') {
+    const group = r.group_id ? groupNames.get(r.group_id) || 'a group' : ''
+    return group ? `Servers in ${group}` : r.scope_tag ? `Servers with tag ${r.scope_tag}` : 'All agent servers'
+  }
+  if (r.metric === 'service_tls_days' || r.metric === 'service_response_ms') {
+    if (r.service_check_id) return 'Service'
+    if (r.service_check_group_id) return 'Svc group'
+    if (r.device_id) return 'Linked device'
+    if (r.scope_tag) return `#${r.scope_tag}`
+    return 'All checks'
+  }
   // One server, all servers, or the servers with a tag and/or in a device group.
   if (isServerMetric(r.metric)) {
     return serverScopeLabel(r, { server: r.server_id ? serverNames.get(r.server_id) : null, group: r.group_id ? groupNames.get(r.group_id) : null })
@@ -56,6 +81,34 @@ function scopeLabel(r: any, serverNames: Map<string, string>, groupNames: Map<st
   // An unscoped Device Down rule also pages for agent servers (server_availability.is_down_rule).
   if (downRuleCoversServers(r)) return 'All + servers'
   return 'All'
+}
+
+/** The escalation route the server resolves for a rule; null while the policies are unknown. */
+function routeOf(rule: any, policies: EscalationPolicy[] | null): RouteSourceLike | null {
+  if (!policies) return null
+  const priority = effectivePriority(rule.priority, rule.severity)
+  const tiers = Array.isArray(rule.escalation_levels) ? rule.escalation_levels.length : 0
+  const policy = rule.escalation_policy_id ? policies.find((p) => p.id === rule.escalation_policy_id) ?? null : null
+  return ruleRouteSource({ policyId: rule.escalation_policy_id, policyEnabled: policy?.enabled, tiers, defaultPolicy: policyForPriority(policies, priority) })
+}
+
+/**
+ * Who the rule's alerts reach: its channels (named), or only an escalation route, or nobody. A rule with no
+ * channel, no policy, no legacy tiers and no default policy for its priority raises alerts nobody is told about.
+ */
+function RuleNotifies({ rule, policies, channelNames }: { rule: any; policies: EscalationPolicy[] | null; channelNames: Map<string, string> }) {
+  const ids: string[] = Array.isArray(rule.notify_channels) ? rule.notify_channels : []
+  const note = routingNote(ids.length, routeOf(rule, policies))
+  const names = ids.map((id) => channelNames.get(id)).filter(Boolean) as string[]
+  return (
+    <div className="text-xs">
+      <div className={note.tone === 'danger' ? 'font-medium text-danger' : note.tone === 'ok' ? 'text-text' : 'text-muted'}
+        title={names.length ? names.join(', ') : undefined}>
+        {note.tone === 'ok' && names.length ? names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2}` : '') : note.text}
+      </div>
+      <RuleEscalationLine rule={rule} policies={policies} />
+    </div>
+  )
 }
 
 /**
@@ -96,6 +149,8 @@ export function AlertRulesPage() {
   const [exclusionsOf, setExclusionsOf] = useState<any>(null)
   // Per-device/server/group threshold, hold and priority changes (alert_rule_overrides).
   const [overridesOf, setOverridesOf] = useState<any>(null)
+  const [tab, setTab] = useState<'rules' | 'recommended'>('rules')
+  const [family, setFamily] = useState<'all' | RuleSource>('all')
 
   const policiesQ = usePolicies()
   const { data: rules, isError, error } = useQuery<any[]>({
@@ -121,6 +176,52 @@ export function AlertRulesPage() {
   const hasGroupScoped = (rules || []).some((r) => isServerMetric(r.metric) && r.group_id)
   const { data: groupList } = useQuery({ queryKey: ['groups-tree'], queryFn: groupsApi.list, enabled: hasGroupScoped, retry: false, staleTime: 60_000 })
   const groupNames = useMemo(() => new Map<string, string>((groupList || []).map((g) => [g.id, g.name])), [groupList])
+  // Names for the agent metric gap rules scoped to a group.
+  const hasGapGroup = (rules || []).some((r) => r.metric === 'agent_no_metrics' && r.group_id)
+  const { data: gapGroups } = useQuery({ queryKey: ['groups-tree'], queryFn: groupsApi.list, enabled: hasGapGroup && !hasGroupScoped, retry: false, staleTime: 60_000 })
+  const allGroupNames = useMemo(() => new Map<string, string>([...(gapGroups || []).map((g) => [g.id, g.name] as [string, string]), ...groupNames]), [gapGroups, groupNames])
+  // Channel names for the Notifies column.
+  const { data: channelsResp } = useQuery<any>({
+    queryKey: ['channels', 'list-min'],
+    queryFn: async () => (await api.get('/settings/channels')).data,
+    enabled: (rules || []).length > 0,
+    staleTime: 60_000,
+  })
+  const channelNames = useMemo(() => {
+    const list: any[] = Array.isArray(channelsResp) ? channelsResp : channelsResp?.data || []
+    return new Map<string, string>(list.map((c) => [String(c.id), c.name]))
+  }, [channelsResp])
+  // Template metric names and state labels for template rules ("IPsec Tunnels: Status is Down").
+  const hasTemplateRules = (rules || []).some((r) => String(r.metric || '').startsWith('tpl_'))
+  const { data: templatesResp } = useQuery<any>({
+    queryKey: ['snmp-profiles'],
+    queryFn: async () => (await api.get('/snmp/profiles')).data,
+    enabled: hasTemplateRules,
+    staleTime: 60_000,
+  })
+  const tplIndex = useMemo(() => templateIndex(Array.isArray(templatesResp) ? templatesResp : templatesResp?.data || []), [templatesResp])
+  // Event alerts (trap, syslog, Device Tracker events) close after the event expiry window.
+  const { data: expiryRaw } = useQuery<any>({
+    queryKey: ['alerts', 'event-expiry'],
+    queryFn: async () => (await api.get('/alerts/event-expiry')).data,
+    enabled: (rules || []).some((r) => ['trap', 'syslog'].includes(r.metric) || String(r.metric || '').startsWith('udt_')),
+    staleTime: 60_000,
+    retry: false,
+  })
+  const expiry = useMemo(() => {
+    const p = eventExpiryFromApi(expiryRaw)
+    return { enabled: p.enabled, label: expiryWindowLabel(p.hours) }
+  }, [expiryRaw])
+  const counts = useMemo(() => {
+    const out = new Map<RuleSource, number>()
+    for (const r of rules || []) out.set(ruleSource(r), (out.get(ruleSource(r)) || 0) + 1)
+    return out
+  }, [rules])
+  const shown = useMemo(() => (rules || []).filter((r) => family === 'all' || ruleSource(r) === family), [rules, family])
+  const openRule = (id: string) => {
+    const r = (rules || []).find((x) => x.id === id)
+    if (r) { setEditing(r); setFormOpen(true) } else toast.error('Rule not found', 'Reload the page and try again.')
+  }
 
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/alert-rules/${id}`),
@@ -196,9 +297,36 @@ export function AlertRulesPage() {
         </Card>
       )}
 
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex rounded-lg border border-border bg-surface2 p-0.5 text-xs" role="tablist" aria-label="Alert rules views">
+          {([['rules', `Rules${rules ? ` (${rules.length})` : ''}`], ['recommended', 'Recommended']] as const).map(([id, label]) => (
+            <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}
+              className={`rounded-md px-3 py-1.5 font-medium ${tab === id ? 'bg-primary text-white' : 'text-muted hover:text-text'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {tab === 'rules' && (
+          <div className="w-60">
+            <Select value={family} onValueChange={(v) => setFamily(v as 'all' | RuleSource)}>
+              <SelectTrigger aria-label="Rule family"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All families</SelectItem>
+                {RULE_SOURCES.map((f) => (
+                  <SelectItem key={f.value} value={f.value}>{f.label} ({counts.get(f.value) || 0})</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+      </div>
+
+      {tab === 'recommended' ? (
+        <Card><CardContent className="pt-4"><RecommendedRulesPanel onOpenRule={openRule} /></CardContent></Card>
+      ) : (
       <Card>
         <CardContent className="pt-4">
-          <div className="overflow-hidden rounded-md border border-border">
+          <div className="overflow-x-auto rounded-md border border-border">
             <Table>
               <THead className="bg-surface2/50">
                 <Tr>
@@ -207,20 +335,24 @@ export function AlertRulesPage() {
                   <Th>Trigger</Th>
                   <Th>Scope</Th>
                   <Th>Severity</Th>
-                  <Th>Reset</Th>
-                  <Th>Created</Th>
+                  <Th>Timers and reset</Th>
+                  <Th>Notifies</Th>
+                  <Th>Last fired</Th>
                   <Th className="w-40 text-right">Actions</Th>
                 </Tr>
               </THead>
               <TBody>
-                {(rules || []).map((r) => (
+                {shown.map((r) => {
+                  const trig = isNetflowMetric(r.metric) ? null : triggerSummary(r, tplIndex)
+                  return (
                   <Tr key={r.id}>
                     <Td>
                       <Switch checked={r.enabled} onCheckedChange={() => toggle.mutate(r.id)} aria-label={`Rule ${r.name} enabled`} />
                     </Td>
                     <Td>
-                      <div className="font-medium">{r.name}</div>
+                      <div className="font-medium" title={r.created_at ? `Created ${relativeTime(r.created_at)}` : undefined}>{r.name}</div>
                       {r.description && <div className="max-w-xs truncate text-xs text-muted">{r.description}</div>}
+                      {r.pack_key && <div className="text-2xs text-muted">{String(r.pack_key).startsWith('default:') ? 'Recommended default rule' : 'From a template recommendation'}</div>}
                     </Td>
                     <Td className="text-xs">
                       {isNetflowMetric(r.metric) ? (
@@ -228,31 +360,16 @@ export function AlertRulesPage() {
                           <div className="font-medium text-text">{NETFLOW_METRIC_BY_KEY[r.metric as NetflowMetric].label}</div>
                           <div className="max-w-[16rem] text-2xs text-muted">{summarizeNetflowForm(formFromRule(r))}</div>
                         </>
-                      ) : isApmEvent(r.metric) ? (
-                        <div className="space-y-0.5">
-                          <div className="font-medium text-text">{APM_EVENT_TRIGGERS.find(x => x.value === r.metric)?.label}</div>
-                          <div className="text-2xs text-muted">{r.metric === 'apm_synthetic_down' ? 'After configured retries' : 'Multi-window error-budget burn'}</div>
-                        </div>
-                      ) : isServerMetric(r.metric) ? (
-                        <>
-                          <div className="font-medium text-text">{serverMetricLabel(r.metric)}</div>
-                          <div className="max-w-[16rem] text-2xs text-muted">{serverRuleCondition(r)}</div>
-                        </>
                       ) : (
+                        // Every other family in words with its unit (alertRuleCatalog.triggerSummary), never a raw key.
                         <>
-                          <div className="font-medium text-text">{TRIGGER_LABELS[r.trigger_on] || r.trigger_on || '—'}</div>
-                          <div className="font-mono text-2xs text-muted">
-                            {r.metric === 'trap'
-                              ? r.trap_oid ? `trap ${r.trap_oid}` : 'any trap'
-                              : Array.isArray(r.conditions) && r.conditions.length > 1
-                              ? `${r.conditions.length} conditions (${r.condition_logic})`
-                              : r.metric}
-                          </div>
+                          <div className="font-medium text-text">{trig!.title}</div>
+                          <div className="max-w-[18rem] text-2xs text-muted">{trig!.detail}</div>
                         </>
                       )}
                     </Td>
                     <Td>
-                      <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames, groupNames)}</Badge>
+                      <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames, allGroupNames, channelNames)}</Badge>
                       {(r.profile_id || r.if_role) && (
                         <div className="mt-1 text-2xs text-muted" title={r.pack_key ? 'Accepted from a template’s recommended rules' : undefined}>
                           {[r.profile_id ? 'Template devices' : null, r.if_role ? `${roleLabel(r.if_role)} interfaces` : null].filter(Boolean).join(' · ')}
@@ -277,14 +394,16 @@ export function AlertRulesPage() {
                       </div>
                     </Td>
                     <Td className="text-xs text-muted">
-                      {['trap', 'syslog'].includes(r.metric) ? <span>Manual resolution</span> : r.recovery_alert ? (
-                        <span className="text-emerald-600">Auto + notify</span>
-                      ) : (
-                        <span>Silent</span>
-                      )}
-                      <RuleEscalationLine rule={r} policies={policiesQ.data ?? null} />
+                      <div className="text-text">{timersText(r)}</div>
+                      {(() => {
+                        const closes = closesText(r, expiry)
+                        return <div className={closes === 'Auto + notify' ? 'text-emerald-600' : undefined}>{closes}</div>
+                      })()}
                     </Td>
-                    <Td className="text-xs text-muted">{relativeTime(r.created_at)}</Td>
+                    <Td><RuleNotifies rule={r} policies={policiesQ.data ?? null} channelNames={channelNames} /></Td>
+                    <Td className="whitespace-nowrap text-xs text-muted" title={r.last_triggered_at ? new Date(r.last_triggered_at).toLocaleString() : 'No alert from this rule is on record'}>
+                      {r.last_triggered_at ? relativeTime(r.last_triggered_at) : 'Never'}
+                    </Td>
                     <Td>
                       <div className="flex justify-end gap-0.5">
                         <Button variant="ghost" size="icon" className="h-7 w-7" title={isServerMetric(r.metric) ? 'Preview message' : 'Preview & edit message'}
@@ -318,12 +437,18 @@ export function AlertRulesPage() {
                       </div>
                     </Td>
                   </Tr>
-                ))}
+                  )
+                })}
                 {(!rules || rules.length === 0) && !isError && (
                   <Tr>
-                    <Td colSpan={8} className="py-12 text-center text-muted">
-                      No alert rules yet. Click &quot;Create alert&quot; to open the wizard.
+                    <Td colSpan={9} className="py-12 text-center text-muted">
+                      No alert rules yet. Click &quot;Create alert&quot; to open the wizard, or accept a recommended rule.
                     </Td>
+                  </Tr>
+                )}
+                {rules && rules.length > 0 && shown.length === 0 && (
+                  <Tr>
+                    <Td colSpan={9} className="py-8 text-center text-muted">No rules in this family.</Td>
                   </Tr>
                 )}
               </TBody>
@@ -331,6 +456,7 @@ export function AlertRulesPage() {
           </div>
         </CardContent>
       </Card>
+      )}
 
       <AlertRuleWizardDialog open={formOpen} onOpenChange={setFormOpen} rule={editing} />
       <RuleExclusionsDialog

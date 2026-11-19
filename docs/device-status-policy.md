@@ -40,6 +40,7 @@ inside the cycle; that still counts as one check.
 * A failing check never enters Degraded: Down outranks Degraded.
 * Maintenance windows keep the existing behaviour: status shows Maintenance, checks keep
   being evaluated, and the confirmed status is applied (with alerts) when the window ends.
+  Each occurrence of a recurring window ends the same way (`docs/maintenance-windows.md`).
 
 ## Flapping
 
@@ -64,6 +65,10 @@ and the settings page show the longest interval at which flapping can still be d
 
 ### Notifications while flapping
 
+* Since 1.25.18 the *Flapping started* / *Flapping stopped* notices described below are
+  recorded in the alert list only, unless *Escalation & On-call → Alert storms → Flapping
+  notices → Send to channels* is on (`system_settings['alert_flap_notices']`). The hold
+  itself is unchanged. On one appliance the notices were 23% of all delivered messages.
 * Status alerts are **held, not dropped**. While the transition's class is flapping, a
   status alert waits at least `flap_stable_minutes` (or the rule's own *Condition must
   exist for*, whichever is longer). It is sent only if the device is still in that status;

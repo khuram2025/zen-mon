@@ -959,7 +959,25 @@ func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[
 
 // maintenanceDeviceIDsSQL: a group window covers every member of the group
 // and of its subgroups (primary, static and dynamic membership, migration 192).
+// device_maintenance_active (migration 207) decides whether a one-off or
+// recurring window is in force now: the same SQL function the API's
+// evaluators use (app.services.maintenance_windows), so they agree.
 const maintenanceDeviceIDsSQL = `
+		SELECT DISTINCT d.id
+		FROM (SELECT * FROM device_maintenance m WHERE device_maintenance_active(m, now())) m
+		JOIN devices d ON (
+		       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+		    OR (m.scope_type = 'group'  AND (m.scope_group_id = d.group_id OR EXISTS (
+		           SELECT 1 FROM device_group_member_closure c
+		            WHERE c.group_id = m.scope_group_id AND c.asset_kind = 'device' AND c.asset_id = d.id)))
+		    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+		    OR (m.scope_type = 'all')
+		)
+	`
+
+// maintenanceDeviceIDs192SQL is the statement from before migration 207:
+// one-off windows only (there were no recurring ones).
+const maintenanceDeviceIDs192SQL = `
 		SELECT DISTINCT d.id
 		FROM devices d
 		JOIN device_maintenance m ON (
@@ -986,17 +1004,35 @@ const maintenanceDeviceIDsLegacySQL = `
 		WHERE m.starts_at <= now() AND m.ends_at >= now()
 	`
 
+// maintenanceDeviceIDQueries lists the statements newest first. The binary
+// may run ahead of the migrations: a missing function (207) falls back to
+// the 192 statement, a missing closure view (192) to the legacy one, where a
+// group window covers the devices whose own group it is, as before.
+var maintenanceDeviceIDQueries = []string{
+	maintenanceDeviceIDsSQL, maintenanceDeviceIDs192SQL, maintenanceDeviceIDsLegacySQL,
+}
+
+// maintenanceFallback reports whether err means "this statement needs a
+// newer schema": an undefined function (42883) or table/view (42P01).
+func maintenanceFallback(err error) bool {
+	return isUndefinedFunction(err) || isUndefinedTable(err)
+}
+
 // LoadActiveMaintenanceDeviceIDs returns the set of device IDs currently
-// inside an active device_maintenance window (scope: device, group, tag, or
-// all — devices.tags is a JSONB string array). Mirrors
-// LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics for
-// these devices but suppresses status transitions and alerting.
+// inside an active device_maintenance window, one-off or recurring (scope:
+// device, group, tag, or all — devices.tags is a JSONB string array).
+// Mirrors LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics
+// for these devices but suppresses status transitions and alerting. When a
+// window, or one occurrence of a recurring window, ends the device leaves
+// the set and its confirmed status is applied with alerts, whatever the kind.
 func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
-	rows, err := s.pool.Query(ctx, maintenanceDeviceIDsSQL)
-	if err != nil && isUndefinedTable(err) {
-		// The binary runs ahead of migration 192 (no group membership yet):
-		// a group window covers the devices whose own group it is, as before.
-		rows, err = s.pool.Query(ctx, maintenanceDeviceIDsLegacySQL)
+	var rows pgx.Rows
+	var err error
+	for i, q := range maintenanceDeviceIDQueries {
+		rows, err = s.pool.Query(ctx, q)
+		if err == nil || i == len(maintenanceDeviceIDQueries)-1 || !maintenanceFallback(err) {
+			break
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load device maintenance ids: %w", err)

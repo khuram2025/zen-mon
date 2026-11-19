@@ -108,7 +108,7 @@ export function SummaryStrip({
   const recover = pct(w?.time_to_recover)
   const ack = pct(w?.time_to_ack)
   const common = { loading: loading && !summary, unavailable, dim }
-  const other = w ? w.by_reason.manual + w.by_reason.suppressed + w.by_reason.superseded + (w.by_reason.administrative ?? 0) : 0
+  const other = w ? w.by_reason.manual + w.by_reason.suppressed + w.by_reason.superseded + (w.by_reason.administrative ?? 0) + (w.by_reason.expired ?? 0) : 0
   const dlv = w?.delivery
   const openFailed = summary?.diagnostics.open_delivery_failed ?? 0
 

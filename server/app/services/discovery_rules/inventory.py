@@ -750,12 +750,15 @@ async def _write(db: AsyncSession, change: dict, value: Any, *, apply_credential
         if value is None:
             await db.execute(text(
                 "DELETE FROM topology_dependencies WHERE child_device_id = CAST(:id AS uuid)"
-                " AND parent_device_id = CAST(:p AS uuid) AND dependency_type = 'uplink'"),
+                " AND parent_device_id = CAST(:p AS uuid) AND dependency_type = 'uplink'"
+                # An operator's own row for the same pair is never the rule's to remove (migrate-203).
+                " AND source = 'discovery_rule'"),
                 {**params, "p": change["item_key"]})
         else:
             await db.execute(text(
                 "INSERT INTO topology_dependencies (parent_device_id, child_device_id, dependency_type,"
-                " suppress_alerts, notes) VALUES (CAST(:p AS uuid), CAST(:id AS uuid), 'uplink', true, :n)"
+                " suppress_alerts, notes, source) VALUES (CAST(:p AS uuid), CAST(:id AS uuid), 'uplink', true, :n,"
+                " 'discovery_rule')"
                 " ON CONFLICT DO NOTHING"),
                 {**params, "p": change["item_key"], "n": f"Discovery rule: {change.get('rule_name') or ''}"[:500]})
         return

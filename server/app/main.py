@@ -20,6 +20,8 @@ from app.api.v1 import network_events
 from app.api.v1 import virtualization
 from app.api.v1 import notification_grouping as notification_grouping_api
 from app.api.v1 import alert_storm as alert_storm_api
+from app.api.v1 import alert_rule_recommendations as alert_rule_recommendations_api
+from app.api.v1 import alert_event_expiry as alert_event_expiry_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -122,10 +124,13 @@ def create_app() -> FastAPI:
     app.include_router(tags.router, prefix="/api/v1", dependencies=[policy("tags")])
     app.include_router(notification_grouping_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_storm_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(alert_event_expiry_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(escalation_policies_api.router, prefix="/api/v1", dependencies=[policy("escalation")])
     app.include_router(oncall_api.router, prefix="/api/v1", dependencies=[policy("oncall")])
     app.include_router(alerts.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(settings_api.router, prefix="/api/v1", dependencies=[policy("settings", allow_public=True)])
+    # Before alert_rules: "/alert-rules/recommended" must not reach "/alert-rules/{rule_id}".
+    app.include_router(alert_rule_recommendations_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(host_alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_engine.router, prefix="/api/v1")
@@ -170,6 +175,8 @@ def create_app() -> FastAPI:
     from app.api.v1 import custom_fields as custom_fields_api, device_groups as device_groups_api
     app.include_router(device_groups_api.router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(custom_fields_api.router, prefix="/api/v1", dependencies=[policy("devices")])
+    from app.api.v1 import topology_dependencies as topology_dependencies_api
+    app.include_router(topology_dependencies_api.router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(snmp_credentials.router, prefix="/api/v1")
     app.include_router(windows_credentials.router, prefix="/api/v1", dependencies=[policy("windows_credentials")])
     app.include_router(audit_logs.router, prefix="/api/v1")
@@ -268,6 +275,15 @@ def create_app() -> FastAPI:
         # Network-device (SNMP) alert rules: periodic threshold evaluation against ClickHouse.
         from app.services.network_alert_service import network_alert_evaluator_loop
         app.state.network_alert_evaluator = asyncio.create_task(network_alert_evaluator_loop())
+        # Certificate-expiry and response-time rules (service checks, F5 inventory).
+        from app.services.service_metric_alert_service import service_metric_alert_evaluator_loop
+        app.state.service_metric_alert_evaluator = asyncio.create_task(service_metric_alert_evaluator_loop())
+        # Virtualisation rules: host disconnected, datastore usage, platform alarms.
+        from app.services.virtualization_alert_service import virtualization_alert_evaluator_loop
+        app.state.virtualization_alert_evaluator = asyncio.create_task(virtualization_alert_evaluator_loop())
+        # Monitoring gaps: SNMP unanswered while ping answers, agent heartbeats without metrics.
+        from app.services.monitoring_gap_alert_service import monitoring_gap_alert_evaluator_loop
+        app.state.monitoring_gap_alert_evaluator = asyncio.create_task(monitoring_gap_alert_evaluator_loop())
         # SLA escalation tiers: page the next on-call level for alerts that stay
         # active and unacknowledged past each level's deadline.
         from app.services.alert_escalation_service import escalation_sweeper_loop
@@ -286,6 +302,10 @@ def create_app() -> FastAPI:
         # APM alert rules (apm_* metric keys): periodic RED-rollup evaluation.
         from app.services.apm_alert_service import apm_alert_evaluator_loop
         app.state.apm_alert_evaluator = asyncio.create_task(apm_alert_evaluator_loop())
+        # ZenPlus appliance health (appliance_* rules): disk, ClickHouse,
+        # backups, updates, licence, clock, failing channels, remote sensors.
+        from app.services.appliance_alert_service import appliance_alert_evaluator_loop
+        app.state.appliance_alert_evaluator = asyncio.create_task(appliance_alert_evaluator_loop())
         # SLO error-budget burn: multi-window multi-burn-rate evaluation.
         from app.services.apm_slo_service import apm_slo_burn_loop
         app.state.apm_slo_burn = asyncio.create_task(apm_slo_burn_loop())
@@ -364,7 +384,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "appliance_health_sampler", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
+        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "service_metric_alert_evaluator", "monitoring_gap_alert_evaluator", "virtualization_alert_evaluator", "appliance_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "appliance_health_sampler", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

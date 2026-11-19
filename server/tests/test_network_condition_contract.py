@@ -51,7 +51,8 @@ def test_future_and_duplicate_replay_do_not_create_hold_evidence():
 
 
 def test_unmapped_canonical_metric_rejected_instead_of_silently_ignored():
-    with pytest.raises(ValueError, match='No network evaluator'):
+    # The refusal names the template state metric to use instead.
+    with pytest.raises(ValueError, match=r'tpl_cisco_fan_state'):
         evaluate(conditions('fan_state'), 'AND', {}, now=0)
 
 

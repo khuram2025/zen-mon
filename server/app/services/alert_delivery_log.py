@@ -37,10 +37,24 @@ Concurrent workers, retries and restarts therefore never re-send a known
 accepted (or possibly accepted) transition, while a genuinely new event — a new
 incident, a recovery, the next escalation step — has a new key and is sent.
 Exactly-once SMTP delivery is not promised; the outcome stays auditable here.
+
+What was sent (migrate-197)
+---------------------------
+
+Each accepted or failed row also keeps the message as it was handed to the
+transport, so a complaint about a wrong SMS or email can be checked later:
+``subject`` (email subject, chat/webhook title), ``content`` (plain-text email
+body, SMS text after the timestamp, the text fields of a chat/webhook payload;
+at most :data:`CONTENT_MAX` characters) and ``recipients_count``. Recipient
+addresses, phone numbers, headers, URLs and channel secrets are never stored.
+Subject and content are cleared after
+``system_settings['alert_delivery_content'].days`` (default 30, 1-365) by
+:func:`content_retention_tick`; the row itself stays.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -127,34 +141,183 @@ class Timer:
         return int((time.monotonic() - self.start) * 1000)
 
 
+CONTENT_MAX = 8000
+
+_content_disabled = False
+
+
+def _cap(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value)
+    if not s.strip():
+        return None
+    return s if len(s) <= CONTENT_MAX else s[:CONTENT_MAX - 1] + "…"
+
+
+def sent(*, subject: Any = None, content: Any = None, recipients_count: int | None = None) -> dict:
+    """The :func:`record` keyword arguments describing what one send handed over."""
+    return {"subject": _cap(subject), "content": _cap(content), "recipients_count": recipients_count}
+
+
+def webhook_sent(ch_type: str | None, ctx: dict | None) -> dict:
+    """The title and text fields of a chat/webhook payload as the senders in
+    ``app.api.v1.alert_engine`` build them (never URLs, headers or keys).
+
+    Chat channels (notification_payload.chat_view): the title (the event
+    sentence) and the facts as "Label: value" lines; PagerDuty: its summary.
+    A generic webhook posts the documented field set, or the channel's own
+    body template, which may embed credentials and is therefore not stored:
+    its ``subject`` and ``message`` fields are recorded."""
+    try:
+        from app.services import notification_payload as npl
+
+        c = ctx or {}
+        if ch_type in ("slack", "teams", "discord"):
+            v = npl.chat_view(c)
+            subject = v["title"]
+            if ch_type == "slack":
+                emoji = (":large_green_circle:" if v["recovery"] else
+                         ":red_circle:" if v["severity"] == "critical" else ":warning:")
+                subject = f"{emoji} {subject}"
+            elif ch_type == "discord":
+                subject = subject[:256]
+            return sent(subject=subject, content=v["text"])
+        if ch_type == "pagerduty":
+            return sent(content=npl.chat_view(c)["title"][:1024])
+        fields = npl.webhook_fields(c)
+        return sent(subject=fields["subject"], content=fields["message"])
+    except Exception:  # describing a send must never stop it
+        return {}
+
+
 async def record(db: AsyncSession, *, alert_id: Any = None, rule_id: Any = None,
                  channel_id: Any = None, channel_name: str | None = None,
                  channel_type: str | None = None, kind: str = "trigger",
                  outcome: str, error: BaseException | str | None = None,
-                 latency_ms: int | None = None) -> None:
-    global _disabled
+                 latency_ms: int | None = None, subject: str | None = None,
+                 content: str | None = None, recipients_count: int | None = None) -> None:
+    global _disabled, _content_disabled
     if _disabled:
         return
+    params = {
+        "aid": _uuid_or_none(alert_id), "rid": _uuid_or_none(rule_id),
+        "cid": _uuid_or_none(channel_id), "cname": channel_name,
+        "ctype": channel_type, "kind": kind[:30], "outcome": outcome,
+        "error": sanitize_error(error) if not isinstance(error, str) else error,
+        "ms": latency_ms, "subj": _cap(subject), "body": _cap(content),
+        "rcount": recipients_count,
+    }
+    for with_content in ((False,) if _content_disabled else (True, False)):
+        cols = ", subject, content, recipients_count" if with_content else ""
+        vals = ", :subj, :body, :rcount" if with_content else ""
+        try:
+            async with db.begin_nested():
+                await db.execute(text(
+                    "INSERT INTO alert_deliveries (alert_id, rule_id, channel_id, channel_name,"
+                    f" channel_type, kind, outcome, error, latency_ms{cols})"
+                    " VALUES (CAST(:aid AS uuid), CAST(:rid AS uuid), CAST(:cid AS uuid), :cname,"
+                    f" :ctype, :kind, :outcome, :error, :ms{vals})"
+                ), params)
+            return
+        except Exception as exc:
+            msg = str(exc)
+            if with_content and "column" in msg and "does not exist" in msg:
+                # Code ahead of migrate-197: keep recording the outcome.
+                _content_disabled = True
+                logger.warning("delivery content not recorded until migrate-197 runs")
+                continue
+            if "alert_deliveries" in msg and "does not exist" in msg:
+                _disabled = True
+                logger.warning("delivery log disabled until migrate-135 runs")
+            else:
+                logger.debug("delivery log insert failed: %s", exc)
+            return
+
+
+# ── Retention of what was sent ──────────────────────────────────────────────
+
+CONTENT_SETTINGS_KEY = "alert_delivery_content"
+CONTENT_DAYS_DEFAULT, CONTENT_DAYS_MIN, CONTENT_DAYS_MAX = 30, 1, 365
+CONTENT_SWEEP_INTERVAL_S = 3600
+
+_last_content_sweep: float | None = None
+
+
+def normalize_content_settings(raw: Any) -> dict[str, int]:
+    """{"days": 1..365}; missing or invalid values fall back to 30."""
+    src = raw if isinstance(raw, dict) else {}
+    try:
+        days = int(src.get("days", CONTENT_DAYS_DEFAULT))
+    except (TypeError, ValueError):
+        days = CONTENT_DAYS_DEFAULT
+    return {"days": min(CONTENT_DAYS_MAX, max(CONTENT_DAYS_MIN, days))}
+
+
+async def content_settings(db: AsyncSession) -> dict[str, int]:
+    """``system_settings['alert_delivery_content']``."""
     try:
         async with db.begin_nested():
-            await db.execute(text(
-                "INSERT INTO alert_deliveries (alert_id, rule_id, channel_id, channel_name,"
-                " channel_type, kind, outcome, error, latency_ms)"
-                " VALUES (CAST(:aid AS uuid), CAST(:rid AS uuid), CAST(:cid AS uuid), :cname,"
-                " :ctype, :kind, :outcome, :error, :ms)"
-            ), {
-                "aid": _uuid_or_none(alert_id), "rid": _uuid_or_none(rule_id),
-                "cid": _uuid_or_none(channel_id), "cname": channel_name,
-                "ctype": channel_type, "kind": kind[:30], "outcome": outcome,
-                "error": sanitize_error(error) if not isinstance(error, str) else error,
-                "ms": latency_ms,
-            })
+            value = (await db.execute(text("SELECT value FROM system_settings WHERE key = :k"),
+                                      {"k": CONTENT_SETTINGS_KEY})).scalar()
+    except Exception:
+        return normalize_content_settings(None)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = None
+    return normalize_content_settings(value)
+
+
+async def save_content_settings(db: AsyncSession, days: int) -> dict[str, int]:
+    """Store the retention (caller commits)."""
+    value = normalize_content_settings({"days": days})
+    await db.execute(text(
+        "INSERT INTO system_settings (key, value) VALUES (:k, CAST(:v AS jsonb))"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+    ), {"k": CONTENT_SETTINGS_KEY, "v": json.dumps(value)})
+    return value
+
+
+async def purge_content(db: AsyncSession, now=None) -> int:
+    """Clear subject and content of deliveries older than the retention; the
+    rows (channel, outcome, error, latency, recipients_count) stay. Commits."""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    days = (await content_settings(db))["days"]
+    res = await db.execute(text(
+        "UPDATE alert_deliveries SET subject = NULL, content = NULL"
+        " WHERE attempted_at < :cut AND (subject IS NOT NULL OR content IS NOT NULL)"
+    ), {"cut": now - timedelta(days=days)})
+    await db.commit()
+    return int(res.rowcount or 0)
+
+
+async def content_retention_tick(session_factory=None) -> int | None:
+    """Run :func:`purge_content` at most hourly per worker (called from the
+    escalation sweeper loop); None when not due or it failed. Never raises
+    except cancellation. Clearing the same rows twice is harmless, so the two
+    workers need no lock for it."""
+    import asyncio
+    global _last_content_sweep
+    if _disabled or _content_disabled:
+        return None
+    now = time.monotonic()
+    if _last_content_sweep is not None and now - _last_content_sweep < CONTENT_SWEEP_INTERVAL_S:
+        return None
+    _last_content_sweep = now
+    if session_factory is None:
+        from app.core.database import AsyncSessionLocal
+        session_factory = AsyncSessionLocal
+    try:
+        async with session_factory() as db:
+            return await purge_content(db)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        if "alert_deliveries" in str(exc) and "does not exist" in str(exc):
-            _disabled = True
-            logger.warning("delivery log disabled until migrate-135 runs")
-        else:
-            logger.debug("delivery log insert failed: %s", exc)
+        logger.warning("delivery content retention failed: %s", exc)
+        return None
 
 
 # ── Durable delivery keys ───────────────────────────────────────────────────
@@ -289,6 +452,8 @@ def _uuid_or_none(value) -> str | None:
 
 
 def reset_for_tests() -> None:
-    global _disabled, _keys_disabled
+    global _disabled, _keys_disabled, _content_disabled, _last_content_sweep
     _disabled = False
     _keys_disabled = False
+    _content_disabled = False
+    _last_content_sweep = None

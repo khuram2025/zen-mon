@@ -53,7 +53,7 @@ TAG_RENAME_ONLY_SURFACES: tuple[tuple[str, str, str], ...] = (
 )
 
 TAG_SCOPE_COLUMNS: tuple[tuple[str, str, str | None], ...] = (
-    ("device_maintenance", "scope_tag", "scope_type = 'tag'"),
+    ("device_maintenance", "scope_tag", "scope_type IN ('tag', 'server_tag')"),
     ("service_check_maintenance", "scope_tag", "scope_type = 'tag'"),
     ("alert_rules", "scope_tag", None),
 )

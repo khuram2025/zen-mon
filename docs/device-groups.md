@@ -98,9 +98,11 @@ membership (primary, static, rule, and subgroups) instead of comparing
 * `network_alert_service` (SNMP metric rules), `alert_engine` (device status,
   traps), `device_flap_notice_service`, `network_events` (syslog),
   `udt_alert_service` (Device Tracker);
-* maintenance windows: `alert_engine._device_in_maintenance` and the Go
-  poller's `maintenanceDeviceIDsSQL` (with a legacy fallback when the closure
-  view is missing, so a poller started before the migration keeps working);
+* maintenance windows: `app.services.maintenance_windows` (which
+  `alert_engine._device_in_maintenance` uses; `server_group` windows cover a
+  group's servers) and the Go poller's `maintenanceDeviceIDsSQL` (with legacy
+  fallbacks while the closure view or the migrate-207 function is missing, so a
+  poller started before the migration keeps working);
 * `alert_rule_scope` (the "affects N devices" count) and the Devices list
   group filter.
 

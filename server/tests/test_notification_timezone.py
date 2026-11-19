@@ -61,7 +61,12 @@ def test_every_rule_test_and_preview_uses_configured_zone(metric,recovery):
     ctx=_preview_email_ctx(rule,msg,recovery,'https://example.invalid/alerts')
     ctx['branding']=brand
     expected=timestamp_label(msg['iso_timestamp'],brand)
-    assert expected in msg['sms_body']
+    if metric=='ping_status':
+        # The sentence states the local time; no second stamp (audit T-02).
+        assert brand.fmt_time(datetime.fromisoformat(msg['iso_timestamp'])) in msg['sms_body']
+        assert '\n' not in msg['sms_body']
+    else:
+        assert expected in msg['sms_body']
     assert expected in er.build_alert_email_html(ctx)
     assert expected in er.build_alert_email_text(ctx)
     assert ' UTC' not in msg['sms_body']

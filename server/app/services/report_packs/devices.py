@@ -29,6 +29,8 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
+from app.services import maintenance_windows as _mw
+
 from app.services.report_sections import (
     SectionCtx,
     _fmt_avail,
@@ -957,14 +959,11 @@ async def device_reboots(ctx: SectionCtx) -> dict:
 
 # ─── Planned maintenance ────────────────────────────────────────────────────
 
-# "Window m covers device d" — copied from app/api/v1/devices.py
-# (MAINT_COVERS_DEVICE_SQL) so the report and the API agree on scope.
-MAINT_COVERS_DEVICE_SQL = """(
-       (m.scope_type = 'device' AND m.scope_device_id = d.id)
-    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
-    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
-    OR (m.scope_type = 'all')
-)"""
+# "Window m covers device d": the definition every maintenance query shares
+# (app.services.maintenance_windows), so the report and the API agree on scope.
+# Recurring windows (migrate-207) are read one occurrence at a time.
+MAINT_COVERS_DEVICE_SQL = _mw.COVERS_DEVICE_SQL
+_MAINT_OCCURRENCES = _mw.occurrences_join(":from_ts", ":to_ts")
 
 
 def _aware(dt: datetime) -> datetime:
@@ -999,14 +998,14 @@ async def maintenance_summary(ctx: SectionCtx) -> dict:
     clause, dparams = ctx.pg_device_clause("d.id")
     params = {"from_ts": frm, "to_ts": to, **dparams}
     windows = (await ctx.db.execute(text(
-        "SELECT m.id::text, m.scope_type, m.scope_tag, m.starts_at, m.ends_at, "
+        "SELECT m.id::text, m.scope_type, m.scope_tag, o.occ_start, o.occ_end, "
         "COALESCE(m.reason, ''), sd.hostname, g.name, COUNT(DISTINCT d.id) AS nodes "
-        f"FROM device_maintenance m JOIN devices d ON {MAINT_COVERS_DEVICE_SQL} "
+        f"FROM device_maintenance m {_MAINT_OCCURRENCES} JOIN devices d ON {MAINT_COVERS_DEVICE_SQL} "
         "LEFT JOIN devices sd ON sd.id = m.scope_device_id "
         "LEFT JOIN device_groups g ON g.id = m.scope_group_id "
-        f"WHERE m.starts_at < :to_ts AND m.ends_at > :from_ts{clause} "
-        "GROUP BY m.id, m.scope_type, m.scope_tag, m.starts_at, m.ends_at, m.reason, sd.hostname, g.name "
-        "ORDER BY m.starts_at"), params)).fetchall()
+        f"WHERE o.occ_start < :to_ts AND o.occ_end > :from_ts{clause} "
+        "GROUP BY m.id, m.scope_type, m.scope_tag, o.occ_start, o.occ_end, m.reason, sd.hostname, g.name "
+        "ORDER BY o.occ_start"), params)).fetchall()
     if not windows:
         return _section("maintenance_summary", title,
                         description="Device maintenance windows overlapping the reporting period.",
@@ -1014,9 +1013,9 @@ async def maintenance_summary(ctx: SectionCtx) -> dict:
                         notes=["No planned maintenance overlapped this period for the nodes in scope."])
 
     covered = (await ctx.db.execute(text(
-        "SELECT d.id::text, GREATEST(m.starts_at, :from_ts), LEAST(m.ends_at, :to_ts) "
-        f"FROM device_maintenance m JOIN devices d ON {MAINT_COVERS_DEVICE_SQL} "
-        f"WHERE m.starts_at < :to_ts AND m.ends_at > :from_ts{clause}"), params)).fetchall()
+        "SELECT d.id::text, GREATEST(o.occ_start, :from_ts), LEAST(o.occ_end, :to_ts) "
+        f"FROM device_maintenance m {_MAINT_OCCURRENCES} JOIN devices d ON {MAINT_COVERS_DEVICE_SQL} "
+        f"WHERE o.occ_start < :to_ts AND o.occ_end > :from_ts{clause}"), params)).fetchall()
     per_dev: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
     for did, s, e in covered:
         per_dev[str(did)].append((_aware(s), _aware(e)))

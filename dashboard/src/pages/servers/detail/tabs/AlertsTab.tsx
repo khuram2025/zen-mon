@@ -33,7 +33,7 @@ import { ExcludeRuleDialog, useRuleExclusion } from '@/components/alerts/RuleExc
 import { ruleSwitch, type RuleExclusion } from '@/components/alerts/exclusionModel'
 import { useCan } from '@/stores/auth'
 import type { ServerItem } from '@/types/servers'
-import { serverScopeLabel } from '@/components/forms/serverAlertRule'
+import { serverMetricLabel, serverRuleCondition, serverScopeLabel } from '@/components/forms/serverAlertRule'
 import { groupsApi } from '@/pages/groups/api'
 import { EmptyState, Panel, Pill, Segmented, StatTile, type Tone } from '../ui'
 
@@ -112,7 +112,7 @@ const OP_SYMBOL: Record<string, string> = {
 }
 
 export function metricLabel(metric: string): string {
-  return HOST_METRICS.find((m) => m.value === metric)?.label || metric
+  return HOST_METRICS.find((m) => m.value === metric)?.label || serverMetricLabel(metric)
 }
 
 export function ruleCondition(r: HostRule): string {
@@ -121,6 +121,11 @@ export function ruleCondition(r: HostRule): string {
   if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
   if (m?.kind === 'event') return metricLabel(r.metric)
   if (m?.kind === 'flag') return 'Agent silent, server still answers ping'
+  // Depth metrics (swap, disk latency, NIC errors, clock offset, days until full, automatic services) and any
+  // metric this editor does not list: the shared words, with the metric's own unit (never a stray "%").
+  if (!m || r.metric !== 'host_cpu_pct' && r.metric !== 'host_memory_pct' && r.metric !== 'host_filesystem_pct' && r.metric !== 'host_disk_util_pct') {
+    return serverRuleCondition(r as any)
+  }
   return `${metricLabel(r.metric)} ${OP_SYMBOL[r.operator] || r.operator} ${r.threshold}%`
 }
 

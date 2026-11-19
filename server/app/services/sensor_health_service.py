@@ -319,14 +319,11 @@ async def sweep_sensor_health(db: AsyncSession) -> dict[str, int]:
             source="sensor_degraded",
         )
     for row in offline:
+        # The offline incident itself is the "Remote sensor offline" rule
+        # (appliance_alert_service, migrate-198), with its hold, channels,
+        # escalation and recovery notice. The rule-less row this wrote before
+        # paged nobody and would only double it.
         await resolve_sensor_alert(db, str(row.id), "sensor_degraded", "sensor is offline")
-        await create_sensor_alert(
-            db,
-            sensor_id=str(row.id),
-            severity="critical",
-            message=f"Remote sensor {row.name} is offline — assigned targets may be stale",
-            source="sensor_offline",
-        )
         suppressed += await _suppress_owned_device_alerts(db, str(row.id), row.name)
         suppressed += await _suppress_unverifiable_service_alerts(
             db, str(row.id), row.name

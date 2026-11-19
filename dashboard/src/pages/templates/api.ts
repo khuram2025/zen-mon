@@ -190,7 +190,12 @@ export type Recommendation = {
   severity: 'info' | 'warning' | 'critical'
   priority: string | null
   if_role: string | null
-  source: 'template' | 'threshold'
+  /** template = the template's rule pack; threshold = from a gauge's warn/crit; state = from an enum metric's value map. */
+  source: 'template' | 'threshold' | 'state'
+  /** State recommendations: "Status is Down", the AND-combined conditions and the bad codes. */
+  condition_label?: string | null
+  conditions?: Array<{ metric: string; operator: string; threshold: number }> | null
+  states?: number[] | null
   status: 'available' | 'accepted' | 'changed'
   changes: RecommendationChange[]
   accepted: null | {

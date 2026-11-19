@@ -200,6 +200,11 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
   const queueRows = toRows(detail.cpu, (p) => ({ queue: p.queue }))
   const queueStats = stats(detail.cpu.map((p) => p.queue))
   const cores = server.cpu_cores || detail.cores.latest.length || 1
+  // The same stored series is the processor queue length on Windows and the
+  // 1-minute load average on Linux (runnable plus waiting tasks), which is
+  // judged against the core count itself rather than twice it.
+  const isLinux = server.os_type === 'linux'
+  const queueLimit = isLinux ? cores : cores * 2
 
   /* Memory */
   const memRows = toRows(detail.memory, (p) => ({ used: p.used, committed: p.committed, cached: p.cached, total: p.total }))
@@ -292,22 +297,28 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
         />
       </Panel>
       <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="Processor queue" subtitle={`Threads waiting for a CPU · sustained above ${cores * 2} indicates contention`} icon={Timer}>
+        <Panel
+          title={isLinux ? 'Load average' : 'Processor queue'}
+          subtitle={isLinux
+            ? `1-minute load (tasks running or waiting) · sustained above ${queueLimit} means more work than cores`
+            : `Threads waiting for a CPU · sustained above ${queueLimit} indicates contention`}
+          icon={Timer}
+        >
           <ChartStats
             items={[
               { label: 'Current', value: fmtNum(queueStats?.current) },
               { label: 'Average', value: fmtNum(queueStats?.avg) },
-              { label: 'Peak', value: fmtNum(queueStats?.peak), tone: (queueStats?.peak ?? 0) > cores * 2 ? 'warning' : 'default' },
+              { label: 'Peak', value: fmtNum(queueStats?.peak), tone: (queueStats?.peak ?? 0) > queueLimit ? 'warning' : 'default' },
               { label: 'Cores', value: cores },
             ]}
           />
           <TimeSeries
             data={queueRows}
-            series={[{ key: 'queue', label: 'Queue length', color: C.orange }]}
+            series={[{ key: 'queue', label: isLinux ? 'Load (1 min)' : 'Queue length', color: C.orange }]}
             height={170}
             yFormat={(v) => fmtNum(v)}
             tickFormat={tick}
-            references={[{ y: cores * 2, label: `${cores * 2} (2 × cores)`, tone: 'warning' }]}
+            references={[{ y: queueLimit, label: isLinux ? `${queueLimit} (cores)` : `${queueLimit} (2 × cores)`, tone: 'warning' }]}
           />
         </Panel>
         <Panel title="Per-core load" subtitle="Each row is a logical core" icon={Cpu}>

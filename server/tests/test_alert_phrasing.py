@@ -172,9 +172,10 @@ def test_default_subjects_name_the_host_and_ip():
     v = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
                               subject_noun=ap.host_label("core-sw", "10.0.0.1"))
     v.update(severity="CRITICAL", status="DOWN", rule_name="Device Down")
+    v.update(ap.place_variables())
     render = lambda t: t.format_map(v)
     assert render(ap.DEFAULT_EMAIL_SUBJECT) == "[CRITICAL] DOWN: Device Down — core-sw (10.0.0.1)"
-    assert render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT) == "[CRITICAL] Resolved: Device Down — core-sw (10.0.0.1)"
+    assert render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT) == "[RESOLVED] Device Down — core-sw (10.0.0.1)"
     assert "core-sw (10.0.0.1)" in render(ap.DEFAULT_SMS)
 
 
@@ -195,22 +196,28 @@ def test_service_defaults_keep_no_host_suffix():
         assert "{host_suffix}" not in (tpl or "")
 
 
-# ── Reading precision next to the threshold (NOTIFY 01) ─────────────────────
+# ── Reading precision next to the threshold (NOTIFY 01, audit T-11) ─────────
+#
+# One rule: a whole-percent reading shows 0 decimals at least one point from
+# its limit and 1 decimal within a point; thresholds print exactly without a
+# trailing ".0"; nothing shows more than one extra decimal.
 
 @pytest.mark.parametrize("metric,value,op,threshold,expected", [
-    # The field case: 90.1..91.5% against 90% used to read "currently 90%".
+    # The field case: 90.1..90.9% against 90% used to read "currently 90%".
     ("host_memory_pct", 90.3, ">", 90, "90.3%"),
-    ("host_memory_pct", 90.04, ">", 90, "90.04%"),
-    # Three extra decimals is the cap; the kept zeros show the precision used.
-    ("host_memory_pct", 90.0004, ">", 90, "90.000%"),
-    # Near the threshold a whole-percent reading keeps one decimal (never "92%").
-    ("host_memory_pct", 91.5, ">", 90, "91.5%"),
-    ("host_memory_pct", 91.0, ">", 90, "91.0%"),
+    # One extra decimal is the cap ("T: at 95.001%" read like a fault).
+    ("host_memory_pct", 90.04, ">", 90, "90.0%"),
+    ("host_memory_pct", 90.0004, ">", 90, "90.0%"),
+    ("host_memory_pct", 95.001, ">", 95, "95.0%"),
+    # One point or more from the limit: whole percent.
+    ("host_memory_pct", 91.4, ">", 90, "91%"),
+    ("host_memory_pct", 91.0, ">", 90, "91%"),
+    ("host_memory_pct", 90.9, ">", 90, "90.9%"),
     ("host_memory_pct", 95.2, ">", 90, "95%"),        # clearly over: catalogue format
     ("host_memory_pct", 89.6, ">", 90, "89.6%"),      # just back below: never "90%"
     ("host_memory_pct", 90, ">=", 90, "90%"),         # equal is shown equal
     ("cpu", 90.5, ">", 90.4, "90.5%"),                # the threshold's own decimals
-    ("rtt", 100.04, ">", 100, "100.04 ms"),
+    ("rtt", 100.04, ">", 100, "100.04 ms"),           # 1 catalogue + 1 extra decimal
     ("rtt", 250, ">", 100, "250 ms"),
     ("packet_loss", 0.4, None, None, "0.4%"),         # non-zero never shown as zero
     ("packet_loss", 100.0, ">", 5, "100%"),
@@ -224,12 +231,13 @@ def test_format_reading_never_prints_equal_to_a_threshold_it_crossed(metric, val
 
 
 @pytest.mark.parametrize("value,threshold,reading,shown_threshold", [
-    (90.3, 90, "90.3%", "90.0%"),
-    (90.04, 90, "90.04%", "90.00%"),
+    (90.3, 90, "90.3%", "90%"),
+    (90.04, 90, "90.0%", "90%"),
     (95.2, 90, "95%", "90%"),
-    (92, 90.5, "92.0%", "90.5%"),
+    (92, 90.5, "92%", "90.5%"),
+    (91, 90.5, "91.0%", "90.5%"),
 ])
-def test_threshold_is_shown_with_the_readings_precision(value, threshold, reading, shown_threshold):
+def test_threshold_is_shown_exactly_without_trailing_zero(value, threshold, reading, shown_threshold):
     assert ap.format_reading("host_memory_pct", value, ">", threshold) == reading
     assert ap.format_threshold("host_memory_pct", threshold, ">", value) == shown_threshold
 
@@ -244,9 +252,9 @@ def test_format_value_is_unchanged_for_existing_callers():
 def test_headline_condition_and_sentence_share_one_precision():
     v = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
                               value=90.3, subject_noun="srv-a")
-    assert v["event_sentence"] == "Host memory on srv-a rose to 90.3% (limit 90.0%)."
-    assert v["condition_label"] == "Host memory above 90.0%"
-    assert v["threshold_value"] == "90.0%"
+    assert v["event_sentence"] == "Host memory on srv-a rose to 90.3% (limit 90%)."
+    assert v["condition_label"] == "Host memory above 90%"
+    assert v["threshold_value"] == "90%"
     assert v["reading"] == v["reading_value"] == "90.3%"
     # A reading the evaluator already formatted with format_reading gets the
     # same threshold precision without passing the raw value.
@@ -273,7 +281,7 @@ def test_multi_condition_label_matches_only_the_rules_own_threshold():
              {"metric": "host_cpu_pct", "operator": ">", "threshold": 90}]
     v = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
                               conditions=conds, value=90.3)
-    assert v["condition_label"] == "Host memory above 90.0% and Host CPU above 90%"
+    assert v["condition_label"] == "Host memory above 90% and Host CPU above 90%"
 
 
 # ── Interface error readings (NOTIFY 04) ─────────────────────────────────────
@@ -308,7 +316,7 @@ def test_counter_detail_names_an_unknown_direction():
     assert ap.counter_detail("if_errors", {"interval_s": None, "in": 7, "out": 1}) == ""
     assert ap.reading_text("if_errors", 152, ">", 100, None) == "152 errors"
     # Only per-poll counters carry a window.
-    assert ap.reading_text("cpu", 91, ">", 90, {"interval_s": 60}) == "91.0%"
+    assert ap.reading_text("cpu", 91, ">", 90, {"interval_s": 60}) == "91%"
     assert ap.reading_text("cpu", 97, ">", 90, {"interval_s": 60}) == "97%"   # far: catalogue format
 
 
@@ -340,7 +348,7 @@ SRV = "OC-MW-INF-FS-1 (10.1.1.5)"
 
 
 def _sms(v, rule, recovery=False):
-    v = dict(v, severity="WARNING", rule_name=rule)
+    v = dict(v, severity="WARNING", rule_name=rule, **ap.place_variables())
     return (ap.DEFAULT_RECOVERY_SMS if recovery else ap.DEFAULT_SMS).format_map(v)
 
 
@@ -355,7 +363,10 @@ def test_asset_type_labels(device_type, expected):
 
 def test_clock_is_appliance_local_and_dated_when_not_today():
     assert ap.clock(NOW - 180, RIYADH, NOW) == "14:44"
-    assert ap.clock(NOW - 86400, RIYADH, NOW) == "Nov 07 14:47"
+    # Not today: the organisation's date format (audit T-10), not "Nov 07".
+    assert ap.clock(NOW - 86400, RIYADH, NOW) == "2026-11-07 14:47"
+    assert ap.clock(NOW - 86400, Branding(timezone="Asia/Riyadh", date_format="DD/MM/YYYY",
+                                          time_format="12h"), NOW) == "07/11/2026 2:47 PM"
     assert ap.clock(NOW, Branding(timezone="Asia/Riyadh", time_format="12h"), NOW) == "2:47 PM"
     assert ap.clock(None, RIYADH, NOW) == ""
 
@@ -386,10 +397,10 @@ def test_reboot_fires_with_time_and_uptime():
                               asset_type="Switch", branding=RIYADH, now=NOW, value_context={
                                   "rebooted_at": NOW - 180, "uptime_s": 180,
                                   "previous_uptime_s": 41 * 86400 + 5000, "reboot_count": 1})
-    assert v["event_sentence"] == (f"Switch {SW} rebooted at 14:44 — uptime is now 3 min (was 41 days).")
+    assert v["event_sentence"] == (f"Switch {SW} rebooted at 14:44. Uptime is now 3 min (was 41 days).")
     sms = _sms(v, "Device reboot detected")
-    assert sms == ("ZenPlus WARNING — Device reboot detected: Switch New_ACC_AdminB_SW09 "
-                   "(192.168.24.34) rebooted at 14:44 — uptime is now 3 min (was 41 days).")
+    assert sms == ("ZenPlus WARNING - Device reboot detected: Switch New_ACC_AdminB_SW09 "
+                   "(192.168.24.34) rebooted at 14:44. Uptime is now 3 min (was 41 days).")
     assert len(sms) <= 160
 
 
@@ -399,7 +410,7 @@ def test_reboot_again_names_the_count_and_the_first_reboot():
                                   "rebooted_at": NOW - 60, "uptime_s": 60, "reboot_count": 2,
                                   "first_rebooted_at": NOW - 600})
     assert v["event_sentence"] == (f"Switch {SW} rebooted again at 14:46 (2 reboots since 14:37)"
-                                   " — uptime is now 1 min.")
+                                   ". Uptime is now 1 min.")
 
 
 def test_reboot_clear_says_how_long_it_stayed_up_not_a_counter():
@@ -430,7 +441,7 @@ def test_server_restart_fire_and_clear():
                                      "boot_at": NOW - 120, "boot_kind": "unexpected_restart",
                                      "restart_count": 1, "uptime_s": 120})
     assert fire["event_sentence"] == (f"Server {SRV} restarted at 14:45 after an unexpected shutdown"
-                                      " or power loss — up for 2 min.")
+                                      " or power loss. Up for 2 min.")
     requested = ap.phrasing_variables(metric="host_restart", operator="gt", threshold=0,
                                       subject_noun=SRV, asset_type="Server", branding=RIYADH,
                                       now=NOW, value_context={"requested_at": NOW - 30})
@@ -446,7 +457,7 @@ def test_server_restart_fire_and_clear():
                                    value_context={"boot_at": NOW - 780, "agent_reporting": False,
                                                   "heartbeat_at": NOW - 700})
     assert silent["event_sentence"] == (f"Restart alert for Server {SRV} closed with no further restarts,"
-                                        " but its agent has not reported since 14:35 — its current"
+                                        " but its agent has not reported since 14:35, so its current"
                                         " state is unknown.")
     for v in (fire, requested, up, silent):
         text_ = v["event_sentence"]

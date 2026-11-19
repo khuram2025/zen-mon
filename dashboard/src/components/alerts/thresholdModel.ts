@@ -54,21 +54,32 @@ export function roleRuleProblems(rules: RoleRule[]): string[] {
 
 // ── Metrics and conditions in words ────────────────────────────────────────
 
-export const INTERFACE_METRIC_KEYS = ['if_util_pct', 'if_in_bps', 'if_out_bps', 'if_errors', 'if_discards', 'if_oper_status'] as const
+export const INTERFACE_METRIC_KEYS = [
+  'if_util_pct', 'if_in_bps', 'if_out_bps', 'if_errors', 'if_discards', 'if_oper_status',
+  'if_error_rate_pct', 'if_discard_rate_pct', 'if_flaps', 'if_speed_changed',
+] as const
 const SCALAR_METRIC_KEYS = ['cpu', 'memory', 'temperature', 'session_count']
-const SERVER_THRESHOLD_METRICS = ['host_cpu_pct', 'host_memory_pct', 'host_filesystem_pct', 'host_disk_util_pct']
+// host_alert_service.THRESHOLD_METRICS: history metrics and the clock offset (migrate-208 added swap, disk
+// latency, NIC errors and clock offset). Snapshot metrics (days until full, automatic services) take no override.
+const SERVER_THRESHOLD_METRICS = ['host_cpu_pct', 'host_memory_pct', 'host_filesystem_pct', 'host_disk_util_pct',
+  'host_swap_pct', 'host_disk_latency_ms', 'host_nic_errors', 'host_clock_skew_s']
 
 const METRIC_LABEL: Record<string, string> = {
   if_util_pct: 'Interface utilisation', if_in_bps: 'Interface inbound', if_out_bps: 'Interface outbound',
   if_errors: 'Interface errors', if_discards: 'Interface discards', if_oper_status: 'Interface status',
+  if_error_rate_pct: 'Interface error rate', if_discard_rate_pct: 'Interface discard rate',
+  if_flaps: 'Interface state changes', if_speed_changed: 'Interface speed change',
   cpu: 'CPU', memory: 'Memory', temperature: 'Temperature', session_count: 'Sessions', uptime_reset: 'Reboot',
   ping_status: 'Ping status', rtt: 'RTT', packet_loss: 'Packet loss', jitter: 'Jitter',
   host_cpu_pct: 'CPU', host_memory_pct: 'Memory', host_filesystem_pct: 'Filesystem usage', host_disk_util_pct: 'Disk I/O',
+  host_swap_pct: 'Swap', host_disk_latency_ms: 'Disk latency', host_nic_errors: 'Network errors', host_clock_skew_s: 'Clock offset',
+  host_fs_days_left: 'Filesystem full in',
 }
 
 const METRIC_UNIT: Record<string, string> = {
-  if_util_pct: '%', cpu: '%', memory: '%', packet_loss: '%', rtt: ' ms', jitter: ' ms', if_in_bps: ' bps', if_out_bps: ' bps',
+  if_util_pct: '%', if_error_rate_pct: '% of packets', if_discard_rate_pct: '% of packets', cpu: '%', memory: '%', packet_loss: '%', rtt: ' ms', jitter: ' ms', if_in_bps: ' bps', if_out_bps: ' bps',
   host_cpu_pct: '%', host_memory_pct: '%', host_filesystem_pct: '%', host_disk_util_pct: '%', temperature: ' °C',
+  host_swap_pct: '%', host_disk_latency_ms: ' ms', host_nic_errors: ' errors/s', host_clock_skew_s: ' s', host_fs_days_left: ' days',
 }
 
 const OP_WORD: Record<string, string> = {
@@ -115,6 +126,7 @@ export type Condition = { metric: string; operator: string; threshold: number | 
 export function conditionWords(c: Condition, opts: { unit?: string | null; names?: Record<string, string> } = {}): string {
   if (c.metric === 'if_oper_status') return 'Interface down'
   if (c.metric === 'uptime_reset') return 'Device restarted'
+  if (c.metric === 'if_speed_changed') return 'Interface speed changed'
   const unit = opts.unit != null ? (opts.unit === '%' ? '%' : opts.unit ? ` ${opts.unit}` : '') : METRIC_UNIT[c.metric] || ''
   const base = `${metricWords(c.metric, opts.names)} ${OP_WORD[c.operator] || c.operator} ${num(c.threshold)}${unit}`
   return c.reset_threshold != null ? `${base} (clears at ${num(c.reset_threshold)}${unit})` : base
@@ -123,6 +135,11 @@ export function conditionWords(c: Condition, opts: { unit?: string | null; names
 /** A rule's conditions and hold: "CPU ≥ 90 % for 5 min". */
 export function ruleWords(r: { conditions: Condition[]; min_duration?: number | null }, names?: Record<string, string>): string {
   const conds = (r.conditions || []).map((c) => conditionWords(c, { names })).join(' and ')
+  const metrics = (r.conditions || []).map((c) => c.metric)
+  // Flapping counts changes within its window (the hold, default 15 min);
+  // a speed change is an event with no hold.
+  if (metrics.includes('if_flaps')) return `${conds} in ${durationWords(Number(r.min_duration) || 900)}`
+  if (metrics.includes('if_speed_changed')) return conds
   return `${conds} ${holdWords(r.min_duration)}`.trim()
 }
 
@@ -131,10 +148,13 @@ export function ruleWords(r: { conditions: Condition[]; min_duration?: number | 
 const FIELD_WORD: Record<string, string> = {
   metric: 'metric', operator: 'operator', threshold: 'threshold', reset_threshold: 'clear level',
   min_duration: 'hold', clear_duration: 'recovery hold', severity: 'severity', priority: 'priority', if_role: 'interface role',
+  states: 'alerting states',
 }
 
 function valueWords(field: string, v: unknown): string {
   if (v == null || v === '') return field === 'priority' ? 'from severity' : 'none'
+  // A state recommendation's bad states (codes, or their labels when the caller resolved them).
+  if (Array.isArray(v)) return v.length ? v.map((x) => (typeof x === 'number' ? num(x) : String(x))).join(', ') : 'none'
   if (field === 'min_duration' || field === 'clear_duration') return durationWords(Number(v))
   if (field === 'if_role') return roleLabel(String(v))
   if (typeof v === 'number') return num(v)
@@ -175,7 +195,7 @@ export function overrideAssetKind(r: RuleLike): 'device' | 'server' {
 /** Whether a rule watches instances (interfaces, filesystems, template table rows), so a pattern means something. */
 export function ruleHasInstances(r: RuleLike): boolean {
   return ruleMetrics(r).some((m) => (INTERFACE_METRIC_KEYS as readonly string[]).includes(m) || isTemplateMetric(m)
-    || m === 'host_filesystem_pct' || m === 'temperature')
+    || m === 'host_filesystem_pct' || m === 'host_disk_latency_ms' || m === 'host_nic_errors' || m === 'temperature')
 }
 
 export type OverrideChanges = {

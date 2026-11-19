@@ -376,6 +376,19 @@
       ]
     },
     {
+      "key": "/dependencies",
+      "label": "Dependencies",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/discovery",
       "label": "Profiles",
       "group": "network",

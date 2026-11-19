@@ -69,6 +69,30 @@ async def put_policy(body: StormPolicy, db: AsyncSession = Depends(get_db), user
     return _payload(after)
 
 
+class FlapNoticeSettings(BaseModel):
+    send: bool = False
+
+
+@router.get("/flap-notices")
+async def get_flap_notices(db: AsyncSession = Depends(get_db), user: User = Depends(can_view)):
+    """Whether "flapping started/stopped" notices go to channels (off by
+    default; the notices are always recorded in the alert list)."""
+    from app.services import device_flap_notice_service as fns
+    return await fns.load_settings(db)
+
+
+@router.put("/flap-notices")
+async def put_flap_notices(body: FlapNoticeSettings, db: AsyncSession = Depends(get_db),
+                           user: User = Depends(can_manage)):
+    from app.services import device_flap_notice_service as fns
+    before = await fns.load_settings(db)
+    after = await fns.save_settings(db, body.model_dump(), actor_id=getattr(user, "id", None))
+    await write_audit_log(db, actor=user, action="alert.flap_notices.update", resource_type="settings",
+                          resource_id=fns.SETTINGS_KEY, metadata={"before": before, "after": after})
+    await db.commit()
+    return after
+
+
 _LIST_SQL = (
     "SELECT s.*, (SELECT count(*) FROM alert_storm_members m WHERE m.storm_id = s.id{mf}) AS member_count,"
     " (SELECT count(*) FROM alert_storm_members m LEFT JOIN alerts a ON a.id = m.alert_id"

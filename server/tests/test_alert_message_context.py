@@ -90,8 +90,9 @@ def _ctx(lifecycle, **kw):
 @pytest.mark.parametrize("subject,lifecycle,kw,expected", [
     ("[WARNING] ALERT: Memory high — srv-a", "new", {},
      "[WARNING] [New] Memory high — srv-a [INC-3f2a9c1d]"),
+    # A recovery leads with [RESOLVED], not the fault's severity (audit T-19).
     ("[WARNING] Resolved: Memory high — srv-a", "recovered", {},
-     "[WARNING] [Recovered] Memory high — srv-a [INC-3f2a9c1d]"),
+     "[RESOLVED] Memory high — srv-a [INC-3f2a9c1d]"),
     ("[CRITICAL] DOWN: Device Down — core-1 (10.0.0.1)", "new", {},
      "[CRITICAL] [New] DOWN: Device Down — core-1 (10.0.0.1) [INC-3f2a9c1d]"),
     ("[WARNING] ALERT: Memory high — srv-a", "reminder", dict(reminder_index=2, reminder_total=3),
@@ -231,6 +232,14 @@ def _loss_rule(**kw):
                             severity="warning", notify_channels=[CHANNEL], **kw)
 
 
+@pytest.mark.asyncio
+async def test_a_loss_rule_is_silent_on_a_move_into_down(mail):
+    """Audit N-01: no reply is a reachability event, not 100% packet loss."""
+    db = mail.world(_loss_rule())
+    out = await mail.run(db, "up", "down", rtt_ms=None, packet_loss=1.0)
+    assert out["notifications_sent"] == 0 and mail.sent == [] and db.alerts == []
+
+
 def test_the_event_accepts_a_null_rtt():
     event = StatusChangeEvent(device_id=DEVICE, hostname="a", ip_address="10.0.0.1",
                               old_status="up", new_status="down", rtt_ms=None, packet_loss=1.0)
@@ -264,8 +273,10 @@ def test_an_rtt_rule_never_reads_no_reply_as_zero_ms():
 
 @pytest.mark.asyncio
 async def test_complete_loss_never_shows_as_excellent_latency(mail):
+    # A degraded check that got nothing back: 100% loss and no latency. (A
+    # move into DOWN no longer fires a loss rule at all: audit N-01.)
     db = mail.world(_loss_rule())
-    out = await mail.run(db, "up", "down", rtt_ms=0.0, packet_loss=1.0)
+    out = await mail.run(db, "up", "degraded", rtt_ms=0.0, packet_loss=1.0)
     assert out["notifications_sent"] == 1
     [m] = mail.sent
     ctx = m["ctx"]
@@ -276,19 +287,19 @@ async def test_complete_loss_never_shows_as_excellent_latency(mail):
     assert ctx["headline_metric"]["secondary_value"] == "unavailable (no reply)"
     assert ctx["headline_metric"]["detail"] == "Threshold 5%"
     details = dict(ctx["details"])
-    assert details["Reachability"] == "Down (no reply)"
+    assert details["Reachability"] == "Degraded (no reply to this check)"
     assert details["Round-trip time"] == "unavailable (no reply)"
     for text_ in (m["html"], m["body"], m["subject"]):
         assert "0.0ms" not in text_ and "0.0 ms" not in text_ and "0 ms" not in text_
     assert m["ctx"]["message"] == "Packet loss on Switch edge-1 (10.0.0.1) rose to 100% (limit 5%)."
     assert m["ctx"]["message"] in m["body"] and "Time:" in m["body"]
-    # State and severity as separate pills: "DOWN" neutral, "WARNING" amber.
-    assert _chips(m["html"]) == ["DOWN", "WARNING"]
+    # State and severity as separate pills: "DEGRADED" neutral, "WARNING" amber.
+    assert _chips(m["html"]) == ["DEGRADED", "WARNING"]
     # Lifecycle and incident in subject and body.
     [row] = db.alerts
     ref = ap.incident_ref(row["id"])
     # The priority follows the severity (1.24.17: a warning rule derives P3).
-    assert m["subject"] == f"[WARNING] [P3] [New] DOWN: Packet Loss — edge-1 (10.0.0.1) [{ref}]"
+    assert m["subject"] == f"[WARNING] [P3] [New] DEGRADED: Packet Loss — edge-1 (10.0.0.1) [{ref}]"
     assert f"Incident {ref} · New" in m["html"]
     assert ctx["incident_ref"] == ref and ctx["lifecycle"] == "new"
 
@@ -302,10 +313,10 @@ async def test_a_degraded_latency_alert_reports_the_reply(mail):
     [m] = mail.sent
     head = m["ctx"]["headline_metric"]
     assert head["label"] == "Round-trip time" and head["value"] == "100.04 ms"
-    assert head["detail"] == "Threshold 100.00 ms"
+    assert head["detail"] == "Threshold 100 ms"
     assert head["secondary_label"] == "Packet loss" and head["secondary_value"] == "0%"
     assert m["ctx"]["message"] == ("Round-trip time on Switch edge-1 (10.0.0.1) rose to 100.04 ms "
-                         "(limit 100.00 ms).")
+                         "(limit 100 ms).")
     assert dict(m["ctx"]["details"])["Reachability"] == "Degraded (responding)"
 
 
@@ -326,7 +337,7 @@ async def test_device_recovery_mail_is_labelled_recovered_with_total_duration(ma
     await mail.run(db, "down", "up", rtt_ms=1.5, packet_loss=0.0)
     [m] = mail.sent
     ref = ap.incident_ref(opened["id"])
-    assert m["subject"] == f"[CRITICAL] [P2] [Recovered] Device Down — edge-1 (10.0.0.1) [{ref}]"
+    assert m["subject"] == f"[RESOLVED] [P2] Device Down — edge-1 (10.0.0.1) [{ref}]"
     assert f"Incident {ref} · Recovered after 2 hours 14 minutes" in m["html"]
     assert "Total duration" in m["html"]
     ctx = m["ctx"]
@@ -341,7 +352,7 @@ async def test_device_recovery_mail_is_labelled_recovered_with_total_duration(ma
 async def test_template_variables_render_no_reply_and_the_incident(mail):
     rule = _loss_rule(email_body="{hostname}: rtt {rtt}, loss {packet_loss}, {incident_ref} {lifecycle_label}")
     db = mail.world(rule)
-    await mail.run(db, "up", "down", rtt_ms=None, packet_loss=1.0)
+    await mail.run(db, "up", "degraded", rtt_ms=None, packet_loss=1.0)
     [m] = mail.sent
     [row] = db.alerts
     assert m["ctx"]["message"] == f"edge-1: rtt unavailable (no reply), loss 100%, {ap.incident_ref(row['id'])} New"

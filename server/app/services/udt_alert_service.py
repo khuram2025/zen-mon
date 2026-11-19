@@ -11,6 +11,12 @@ alerts for matching alert_rules with udt_* metrics:
 
 Event-driven rules use `threshold` only as an on/off (any value); the
 capacity rule is a numeric percentage threshold with raise/resolve.
+
+A reporting switch in maintenance (manual status or a maintenance window,
+one-off or recurring: app.services.maintenance_windows) raises nothing: its
+events are consumed without an alert and its port capacity is not judged
+(an open capacity alert stays as it is). Events without a switch are not
+affected.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal
 from app.services import alert_funnel
 from app.services import alert_rule_exclusions as rx
+from app.services import event_alerts
 
 logger = logging.getLogger("zenplus.udt_alerts")
 
@@ -79,12 +86,53 @@ def endpoint_message(event_type: str, ep: dict, device: dict | None, port: str |
     return f"{lead} {who} {verb}{where}" + (f" at {at}" if at else "") + "."
 
 
+def render_variables(rule, message: str, hostname: str, ip: str, *, alert_id=None,
+                     changed: bool = False, now: datetime | None = None) -> dict:
+    """Template variables of one Device Tracker notification: the event
+    sentence is what the tracker saw, the asset is the switch."""
+    from app.services import alert_phrasing as ap
+
+    r = dict(rule)
+    now = now or datetime.now(timezone.utc)
+    switch = ap.host_label(hostname, ip)
+    v = ap.rule_phrasing({"metric": r.get("metric"), "operator": r.get("operator"),
+                          "threshold": r.get("threshold")}, hostname=switch or None)
+    sentence = (message or "").strip()
+    v.update({
+        "event_sentence": sentence if sentence.endswith(".") else f"{sentence}.",
+        "rule_name": r.get("name") or "Alert", "hostname": hostname, "ip_address": ip,
+        "severity": str(r.get("severity") or "warning").upper(), "status": "ALERT",
+        "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
+    })
+    if alert_id:
+        v.update(ap.incident_context(alert_id=alert_id, first_seen=None, now=now,
+                                     lifecycle="changed" if changed else "new"))
+    return v
+
+
+def render_templates(rule, variables: dict) -> dict:
+    """{email_subject, email_body, sms_template} as sent: the rule's own
+    templates (alert_phrasing.effective_template) or the device wording."""
+    from app.services import alert_phrasing as ap
+
+    r = dict(rule)
+    defaults = ap.default_templates("device")
+    out = {}
+    for field in ("email_subject", "email_body", "sms_template"):
+        text_ = ap.effective_template(r.get(field), defaults[field])
+        for key, value in variables.items():
+            text_ = text_.replace("{" + key + "}", str(value))
+        out[field] = text_
+    return out
+
+
 async def _udt_rules(db: AsyncSession) -> list:
     prio = await alert_funnel.rule_priority_column(db)
     return (await db.execute(text(
         f"""SELECT id, name, metric, operator, threshold, severity, enabled,
                   device_id, group_id, device_type, location, notify_channels, cooldown,
-                  schedule_start, schedule_end, schedule_days, {prio}
+                  schedule_start, schedule_end, schedule_days,
+                  email_subject, email_body, sms_template, {prio}
            FROM alert_rules
            WHERE enabled AND metric LIKE 'udt\\_%' ESCAPE '\\'"""
     ))).mappings().all()
@@ -118,8 +166,10 @@ async def _recent_alert_exists(db: AsyncSession, rule_id, dedupe_key: str, coold
 
 
 async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
-                  alert_id=None, outbox: list | None = None) -> None:
-    """Announce one raised UDT alert.
+                  alert_id=None, outbox: list | None = None,
+                  delivery_event: str = "trigger") -> bool:
+    """Announce one raised UDT alert. Returns False when quiet hours held it
+    (or it failed), True when it was sent or queued.
 
     With an ``outbox`` the send is queued and goes out after the batch commits
     (:func:`_flush`): the shared dispatcher commits keyed sends, and the event
@@ -133,7 +183,7 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
         r = dict(rule)
         if not notifications_allowed(r.get("schedule_start"), r.get("schedule_end"),
                                                 r.get("schedule_days"), await get_configured_timezone(db)):
-            return
+            return False
     except Exception:
         logger.warning("quiet-hours check failed; notifying anyway", exc_info=True)
     try:
@@ -141,19 +191,27 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
         from app.services import alert_phrasing as ap
         sev = (rule["severity"] or "warning")
         hostname = (device or {}).get("hostname") or ""
+        ip = str((device or {}).get("ip_address") or "").split("/")[0]
         # UDT events already describe themselves ("Rogue endpoint: laptop-7
-        # (aa:bb:..) on sw-01 port 12"), so the message is the body. What was
-        # missing is a details table shaped like every other alert's — this used
-        # to hand the renderer a bare string where it expected label/value pairs.
+        # (aa:bb:..) on sw-01 port 12"): the message is the event sentence of
+        # the rule's templates (the device wording unless the rule has its own;
+        # {site}/{group} are filled by the dispatcher).
+        variables = render_variables(rule, message, hostname, ip, alert_id=alert_id,
+                                     changed=delivery_event != "trigger")
+        from app.services import notification_context
+        variables.update(await notification_context.asset_place(db, {"device_id": (device or {}).get("id")}))
+        texts = render_templates(rule, variables)
         ctx = {
             "rule_name": rule["name"],
             "severity": sev,
             "status": "ALERT",
             "hostname": hostname,
-            "ip_address": str((device or {}).get("ip_address") or "").split("/")[0],
-            "message": f"ZenPlus {sev.upper()} — {rule['name']}: {message}",
-            "subject": f"[{sev.upper()}] ALERT: {rule['name']}",
-            "body": message if message.endswith(".") else f"{message}.",
+            "ip_address": ip,
+            "message": texts["sms_template"],
+            "subject": texts["email_subject"],
+            "body": texts["email_body"],
+            "event_sentence": variables["event_sentence"],
+            **{k: variables[k] for k in ap.INCIDENT_KEYS if variables.get(k)},
             "details": [
                 ("Alert rule", rule["name"]),
                 ("Condition", ap.condition_label(rule["metric"], rule.get("operator"),
@@ -165,7 +223,7 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
             # Keyed on the alert row: one page per incident, channel and
             # recipient, linked to it in the delivery log.
             "alert_id": str(alert_id) if alert_id else None,
-            "delivery_event": "trigger",
+            "delivery_event": delivery_event,
             **alert_funnel.notification_fields(sev, rule.get("priority"), trigger=True),
         }
         channels = rule["notify_channels"] or []
@@ -173,10 +231,12 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
             channels = json.loads(channels)
         if outbox is not None:
             outbox.append((channels, ctx))
-            return
+            return True
         await dispatch_to_channels(db, channels, ctx)
+        return True
     except Exception:
         logger.exception("UDT alert notify failed")
+        return False
 
 
 async def _flush(db: AsyncSession, outbox: list) -> None:
@@ -206,8 +266,47 @@ async def _raise_alert(db: AsyncSession, rule, device_id, message: str, meta: di
     return row[0] if row else None
 
 
+async def _merge_into_open(db: AsyncSession, rule, dedupe: str, ev, message: str,
+                           device: dict | None, details: dict, *, outbox: list | None) -> bool:
+    """Fold this event into the rule's open row for the same endpoint and kind.
+
+    Returns False when there is no open row (the caller raises one). A merged
+    repeat pages again once the rule's cooldown (floor 60 s) has passed since
+    the row last paged — the same rhythm as the new rows it replaces.
+    """
+    row = (await db.execute(text(
+        f"SELECT id, triggered_at, metadata FROM alerts WHERE rule_id = :rid"
+        f" AND metadata->>'udt_dedupe' = :dk AND status IN {event_alerts.OPEN_STATUSES_SQL}"
+        f" ORDER BY triggered_at DESC LIMIT 1 FOR UPDATE"
+    ), {"rid": str(rule["id"]), "dk": dedupe})).mappings().first()
+    if row is None:
+        return False
+    now = datetime.now(timezone.utc)
+    meta = row["metadata"] or {}
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    extra = {k: v for k, v in details.items() if k not in event_alerts.HISTORY_KEYS}
+    extra["last_device_id"] = str(ev["device_id"]) if ev["device_id"] else None
+    patch = event_alerts.occurrence_patch(meta, now, message, extra=extra)
+    if event_alerts.repeat_page_due(meta, row["triggered_at"], now, max(int(rule["cooldown"] or 300), 60)):
+        if await _notify(db, rule, message, device, alert_id=row["id"], outbox=outbox,
+                         delivery_event=event_alerts.repeat_event(patch)):
+            patch["last_notified_at"] = now.isoformat()
+    await db.execute(text(
+        "UPDATE alerts SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :id"
+    ), {"id": row["id"], "m": json.dumps(patch, default=str)})
+    return True
+
+
 async def _process_events(db: AsyncSession, rules, outbox: list | None = None,
                           excluded: rx.Exclusions = rx.EMPTY) -> int:
+    # One worker at a time folds events into open rows: two workers taking
+    # separate batches could otherwise both raise a row for the same endpoint.
+    # The lock ends with this batch's transaction.
+    got = (await db.execute(text(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('zenplus:udt_event_pass', 0))"))).scalar()
+    if not got:
+        return 0
     events = (await db.execute(text(
         f"""SELECT id, event_type, endpoint_id, device_id, if_index, details
             FROM udt_events WHERE NOT alerted
@@ -216,6 +315,10 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None,
     ))).mappings().all()
     if not events:
         return 0
+    # A switch in maintenance (manual or a window, one-off or recurring) raises
+    # nothing: its events are consumed without an alert, as traps are.
+    from app.services.maintenance_windows import active_device_ids
+    in_maintenance = await active_device_ids(db)
 
     device_cache: dict[str, dict | None] = {}
 
@@ -237,6 +340,8 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None,
     raised = 0
     for ev in events:
         metric = EVENT_METRIC.get(ev["event_type"])
+        if metric and ev["device_id"] is not None and str(ev["device_id"]) in in_maintenance:
+            metric = None
         if metric:
             matching = [r for r in rules if r["metric"] == metric]
             if matching:
@@ -258,15 +363,21 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None,
                         if not _rule_scope_ok(rule, device, excluded):
                             continue
                         dedupe = f"{ev['event_type']}:{ep['mac']}"
-                        if await _recent_alert_exists(db, rule["id"], dedupe, rule["cooldown"] or 300):
-                            continue
                         details = ev["details"] or {}
                         if isinstance(details, str):
                             details = json.loads(details)
+                        # One open row per rule + kind + endpoint: a repeat
+                        # updates it instead of stacking another row.
+                        if await _merge_into_open(db, rule, dedupe, ev, message, device, details,
+                                                  outbox=outbox):
+                            continue
+                        if await _recent_alert_exists(db, rule["id"], dedupe, rule["cooldown"] or 300):
+                            continue
                         alert_id = await _raise_alert(db, rule, ev["device_id"], message, {
                             "udt_dedupe": dedupe, "mac": ep["mac"],
                             "endpoint_id": str(ev["endpoint_id"]),
                             "event_type": ev["event_type"], **details,
+                            **event_alerts.first_metadata(datetime.now(timezone.utc), message),
                         })
                         await _notify(db, rule, message, device, alert_id=alert_id, outbox=outbox)
                         raised += 1
@@ -289,10 +400,15 @@ async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None,
            GROUP BY d.id"""
     ))).mappings().all()
     from app.services.device_groups import membership
+    from app.services.maintenance_windows import active_device_ids
     groups = await membership.load(db, "device")
+    # A switch in maintenance is not judged: an open capacity alert stays as it is.
+    in_maintenance = await active_device_ids(db)
     for rule in cap_rules:
         thr = float(rule["threshold"] or 90)
         for dev in usage:
+            if str(dev["id"]) in in_maintenance:
+                continue
             row = dict(dev)
             row["groups"] = groups.get(str(row["id"]), set()) if groups is not None else None
             if not _rule_scope_ok(rule, row, excluded):

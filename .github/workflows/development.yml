@@ -82,8 +82,14 @@ jobs:
       - run: npm run test:site-tile
       - run: node scripts/test-escalation-ui.mjs
       - run: node scripts/test-alert-storm-ui.mjs
+      - run: node scripts/test-delivery-message.mjs
+      - run: node scripts/test-event-expiry-ui.mjs
+      - run: node scripts/test-dependencies-ui.mjs
+      - run: node scripts/test-maintenance-windows.mjs
       - run: node scripts/test-custom-time-range.mjs
       - run: node scripts/test-server-alert-rules.mjs
+      - run: node scripts/test-alert-rule-catalog.mjs
+      - run: node scripts/test-alert-rules-ui.mjs
       - run: node scripts/test-rule-exclusions.mjs
       - run: node scripts/test-rule-overrides-ui.mjs
       - run: node scripts/test-discovery-rules.mjs
@@ -143,5 +149,9 @@ jobs:
       - run: go test ./internal/...
       - if: runner.os == 'Windows'
         run: go build ./...
+      # The Linux agent binary (systemd services, load average, restart and
+      # shutdown evidence); the tray app and installer are Windows-only.
+      - if: runner.os == 'Linux'
+        run: go vet ./cmd/zenplus-agent ./internal/... && go build ./cmd/zenplus-agent
       # Installer creation/publication remains exclusively in the signing-gated
       # Windows agent release workflow. This job publishes no agent artifacts.

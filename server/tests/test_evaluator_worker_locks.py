@@ -30,8 +30,16 @@ PASSES = [
     ("app.services.apm_alert_service", "run_apm_alert_pass", "evaluate_apm_rules",
      wl.APM_ALERT_PASS),
     ("app.services.apm_slo_service", "run_slo_burn_pass", "evaluate_slo_burn", wl.APM_SLO_PASS),
+    ("app.services.appliance_alert_service", "run_appliance_alert_pass", "evaluate_appliance_rules",
+     wl.APPLIANCE_ALERT_PASS),
     ("app.services.alert_escalation_service", "run_escalation_pass", "sweep_escalations",
      wl.ESCALATION_PASS),
+    ("app.services.service_metric_alert_service", "run_service_metric_alert_pass",
+     "evaluate_service_metric_rules", wl.SERVICE_METRIC_ALERT_PASS),
+    ("app.services.virtualization_alert_service", "run_virtualization_alert_pass",
+     "evaluate_virtualization_rules", wl.VIRTUALIZATION_ALERT_PASS),
+    ("app.services.monitoring_gap_alert_service", "run_monitoring_gap_alert_pass",
+     "evaluate_monitoring_gap_rules", wl.MONITORING_GAP_ALERT_PASS),
 ]
 IDS = [p[3].split(":", 1)[1] for p in PASSES]
 

@@ -164,29 +164,29 @@ async def test_the_device_ctx_carries_the_mail_and_webhook_fields_it_always_did(
     rule = _rule(name="Packet Loss", metric="packet_loss", operator="gt", threshold=5,
                  severity="warning")
     db = AlertsDB([rule])
-    await engine.run(db, "up", "down", rtt_ms=0.0, packet_loss=1.0)
+    await engine.run(db, "up", "degraded", rtt_ms=0.0, packet_loss=1.0)
     [(_, ctx, _)] = engine.calls
     [row] = db.alerts
     # Webhook family: the keys the per-channel loop posted (PagerDuty's dedup
     # key is still zenplus:<rule>:<device>).
     assert {k: ctx[k] for k in ("hostname", "ip_address", "status", "severity", "is_recovery",
                                 "device_id", "rule_id", "rule_name", "event_type")} == {
-        "hostname": "edge-1", "ip_address": "10.0.0.1", "status": "DOWN", "severity": "warning",
+        "hostname": "edge-1", "ip_address": "10.0.0.1", "status": "DEGRADED", "severity": "warning",
         "is_recovery": False, "device_id": DEVICE, "rule_id": str(rule.id),
         "rule_name": "Packet Loss", "event_type": "trigger"}
-    assert ctx["message"] == ("ZenPlus WARNING — Packet Loss: Packet loss on Switch edge-1 (10.0.0.1) "
+    assert ctx["message"] == ("ZenPlus WARNING - Packet Loss: Packet loss on Switch edge-1 (10.0.0.1) "
                               "rose to 100% (limit 5%).")
     # Mail: subject, prose, headline, details and the dashboard link.
-    assert ctx["subject"] == "[WARNING] DOWN: Packet Loss — edge-1 (10.0.0.1)"
+    assert ctx["subject"] == "[WARNING] DEGRADED: Packet Loss — edge-1 (10.0.0.1)"
     assert ctx["body"] == "Packet loss on Switch edge-1 (10.0.0.1) rose to 100% (limit 5%)."
     assert ctx["headline_metric"]["label"] == "Packet loss"
     assert ctx["headline_metric"]["detail"] == "Threshold 5%"
-    assert dict(ctx["details"])["Reachability"] == "Down (no reply)"
+    assert dict(ctx["details"])["Reachability"] == "Degraded (no reply to this check)"
     assert ctx["action_url"] == "https://zp.example/alerts"
     assert ctx["incident_ref"] == ap.incident_ref(row["id"])
     # The SMS gateway's device placeholders.
     assert ctx["sms_template_values"] == {"hostname": "edge-1", "ip_address": "10.0.0.1",
-                                          "status": "DOWN"}
+                                          "status": "DEGRADED"}
     json.dumps(ctx)                           # a webhook posts it as JSON
 
 
@@ -413,7 +413,7 @@ async def test_postgres_a_replayed_recovery_of_the_same_incident_is_not_resent(w
     assert sorted(r for m in w.mails for r in m["to"]) == [
         "mgr@example.test", "noc@example.test", "ops@example.test"]
     assert len(w.hooks) == 1 and w.hooks[0]["is_recovery"] is True
-    assert "[Recovered]" in w.mails[0]["subject"]
+    assert w.mails[0]["subject"].startswith("[RESOLVED] ")
     assert {e for e, _, _ in _keys(w, alert_id)} == {"trigger", "recovery"}
 
     # A replay finds the same incident open again (an evaluation retried

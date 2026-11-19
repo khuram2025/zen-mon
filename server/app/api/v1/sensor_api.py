@@ -1109,7 +1109,11 @@ async def _dispatch_device_transitions(
 # Maintenance is decided per sample (as the central poller decides it per
 # check), from the in-scope windows that overlap the freshness range
 # [NOW() - max(2 x interval, 60 s), NOW()]: a backlog that crosses a window's
-# end must not exit the overlay with failures taken inside the window.
+# end must not exit the overlay with failures taken inside the window. A
+# recurring window (migrate-207) contributes the occurrences in that range,
+# so the end of an occurrence is handled exactly like the end of a one-off.
+
+from app.services.maintenance_windows import COVERS_DEVICE_SQL as _MAINT_COVERS_DEVICE_SQL
 
 _LOCK_OWNED_DEVICES = text("""
     SELECT d.id::text AS device_id, d.status, d.status_changed_at,
@@ -1119,15 +1123,12 @@ _LOCK_OWNED_DEVICES = text("""
            d.device_type, d.group_id::text AS group_id, d.location,
            NOW() AS db_now,
            COALESCE((
-               SELECT jsonb_agg(jsonb_build_array(m.starts_at, m.ends_at) ORDER BY m.starts_at, m.ends_at)
+               SELECT jsonb_agg(jsonb_build_array(o.occ_start, o.occ_end) ORDER BY o.occ_start, o.occ_end)
                  FROM device_maintenance m
-                WHERE m.starts_at <= NOW()
-                  AND m.ends_at >= NOW() - make_interval(
-                          secs => GREATEST(COALESCE(d.ping_interval, 60) * 2, 60))
-                  AND (   (m.scope_type = 'device' AND m.scope_device_id = d.id)
-                       OR (m.scope_type = 'group' AND m.scope_group_id = d.group_id)
-                       OR (m.scope_type = 'tag' AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
-                       OR m.scope_type = 'all')
+                CROSS JOIN LATERAL device_maintenance_occurrences(
+                       m, NOW() - make_interval(secs => GREATEST(COALESCE(d.ping_interval, 60) * 2, 60)),
+                       NOW()) o
+                WHERE """ + _MAINT_COVERS_DEVICE_SQL + """
            ), '[]'::jsonb) AS maintenance_windows
       FROM devices d
      WHERE d.id = ANY(:ids)

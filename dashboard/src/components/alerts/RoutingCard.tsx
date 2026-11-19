@@ -8,7 +8,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, Pencil } from 'lucide-react'
+import { ChevronDown, ChevronRight, Loader2, Pencil } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { useCan } from '@/stores/auth'
@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/Dialog'
 import { toast } from '@/components/ui/Toast'
 import { ChannelIcons, focusRing } from './AlertBits'
+import { deliveryMessage, smsLengthLabel, smsSplitNote } from './deliveryMessage'
 import { fmtAgo, fmtAlertDate } from './format'
 import type { AlertChannelRef, AlertDelivery, AlertDetail, AlertRuleDetail } from './types'
 
@@ -96,6 +97,7 @@ export function RoutingCard({ alert, now }: { alert: AlertDetail; now: number })
               {deliveries.map((d, i) => <DeliveryRow key={`${d.at}-${i}`} d={d} now={now} />)}
             </ul>
           )}
+          {deliveries.some((d) => d.subject || d.content || d.content_withheld) && <ContentRetentionHint />}
         </section>
 
         {esc && (
@@ -116,8 +118,11 @@ export function RoutingCard({ alert, now }: { alert: AlertDetail; now: number })
 }
 
 function DeliveryRow({ d, now }: { d: AlertDelivery; now: number }) {
+  const [open, setOpen] = useState(false)
   const o = OUTCOME[d.outcome] ?? OUTCOME.skipped
   const ch: AlertChannelRef[] = d.channel_type ? [{ id: d.channel_id ?? d.at, name: d.channel_name ?? d.channel_type, type: d.channel_type, enabled: true }] : []
+  const msg = deliveryMessage(d)
+  const split = msg?.sms ? smsSplitNote(msg.sms) : null
   return (
     <li className="rounded-md border border-border/60 px-2.5 py-1.5 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -128,9 +133,56 @@ function DeliveryRow({ d, now }: { d: AlertDelivery; now: number }) {
       </div>
       <div className="mt-0.5 text-xs text-muted" title={fmtAlertDate(d.at, { seconds: true, year: 'always' })}>
         {fmtAgo(d.at, now)}{d.latency_ms != null ? ` · ${d.latency_ms.toLocaleString()} ms` : ''}
+        {msg?.recipients ? ` · ${msg.recipients}` : ''}
       </div>
       {d.error && <div className="mt-0.5 break-words text-xs text-danger">{d.error}</div>}
+      {msg && (
+        <div className="mt-1">
+          <button
+            type="button"
+            className={cn('inline-flex items-center gap-1 text-xs text-primary hover:underline', focusRing)}
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} Message sent
+            {split && <span className="ml-1 text-warning">· {msg.sms!.segments} SMS parts</span>}
+          </button>
+          {open && (
+            <div className="mt-1 space-y-1 rounded-md border border-border/60 bg-surface2/30 p-2">
+              {msg.subject && (
+                <div className="text-xs"><span className="text-muted">Subject: </span><span className="break-words font-medium">{msg.subject}</span></div>
+              )}
+              {msg.content && (
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">{msg.content}</pre>
+              )}
+              {msg.withheld && (
+                <p className="text-xs text-muted">The message text is shown only to users who can manage alerts.</p>
+              )}
+              {msg.sms && (
+                <p className={cn('text-xs', split ? 'text-warning' : 'text-muted')}>
+                  {smsLengthLabel(msg.sms)}{split ? ` — ${split}` : ''}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </li>
+  )
+}
+
+/** One line: how long the text of sent messages is kept (GET/PUT /alerts/delivery-content). */
+function ContentRetentionHint() {
+  const { data } = useQuery<{ days: number }>({
+    queryKey: ['alerts', 'delivery-content'],
+    queryFn: async () => (await api.get('/alerts/delivery-content')).data,
+    staleTime: 5 * 60_000,
+  })
+  if (!data) return null
+  return (
+    <p className="mt-1 text-xs text-muted">
+      Message text is kept for {data.days} day{data.days === 1 ? '' : 's'}; the delivery record stays after that.
+    </p>
   )
 }
 

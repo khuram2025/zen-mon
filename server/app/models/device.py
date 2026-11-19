@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from sqlalchemy import (
     String,
     Boolean,
@@ -11,9 +11,12 @@ from sqlalchemy import (
     ForeignKey,
     LargeBinary,
     UniqueConstraint,
+    SmallInteger,
+    Date,
+    Time,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID, INET, JSONB, MACADDR
+from sqlalchemy.dialects.postgresql import ARRAY, UUID, INET, JSONB, MACADDR
 
 from app.core.database import Base
 
@@ -136,16 +139,26 @@ class DeviceMaintenance(Base):
 
     While a window is active the poller suppresses status transitions and
     alerting for covered devices; SLA/uptime calculations exclude samples
-    inside the window. Scope: one device, a group, a tag, or all devices.
+    inside the window. Scope: one device, a group, a tag, or all devices;
+    or (migrate-207) one server, a group's servers, or a server tag.
+    Recurring windows (migrate-207) set the recur_* columns and keep their
+    first occurrence in starts_at/ends_at: see app.services.maintenance_windows.
     """
 
     __tablename__ = "device_maintenance"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # device|group|tag|all
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # device|group|tag|all|server|server_group|server_tag
     scope_device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=True)
     scope_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("device_groups.id", ondelete="CASCADE"), nullable=True)
     scope_tag: Mapped[str] = mapped_column(String(120), nullable=True)
+    # REFERENCES servers(id) ON DELETE CASCADE in SQL (servers has no ORM model).
+    scope_server_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=True)
+    recur_days: Mapped[list] = mapped_column(ARRAY(SmallInteger), nullable=True)
+    recur_start_time: Mapped[time] = mapped_column(Time, nullable=True)
+    recur_duration_minutes: Mapped[int] = mapped_column(Integer, nullable=True)
+    recur_timezone: Mapped[str] = mapped_column(String(64), nullable=True)
+    recur_until: Mapped[date] = mapped_column(Date, nullable=True)
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=True)

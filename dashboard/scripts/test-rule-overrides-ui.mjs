@@ -39,6 +39,19 @@ assert.equal(M.ruleHasInstances({ metric: 'cpu' }), false)
 assert.equal(M.ruleWords({ conditions: [{ metric: 'cpu', operator: '>=', threshold: 90 }], min_duration: 300 }), 'CPU ≥ 90% for 5 min')
 assert.equal(M.conditionWords({ metric: 'tpl_fgt_cpu', operator: '>=', threshold: 95 }, { names: { fgt_cpu: 'CPU Usage' }, unit: '%' }), 'CPU Usage ≥ 95%')
 assert.equal(M.conditionWords({ metric: 'if_oper_status', operator: '==', threshold: 2 }), 'Interface down')
+// Interface quality (alerting plan G-12): rates, a flap window, a speed-change event.
+assert.equal(M.ruleWords({ conditions: [{ metric: 'if_error_rate_pct', operator: '>', threshold: 1 }], min_duration: 600 }),
+  'Interface error rate > 1% of packets for 10 min')
+assert.equal(M.ruleWords({ conditions: [{ metric: 'if_flaps', operator: '>=', threshold: 5 }], min_duration: 900 }),
+  'Interface state changes ≥ 5 in 15 min')
+assert.equal(M.ruleWords({ conditions: [{ metric: 'if_flaps', operator: '>=', threshold: 5 }], min_duration: null }),
+  'Interface state changes ≥ 5 in 15 min')
+assert.equal(M.ruleWords({ conditions: [{ metric: 'if_speed_changed', operator: '==', threshold: 1 }], min_duration: 0 }),
+  'Interface speed changed')
+for (const metric of ['if_error_rate_pct', 'if_discard_rate_pct', 'if_flaps', 'if_speed_changed']) {
+  assert.equal(M.ruleTakesOverrides({ metric }), true, `${metric} takes overrides`)
+  assert.equal(M.ruleHasInstances({ metric }), true, `${metric} is per interface`)
+}
 assert.equal(M.holdWords(0), 'at once')
 assert.equal(M.changeWords({ field: 'threshold', from: 90, to: 95 }), 'threshold 90 → 95')
 assert.equal(M.changeWords({ field: 'min_duration', from: 300, to: 600 }), 'hold 5 min → 10 min')

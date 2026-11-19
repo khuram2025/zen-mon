@@ -1,5 +1,9 @@
 """Transactional NCM events with per-channel, at-least-once delivery.
 
+Each queued notification carries its alert id and delivery event and is
+sent through host_alert_service.dispatch_to_channels (ncm_alerts.send), so
+delivery keys, grouping and alert storms apply as for rule alerts.
+
 Backup failures are correlated into one open incident per device: repeated
 failed attempts or jobs raise its occurrence count instead of creating new
 alerts, and the next successful capture closes it (resolving the alert and
@@ -109,6 +113,10 @@ async def _outbox(db, device_id, row, key, payload):
             {'id':device_id,'key':key,'channel':channel,'payload':json.dumps(payload)})
 
 
+# Event kinds that keep one open alert row per device (see event()).
+_ONE_OPEN_ROW_KINDS=frozenset({'config.changed'})
+
+
 async def event(db, device_id, kind, key, *, metadata=None, message=None, severity='warning'):
     row=await _device(db,device_id)
     if not row:
@@ -116,10 +124,31 @@ async def event(db, device_id, kind, key, *, metadata=None, message=None, severi
     default_summary, sentence = describe(kind, row, metadata, at=await _clock(db))
     summary=message or default_summary
     payload=_payload(row,device_id,key,kind,summary,metadata=metadata,severity=severity,sentence=sentence)
+    if kind in _ONE_OPEN_ROW_KINDS:
+        # One open alert per device for repeated changes (alerting audit N-10:
+        # 89 of 91 repeats came within 5 minutes, each a new row nobody closed).
+        # Every change is still notified through the outbox and kept in the
+        # NCM history; the open row counts them.
+        open_row=(await db.execute(text('''SELECT id, COALESCE((metadata->>'occurrences')::int, 1) AS n
+            FROM alerts WHERE device_id=:id AND status IN ('active','acknowledged')
+              AND metadata->>'ncm'='true' AND metadata->>'ncm_event'=:kind
+            ORDER BY triggered_at DESC LIMIT 1 FOR UPDATE'''),{'id':device_id,'kind':kind})).first()
+        if open_row:
+            await db.execute(text('''UPDATE alerts SET message=:message,
+                metadata=COALESCE(metadata,'{}'::jsonb)||CAST(:meta AS jsonb) WHERE id=:aid'''),
+                {'aid':open_row.id,'message':payload['subject'],
+                 'meta':json.dumps({'occurrences':open_row.n+1,'last_event_id':key,
+                                    'last_seen':datetime.now(timezone.utc).isoformat()})})
+            # Delivered through dispatch_to_channels (ncm_alerts.send): keyed
+            # to the open row, as a repeat of its trigger.
+            payload.update(alert_id=str(open_row.id),delivery_event=f'trigger:repeat:{open_row.n+1}')
+            await _outbox(db,device_id,row,key,payload)
+            return open_row.id
     alert=(await db.execute(text('''INSERT INTO alerts(device_id,rule_id,status,severity,message,triggered_at,metadata)
         VALUES (:id,NULL,'active',:severity,:message,now(),CAST(:metadata AS jsonb)) RETURNING id'''),
         {'id':device_id,'severity':severity,'message':payload['subject'],
          'metadata':json.dumps({'ncm':True,'ncm_event':kind,**payload['metadata'],'event_id':key})})).scalar()
+    payload.update(alert_id=str(alert),delivery_event='trigger')
     await _outbox(db,device_id,row,key,payload)
     return alert
 
@@ -168,33 +197,50 @@ async def resolve_incident(db, device_id, *, run_id=None):
         summary, sentence = describe('backup.recovered', device, meta, at=await _clock(db))
         payload=_payload(device,device_id,key,'backup.recovered',summary,
                          metadata=meta,severity='info',status='RESOLVED',sentence=sentence)
+        if row.alert_id:
+            payload.update(alert_id=str(row.alert_id),delivery_event='recovery')
         await _outbox(db,device_id,device,key,payload)
     return row.id
 
 
+# A due row is leased for this long before it is sent: the sender commits
+# (durable delivery keys), which releases the row lock, so the lease keeps
+# another worker from picking the row up mid-send. A crash retries after it.
+DELIVERY_LEASE_S=600
+
+
 async def deliver_due(db, *, limit=50, sender=None):
+    """Send due outbox rows. The default sender is ncm_alerts.send, which goes
+    through host_alert_service.dispatch_to_channels (delivery keys, grouping,
+    alert storms); ``sender(db, [channel_id], payload)`` returns how many
+    channels handled the notification and may commit."""
     if sender is None:
-        from app.services.ncm_delivery import send
+        from app.services.ncm_alerts import send
         sender=send
     rows=(await db.execute(text('''SELECT id,channel_id,payload,attempts,created_at FROM ncm_notification_outbox
         WHERE status='pending' AND next_attempt_at<=now() ORDER BY created_at
         LIMIT :limit FOR UPDATE SKIP LOCKED'''),{'limit':limit})).fetchall()
+    if rows:
+        await db.execute(text('''UPDATE ncm_notification_outbox SET next_attempt_at=now()+make_interval(secs=>:lease)
+            WHERE id = ANY(:ids)'''),{'ids':[r.id for r in rows],'lease':DELIVERY_LEASE_S})
+        await db.commit()
     delivered=0
     for row in rows:
         channel=(await db.execute(text('SELECT enabled FROM notification_channels WHERE id=:id'),{'id':row.channel_id})).first()
         if not channel or not channel.enabled:
             await db.execute(text("UPDATE ncm_notification_outbox SET status='disabled',last_error='Channel missing or disabled' WHERE id=:id"),{'id':row.id})
+            await db.commit()
             continue
         ok=False
         error='Delivery unsuccessful'
         terminal=False
+        payload = dict(row.payload)
+        if not payload.get('timestamp') and getattr(row, 'created_at', None):
+            payload['timestamp'] = row.created_at.isoformat()
         try:
-            async with db.begin_nested():
-                payload = dict(row.payload)
-                if not payload.get('timestamp') and getattr(row, 'created_at', None):
-                    payload['timestamp'] = row.created_at.isoformat()
-                ok=await sender(db,[row.channel_id],payload)==1
+            ok=int(await sender(db,[row.channel_id],payload) or 0)>=1
         except Exception as exc:
+            await db.rollback()
             # Provider messages may contain tokens/URLs. Persist only safe codes.
             from app.services.ncm_delivery import safe_error
             error=safe_error(exc)
@@ -217,5 +263,5 @@ async def deliver_due(db, *, limit=50, sender=None):
                 status=:status,last_error=:error,
                 next_attempt_at=now()+make_interval(secs=>:delay) WHERE id=:id'''),
                 {'id':row.id,'attempts':attempts,'error':error,'status':'failed' if terminal or attempts>=8 else 'pending','delay':min(3600,30*2**min(attempts,7))})
-    await db.commit()
+        await db.commit()
     return {'processed':len(rows),'delivered':delivered}

@@ -904,16 +904,7 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 		} else if v, ok := outO[idx]; ok {
 			iface.OutOctets = asUint(*v)
 		}
-		if v, ok := hcInP[idx]; ok && asUint(*v) > 0 {
-			iface.InUcastPkts = asUint(*v)
-		} else if v, ok := inP[idx]; ok {
-			iface.InUcastPkts = asUint(*v)
-		}
-		if v, ok := hcOutP[idx]; ok && asUint(*v) > 0 {
-			iface.OutUcastPkts = asUint(*v)
-		} else if v, ok := outP[idx]; ok {
-			iface.OutUcastPkts = asUint(*v)
-		}
+		iface.InUcastPkts, iface.OutUcastPkts = packetCounters(hcInP[idx], hcOutP[idx], inP[idx], outP[idx])
 		if v, ok := inE[idx]; ok {
 			iface.InErrors = asUint(*v)
 		}
@@ -940,6 +931,27 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 		out = append(out, iface)
 	}
 	return out, nil
+}
+
+// packetCounters picks the unicast packet counters for one interface, by the
+// rule used for octets: the 64-bit ifHC*UcastPkts pair when both directions
+// answered as Counter64 (a valid zero included), else the 32-bit
+// ifIn/OutUcastPkts pair. The width never mixes between directions and never
+// flips because an HC counter happened to read zero, so the server's
+// per-poll packet delta (wrap and reset handling as for octets and errors)
+// sees one consistent counter. Missing columns read 0.
+func packetCounters(hcIn, hcOut, in32, out32 *g.SnmpPDU) (uint64, uint64) {
+	if hcIn != nil && hcOut != nil && hcIn.Type == g.Counter64 && hcOut.Type == g.Counter64 {
+		return asUint(*hcIn), asUint(*hcOut)
+	}
+	var in, out uint64
+	if in32 != nil {
+		in = asUint(*in32)
+	}
+	if out32 != nil {
+		out = asUint(*out32)
+	}
+	return in, out
 }
 
 func (c *Collector) collectEntities(ctx context.Context, s *g.GoSNMP) ([]Entity, error) {
