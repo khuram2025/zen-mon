@@ -1,4 +1,4 @@
-"""Settings -> Storage: retention/purge, OS cleanup, backup & restore.
+"""Settings -> System status, storage sections: retention/purge, OS cleanup, backup & restore.
 
 Complements the existing GET /system/storage (disk/LVM status + expansion)
 in system_updates.py. All endpoints are admin-only and audited.
@@ -6,11 +6,13 @@ in system_updates.py. All endpoints are admin-only and audited.
 
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
 import tarfile
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -25,6 +27,8 @@ from app.models.user import User
 from app.services.audit_service import write_audit_log
 from app.services import storage_layout as layout_svc
 from app.services import storage_service as svc
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/system/storage", tags=["Storage"])
 
@@ -428,20 +432,36 @@ async def update_retention(
 
     value = body.model_dump()
     await svc._upsert_setting(db, svc.RETENTION_SETTINGS_KEY, value)
-    # The watchdog keeps this last valid policy for when the API is down.
-    svc.write_watchdog_policy(value)
-    changes = await svc.apply_retention(db, value, actor=user.username)
     await write_audit_log(
         db, actor=user, action="settings.storage.retention.update",
         resource_type="system_setting", resource_id=svc.RETENTION_SETTINGS_KEY,
-        metadata={"changes": changes},
     )
+    # The policy is saved first and on its own. It used to be rolled back when
+    # the metrics database did not answer, after the watchdog had already been
+    # handed it: the page said "failed" while the watchdog enforced it.
+    await db.commit()
+    # The watchdog keeps this last valid policy for when the API is down.
+    svc.write_watchdog_policy(value)
+    pending = False
+    try:
+        changes = await svc.apply_retention(db, value, actor=user.username)
+        await db.execute(text("DELETE FROM system_settings WHERE key = :k"),
+                         {"k": svc.RETENTION_PENDING_KEY})
+    except Exception:
+        logger.exception("retention saved; history retention could not be applied")
+        changes = []
+        pending = True
+        # The storage sweep applies it once the database answers again.
+        await svc._upsert_setting(db, svc.RETENTION_PENDING_KEY,
+                                  {"since": datetime.now(timezone.utc).isoformat()})
     await db.commit()
     errors = [c for c in changes if "error" in c]
     return {
-        "message": "Retention policy saved",
+        "message": ("Retention policy saved. History retention will be applied when the "
+                    "history store is available again." if pending else "Retention policy saved"),
         "ttl_changes": changes,
         "errors": errors,
+        "pending": pending,
     }
 
 
@@ -462,7 +482,11 @@ async def purge_data(
     user: User = Depends(require_admin_user),
 ):
     """Free space by dropping expired partitions (dry_run previews first)."""
-    inventory = await svc.ch_inventory()
+    try:
+        inventory = await svc.ch_inventory()
+    except Exception:
+        logger.exception("purge: the metrics database does not answer")
+        raise HTTPException(503, "Monitoring history is unavailable right now. Nothing was removed.")
     meta = {t["table"]: t for t in inventory}
     if body.table:
         if body.table not in meta:
@@ -590,7 +614,17 @@ def _backup_row_to_dict(r) -> dict:
         "last_restore_at": r[10].isoformat() if r[10] else None,
         "last_restore_status": r[11],
         "last_restore_error": r[12],
+        # A restore that finished after these services started: they still
+        # run on what was loaded before it. False again after the restart.
+        "restore_needs_restart": bool(r[11] == "completed" and r[10] and _aware(r[10]) >= _SERVICES_STARTED_AT),
     }
+
+
+_SERVICES_STARTED_AT = datetime.now(timezone.utc)
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 _BACKUP_SELECT = (
@@ -615,13 +649,9 @@ async def create_backup(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin_user),
 ):
-    running = (
-        await db.execute(
-            text("SELECT 1 FROM storage_backups WHERE status='running' LIMIT 1")
-        )
-    ).first()
+    running = await svc.backup_operation_running(db)
     if running:
-        raise HTTPException(409, "A backup is already running")
+        raise HTTPException(409, f"A {running} is already running. Try again when it has finished.")
 
     backup_id = str(uuid.uuid4())
     kind = "full" if body.include_clickhouse else "config"
@@ -681,6 +711,11 @@ async def restore_backup(
     except (ValueError, UnicodeDecodeError, OSError) as e:
         raise HTTPException(400, f"Backup cannot be restored: {e}")
 
+    # One backup or restore at a time: a restore replaces the database another
+    # restore or a backup is reading.
+    running = await svc.backup_operation_running(db)
+    if running:
+        raise HTTPException(409, f"A {running} is already running. Try again when it has finished.")
     await db.execute(
         text(
             "UPDATE storage_backups SET last_restore_at=NOW(), "
@@ -720,6 +755,24 @@ async def restart_services(
     return {"status": "ok", "message": "Services restarting"}
 
 
+def download_tar_args(backup_id: str) -> list[str]:
+    """``tar`` arguments for the downloadable archive of a backup.
+
+    Two trees: ``<id>/`` (dump, manifest, configuration) and, for a full
+    backup, ``clickhouse-<id>/`` (the metrics snapshot), which is what
+    ``upload`` expects back. ``--transform`` applies to every member whatever
+    its position, so the snapshot is named through its parent directory
+    (``appliance/<id>``): a rule on ``^<id>`` renamed *both* trees and the
+    download could not be imported again.
+    """
+    args = ["tar", "-cz", "-C", svc.BACKUP_ROOT, backup_id]
+    if os.path.isdir(os.path.join(svc.CH_BACKUP_HOST_ROOT, "appliance", backup_id)):
+        args += ["-C", svc.CH_BACKUP_HOST_ROOT,
+                 f"--transform=s|^appliance/{backup_id}|clickhouse-{backup_id}|",
+                 f"appliance/{backup_id}"]
+    return args
+
+
 @router.get("/backups/{backup_id}/download")
 async def download_backup(
     backup_id: uuid.UUID,
@@ -729,15 +782,21 @@ async def download_backup(
     backup_dir = os.path.join(svc.BACKUP_ROOT, str(backup_id))
     if not os.path.isdir(backup_dir):
         raise HTTPException(404, "Backup files not found")
-    ch_dir = os.path.join(svc.CH_BACKUP_HOST_ROOT, "appliance", str(backup_id))
+    row = (
+        await db.execute(text("SELECT status FROM storage_backups WHERE id=:id"), {"id": str(backup_id)})
+    ).first()
+    if row and row[0] != "completed":
+        raise HTTPException(409, f"Backup is {row[0]}; only a completed backup can be downloaded")
+    # The archive holds the database dump and the appliance's configuration
+    # secrets: who took a copy is recorded.
+    await write_audit_log(
+        db, actor=user, action="system.storage_backup_download",
+        resource_type="storage_backup", resource_id=str(backup_id),
+    )
+    await db.commit()
 
     # Stream tar czf - so multi-GB full backups never hit memory or temp disk.
-    args = ["tar", "-cz", "-C", svc.BACKUP_ROOT, str(backup_id)]
-    if os.path.isdir(ch_dir):
-        args += ["-C", os.path.join(svc.CH_BACKUP_HOST_ROOT, "appliance"),
-                 f"--transform=s|^{backup_id}|clickhouse-{backup_id}|",
-                 str(backup_id)]
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE)
+    proc = subprocess.Popen(download_tar_args(str(backup_id)), stdout=subprocess.PIPE)
 
     def _stream():
         try:
@@ -758,6 +817,10 @@ async def download_backup(
                 f'attachment; filename="zenplus-backup-{backup_id}.tar.gz"'
         },
     )
+
+
+class BackupAlreadyPresent(Exception):
+    """The uploaded archive is a backup this appliance still holds."""
 
 
 def _extract_uploaded_backup(tmp_path: str) -> dict:
@@ -786,6 +849,10 @@ def _extract_uploaded_backup(tmp_path: str) -> dict:
         if manifest_member.name != f"{backup_id}/manifest.json":
             raise ValueError("backup manifest is outside the backup directory")
         svc.validate_backup_manifest(mf, backup_id)
+        # Never write over a backup the appliance already has (it may be the
+        # one being taken or restored right now).
+        if os.path.exists(os.path.join(svc.BACKUP_ROOT, backup_id)):
+            raise BackupAlreadyPresent(backup_id)
         schema_member = next(
             (m for m in members if m.name == f"{backup_id}/clickhouse_schema.sql"), None
         )
@@ -836,7 +903,9 @@ async def upload_backup(
                 "ON CONFLICT (id) DO UPDATE SET status='completed', "
                 "size_bytes=EXCLUDED.size_bytes, include_clickhouse=EXCLUDED.include_clickhouse"
             ),
-            {"id": backup_id, "by": user.username, "kind": manifest.get("kind", "config"),
+            {"id": backup_id, "by": user.username,
+             "kind": manifest.get("kind") if manifest.get("kind") in ("config", "full")
+             else ("full" if has_ch else "config"),
              "ch": has_ch, "size": size, "path": backup_dir,
              "note": f"Imported from upload ({file.filename})"},
         )
@@ -847,6 +916,8 @@ async def upload_backup(
         await db.commit()
         return {"id": backup_id, "message": "Backup imported",
                 "include_clickhouse": has_ch}
+    except BackupAlreadyPresent:
+        raise HTTPException(409, "This backup is already on the appliance. Delete it first to import it again.")
     except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError,
             tarfile.TarError) as e:
         raise HTTPException(400, f"Invalid backup archive: {e}")
@@ -863,7 +934,7 @@ async def delete_backup(
 ):
     row = (
         await db.execute(
-            text("SELECT status FROM storage_backups WHERE id=:id"),
+            text("SELECT status, last_restore_status FROM storage_backups WHERE id=:id"),
             {"id": str(backup_id)},
         )
     ).first()
@@ -871,6 +942,8 @@ async def delete_backup(
         raise HTTPException(404, "Backup not found")
     if row[0] == "running":
         raise HTTPException(409, "Cannot delete a running backup")
+    if row[1] == "running":
+        raise HTTPException(409, "This backup is being restored. Delete it when the restore has finished.")
     await svc.delete_backup_files(str(backup_id))
     await db.execute(
         text("DELETE FROM storage_backups WHERE id=:id"), {"id": str(backup_id)}

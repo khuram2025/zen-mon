@@ -2,10 +2,13 @@ import { regionalDate } from '@/lib/regionalTime'
 import { Activity, Loader2 } from 'lucide-react'
 import { cn, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { EVENT_LABELS, bytes, eventSummary, groupEvents } from './storageMath'
+import { eventLabel, eventSummary, groupEvents, lowSpacePurge } from './storageMath'
+import type { StorageEvent } from './types'
 import { useStorageEvents } from './useStorage'
 
-function tone(type: string) {
+function tone(e: StorageEvent) {
+  const type = e.event_type
+  if (type === 'watchdog_purge' && !lowSpacePurge(e)) return 'text-text'
   if (type.includes('failed') || type === 'watchdog_ingest_paused' || type === 'watchdog_exhausted'
     || type === 'watchdog_insufficient'
     || type === 'watchdog_error') return 'text-danger'
@@ -44,14 +47,13 @@ export function ActivitySection() {
               return (
                 <li key={e.id} className="flex items-start justify-between gap-4 rounded-md px-2 py-1.5 text-xs hover:bg-surface2/40">
                   <div className="min-w-0">
-                    <span className={cn('font-medium', tone(e.event_type))}>
-                      {EVENT_LABELS[e.event_type] || 'Storage operation'}
+                    <span className={cn('font-medium', tone(e))}>
+                      {eventLabel(e)}
                     </span>
                     {count > 1 && (
                       <span className="ml-1.5 rounded bg-surface2 px-1.5 py-0.5 text-2xs tabular-nums text-text2">×{count}</span>
                     )}
                     <span className="ml-2 text-muted">
-                      {e.freed_bytes > 0 && e.event_type !== 'watchdog_reclaim' && <>freed {bytes(e.freed_bytes)} · </>}
                       {summary && <>{summary} · </>}
                       by {e.actor === 'watchdog' || e.actor === 'system' ? 'Automatic protection' : e.actor}
                     </span>

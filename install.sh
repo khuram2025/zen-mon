@@ -1244,7 +1244,7 @@ CONF
         return 1
     fi
 
-    # Storage management (Settings -> Storage): root-owned helper scripts,
+    # Storage management (Settings -> System status): root-owned helper scripts,
     # sudoers grant, backup dirs, and the ClickHouse backups-disk config.
     # Same script the OTA updater runs as a hook, so fresh installs and
     # updated appliances converge on an identical layout.
@@ -1252,7 +1252,7 @@ CONF
         if bash /opt/zenplus/scripts/setup-storage.sh; then
             log "Storage management configured"
         else
-            warn "storage management setup failed — Settings > Storage will be limited"
+            warn "storage management setup failed — Settings > System status (storage) will be limited"
         fi
     fi
 

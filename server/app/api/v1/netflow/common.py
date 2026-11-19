@@ -736,7 +736,7 @@ _RETENTION_TTL_S = 300.0
 
 @dataclass(frozen=True)
 class Retention:
-    """Configured retention (table TTL, applied by Settings -> Storage) and the
+    """Configured retention (table TTL, applied by Settings -> System status) and the
     earliest data actually present, per flow table. ``None`` days = no TTL."""
 
     days: dict[str, int | None]

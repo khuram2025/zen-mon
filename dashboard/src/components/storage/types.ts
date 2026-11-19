@@ -268,6 +268,8 @@ export interface Backup {
   last_restore_at: string | null
   last_restore_status: 'running' | 'completed' | 'failed' | null
   last_restore_error: string | null
+  /** A completed restore that services have not been restarted for yet. Absent on older servers: false. */
+  restore_needs_restart?: boolean
 }
 
 export interface StorageEvent {
