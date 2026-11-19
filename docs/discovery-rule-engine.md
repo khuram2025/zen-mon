@@ -73,6 +73,42 @@ A rule is global (not owned by a discovery profile) and has:
   because Python's `re` has no time limit. They run against at most 2,048
   characters of the fact.
 
+### Server inventory conditions
+
+What a server's agent reports, as conditions (discovery rules on servers and
+dynamic device groups; `app.services.server_inventory_facts`):
+
+| Fact | Source | What it holds |
+| --- | --- | --- |
+| Windows services | `server_service_inventory` | Every service on a Windows server (not only watched ones), by service name or display name; refreshed when anything changes and at least every 10 minutes |
+| Running Windows services | same | Services whose state is running |
+| Installed software | `server_software_inventory` | Installed programs / packages from the agent's inventory (every 6 hours; Windows and Linux) |
+| Software publishers | same | Their publishers |
+| Watched processes running | `server_process_inventory` | Processes on the agent policy's watch list that are running |
+
+Operators (type *inventory*): has any of (exact name, any case), has one
+containing (text), has none of, has none containing, is reported, is not
+reported.
+
+* **Not reported is unknown.** A server whose agent sent nothing for a fact (no
+  agent, inventory not collected yet, a Linux server for services) fails every
+  test except *is not reported*, the negative ones included: "has none of
+  W3SVC" is not true for a server that reports no services.
+* **Services are Windows only** for now; Linux agents report no services.
+* **Processes**: the agent reports only its busiest processes plus the watched
+  ones, so a general "process X is running" test would depend on load. Only
+  watched processes are offered; add a process to the agent policy's watch list
+  to test it.
+* **Volume**: only rows matching the names conditions use are read (exact names
+  and substrings collected from the conditions), plus one existence check per
+  server, so thousands of packages per server are never loaded whole.
+* The `changed` pass re-evaluates a server when its services or watched
+  processes change, or when a new inventory snapshot arrives
+  (`servers.inventory_updated_at`), while a rule uses these facts.
+* To alert on the servers a condition finds: tag them with a rule, or make a
+  dynamic group, and scope a server alert rule to that tag or group (server
+  alert rules take a tag and a group scope, see `docs/device-groups.md`).
+
 ### Actions
 
 | Action | Kind | Permission to activate |

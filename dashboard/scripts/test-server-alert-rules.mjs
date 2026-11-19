@@ -52,7 +52,9 @@ assert.equal(pl.server_id, null, 'all servers')
 assert.equal(pl.recovery_alert, true)
 assert.equal(pl.priority, 'P3')
 assert.equal(pl.target, null)
-for (const k of ['trigger_on', 'device_id', 'group_id', 'conditions', 'email_subject', 'escalation_levels']) {
+assert.equal(pl.scope_tag, null, 'all servers: no tag scope')
+assert.equal(pl.group_id, null, 'all servers: no group scope')
+for (const k of ['trigger_on', 'device_id', 'device_type', 'location', 'conditions', 'email_subject', 'escalation_levels']) {
   assert(!(k in pl), `the server rule body has no ${k}`)
 }
 assert.equal(S.serverDraftProblem(st), null)
@@ -81,6 +83,55 @@ assert.equal(S.serverRulePayload({ ...svc, target: ' MSSQLSERVER ' }).target, 'M
 assert.equal(S.serverRulePayload({ ...svc, target: 'x' }).min_duration, 0, 'service state rules fire on the reported state')
 assert.equal(S.serverDraftProblem({ ...svc, target: 'x', server_id: '__pick__' })?.step, 'scope')
 assert.equal(S.serverRulePayload({ ...svc, target: 'x', server_id: '__pick__' }).server_id, null)
+
+// Tag and group scope (rules without a server): only servers with the tag and/or in the device group.
+assert.equal(st.server_scope, 'one', 'a one-server rule opens on "One server"')
+const grp = 'aaaaaaaa-0000-0000-0000-000000000001'
+let scoped = W.ruleToState({ ...seeded, scope_tag: 'prod', group_id: grp })
+assert.equal(scoped.server_scope, 'group', 'a rule with a group (and a tag) opens on "Servers in a group"')
+assert.equal(scoped.scope_tag, 'prod'); assert.equal(scoped.group_id, grp)
+pl = S.serverRulePayload(scoped)
+assert.deepEqual([pl.server_id, pl.scope_tag, pl.group_id], [null, 'prod', grp], 'tag and group are saved together (AND)')
+assert.equal(W.ruleToState({ ...seeded, scope_tag: 'prod' }).server_scope, 'tag')
+assert.equal(W.ruleToState({ ...seeded, metric: 'ping_status', scope_tag: 'prod' }).server_scope, 'all', 'a device rule tag is not a server scope')
+assert.equal(S.serverScopeOf({ server_id: '__pick__', server_scope: 'all' }), 'one', 'a server id always means one server')
+assert.equal(S.serverScopeOf({ scope_tag: 'x' }), 'tag')
+assert.equal(S.serverScopeOf({ group_id: grp, scope_tag: 'x' }), 'group')
+assert.equal(S.serverScopeOf({ server_scope: 'tag' }), 'tag', 'the chosen scope holds while its value is still empty')
+// Choosing a scope: one server drops tag and group, tag <-> group keeps both, all servers clears everything.
+assert.deepEqual(S.serverScopeChange('one', scoped), { server_scope: 'one', server_id: '__pick__', scope_tag: '', group_id: '' })
+assert.deepEqual(S.serverScopeChange('tag', scoped), { server_scope: 'tag', server_id: '', scope_tag: 'prod', group_id: grp })
+assert.deepEqual(S.serverScopeChange('all', scoped), { server_scope: 'all', server_id: '', scope_tag: '', group_id: '' })
+pl = S.serverRulePayload({ ...scoped, ...S.serverScopeChange('one', scoped), server_id: 'srv-1' })
+assert.deepEqual([pl.server_id, pl.scope_tag, pl.group_id], ['srv-1', null, null], 'one server never sends a tag or group (the API refuses that)')
+pl = S.serverRulePayload({ ...scoped, ...S.serverScopeChange('all', scoped) })
+assert.deepEqual([pl.server_id, pl.scope_tag, pl.group_id], [null, null, null], 'back to all servers clears tag and group')
+pl = S.serverRulePayload({ ...scoped, server_scope: 'tag', group_id: '', scope_tag: '  prod  ' })
+assert.deepEqual([pl.scope_tag, pl.group_id], ['prod', null], 'the tag is trimmed; no group')
+// An incomplete scope is caught before saving.
+const tagMode = { ...scoped, ...S.serverScopeChange('all', scoped), server_scope: 'tag' }
+assert.equal(S.serverDraftProblem(tagMode)?.step, 'scope', 'tag scope without a tag')
+assert.equal(S.serverDraftProblem({ ...tagMode, server_scope: 'group' })?.step, 'scope', 'group scope without a group')
+assert.equal(S.serverDraftProblem({ ...tagMode, scope_tag: 'x'.repeat(65) })?.message, 'A tag is at most 64 characters.')
+assert.equal(S.serverDraftProblem({ ...tagMode, scope_tag: 'prod' }), null)
+assert.equal(S.serverDraftProblem({ ...tagMode, server_scope: 'group', group_id: grp }), null, 'a group alone is enough')
+// Rule list wording.
+assert.equal(S.serverScopeLabel({}), 'All servers')
+assert.equal(S.serverScopeLabel({ server_id: 'srv-1' }, { server: 'sql01' }), 'sql01')
+assert.equal(S.serverScopeLabel({ server_id: 'srv-1' }), 'One server')
+assert.equal(S.serverScopeLabel({ scope_tag: 'prod' }), 'Servers with tag prod')
+assert.equal(S.serverScopeLabel({ group_id: grp }, { group: 'SQL hosts' }), 'Servers in SQL hosts')
+assert.equal(S.serverScopeLabel({ group_id: grp, scope_tag: 'prod' }, { group: 'SQL hosts' }), 'Servers in SQL hosts with tag prod')
+assert.equal(S.serverScopeLabel({ group_id: grp }), 'Servers in one device group', 'a group the viewer cannot name')
+// Duplicate keeps the tag and group scope.
+const scopedCopy = S.serverRuleCopy({ ...seeded, scope_tag: 'prod', group_id: grp })
+assert.deepEqual([scopedCopy.server_id, scopedCopy.scope_tag, scopedCopy.group_id], [null, 'prod', grp])
+assert.match(wiz, /SERVER_SCOPE_OPTIONS\.map/, 'the wizard offers every server scope')
+assert.match(wiz, /<TagPicker[\s\S]{0,200}scope_tag/, 'the tag scope reuses the tag picker')
+assert.match(wiz, /queryFn: groupsApi\.list/, 'the group scope lists GET /device-groups (static and dynamic)')
+assert.match(wiz, /g\.kind === 'dynamic' \? 'dynamic' : 'static'/, 'the group picker shows the group kind')
+const tab = fs.readFileSync('src/pages/servers/detail/tabs/AlertsTab.tsx', 'utf8')
+assert(tab.includes("r.server_id ? 'This server' : sharedScope(r)"), 'the server Alerts tab names a shared rule\'s scope')
 
 // The rule list says what the rule watches instead of "Any change / host_agent_offline".
 assert.equal(S.serverMetricLabel('host_agent_offline'), 'Agent offline')
@@ -132,5 +183,6 @@ assert(wiz.includes("disabled={isEdit && (src === 'server') !== editingServerRul
 
 const page = fs.readFileSync('src/pages/AlertRulesPage.tsx', 'utf8')
 assert(page.includes("api.post('/host-alert-rules', serverRuleCopy(rule))"), 'Duplicate sends a server rule to the server API')
+assert(page.includes('serverScopeLabel(r, {'), 'the Alert Rules list names a server rule\'s tag / group scope')
 
 console.log('Server alert rules: wizard opens host_* rules on the Server tab, saves through /host-alert-rules (scope, schedule, reset, policy), validates names and scope, lists them in words; Device Down covers servers as on the server.')

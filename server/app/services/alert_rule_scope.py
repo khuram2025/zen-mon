@@ -61,6 +61,14 @@ def describe_scope(rule, names: dict | None = None) -> dict:
         if _get(rule, "server_id"):
             return {"kind": "server", "label": f"Server {n.get('server') or ''}".strip(),
                     "target": target}
+        tag, group = _get(rule, "scope_tag"), _get(rule, "group_id")
+        if group or tag:
+            label = "Servers"
+            if group:
+                label += f" in {n.get('group') or 'a group'}"
+            if tag:
+                label += f" with tag {tag}"
+            return {"kind": "server_scope", "label": label, "target": target}
         return {"kind": "global", "label": "All monitored servers", "target": target}
     if fam == "apm":
         metric = _get(rule, 'metric')
@@ -191,7 +199,17 @@ async def affected(db: AsyncSession, rule) -> dict:
         if fam == "server":
             if _get(rule, "server_id"):
                 return {"count": 1, "noun": "server", "shared": False}
-            n = (await db.execute(text("SELECT count(*) FROM servers"))).scalar() or 0
+            where, params = [], {}
+            if _get(rule, "scope_tag"):
+                where.append("EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(s.tags, '[]'::jsonb)) _t"
+                             " WHERE LOWER(_t) = LOWER(:tag))")
+                params["tag"] = str(_get(rule, "scope_tag")).strip()
+            if _get(rule, "group_id"):
+                where.append("EXISTS (SELECT 1 FROM device_group_member_closure c WHERE c.group_id = CAST(:g AS uuid)"
+                             " AND c.asset_kind = 'server' AND c.asset_id = s.id)")
+                params["g"] = str(_get(rule, "group_id"))
+            sql = "SELECT count(*) FROM servers s" + (" WHERE " + " AND ".join(where) if where else "")
+            n = (await db.execute(text(sql), params)).scalar() or 0
             return {"count": int(n), "noun": "servers", "shared": n != 1}
         if fam == "service":
             if _get(rule, "service_check_id"):
@@ -293,7 +311,7 @@ async def rule_in_user_scope(db: AsyncSession, rule, scope: list[str] | None) ->
         owner = (await resolve_exporter_owners(db, [ip])).get(ip) if ip else None
         return owner is not None and bool(set(owner.tags) & set(scope))
     tag = _get(rule, "scope_tag")
-    if tag and family(rule) == "device":
+    if tag and family(rule) in ("device", "server"):
         return bool(tag_set([tag]) & set(scope))
     return False
 

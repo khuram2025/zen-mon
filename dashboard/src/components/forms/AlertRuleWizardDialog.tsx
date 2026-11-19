@@ -64,8 +64,15 @@ import {
   serverMetricKind,
   serverRuleCondition,
   serverRulePayload,
+  serverScopeChange,
+  serverScopeOf,
+  serverScopeLabel,
   serverWatchChange,
+  SERVER_SCOPE_OPTIONS,
+  type ServerScopeMode,
 } from './serverAlertRule'
+import { TagPicker } from '@/components/tags/TagPicker'
+import { groupsApi, treeOrder, type DeviceGroup } from '@/pages/groups/api'
 import { usePolicies } from '@/features/escalation/api'
 import {
   PRIORITIES, PRIORITY_META, autoPriorityText, derivePriority, disabledPolicyText, effectivePriority, fmtMinutes, legacyTiersText,
@@ -119,6 +126,8 @@ type WizardState = {
   scope_tag: string
   /** Server rules: one server, '' = all servers, '__pick__' = "one server" chosen but none picked yet. */
   server_id: string
+  /** Server rules: all servers, one server, or the servers with a tag (scope_tag) and/or in a device group (group_id). */
+  server_scope: 'all' | 'one' | 'tag' | 'group'
   service_check_id: string
   service_check_group_id: string
   trap_oid: string
@@ -258,6 +267,7 @@ const DEFAULT_STATE: WizardState = {
   location: '',
   scope_tag: '',
   server_id: '',
+  server_scope: 'all',
   service_check_id: '',
   service_check_group_id: '',
   trap_oid: '',
@@ -409,6 +419,8 @@ function ruleToState(rule: any): WizardState {
     location: rule.location || '',
     scope_tag: rule.scope_tag || '',
     server_id: rule.server_id || '',
+    // Self-contained like the rest (see priority above): one server wins, then a group, then a tag.
+    server_scope: rule.server_id ? 'one' : source === 'server' && rule.group_id ? 'group' : source === 'server' && rule.scope_tag ? 'tag' : 'all',
     service_check_id: rule.service_check_id || '',
     service_check_group_id: rule.service_check_group_id || '',
     trap_oid: rule.trap_oid || '',
@@ -650,6 +662,17 @@ export function AlertRuleWizardDialog({
     enabled: open && isServer,
   })
   const servers: any[] = serversResp?.items || []
+  const serverScope = isServer ? serverScopeOf(s) : 'all'
+
+  // Server rules scoped to a device group: every group (static and dynamic), in tree order.
+  const { data: deviceGroupList } = useQuery<DeviceGroup[]>({
+    queryKey: ['groups-tree'],
+    queryFn: groupsApi.list,
+    enabled: open && isServer,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const deviceGroups = useMemo(() => treeOrder(deviceGroupList || []), [deviceGroupList])
 
   const { data: serviceGroups = [] } = useQuery<any[]>({
     queryKey: ['service-check-groups'],
@@ -1112,7 +1135,9 @@ export function AlertRuleWizardDialog({
                         // Entering/leaving APM swaps the condition metric domain,
                         // and `target` changes meaning (service name vs interface).
                         if (src === 'server') {
-                          setS({ ...s, source: src, target: '', server_id: '', min_duration: 300, clear_duration: null, reset_mode: 'auto', recovery_alert: true,
+                          // A device scope (group, tag) does not carry over: a new server rule covers all servers.
+                          setS({ ...s, source: src, target: '', server_id: '', server_scope: 'all', group_id: '', scope_tag: '', device_id: '', device_type: '', location: '',
+                            min_duration: 300, clear_duration: null, reset_mode: 'auto', recovery_alert: true,
                             escalation_mode: s.escalation_mode === 'legacy' ? 'default' : s.escalation_mode,
                             conditions: [{ metric: 'host_cpu_pct', operator: '>', threshold: 90, reset_threshold: null }] })
                         } else if (src === 'syslog') {
@@ -1121,7 +1146,12 @@ export function AlertRuleWizardDialog({
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
                         } else if (src === 'netflow') {
                           setS({ ...s, source: src, target: '', reset_mode: 'auto', recovery_alert: true })
-                        } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow' || s.source === 'server') {
+                        } else if (s.source === 'server') {
+                          // Nor does a server tag / group scope carry over to a device rule.
+                          setScopeMode('all')
+                          setS({ ...s, source: src, target: '', server_id: '', server_scope: 'all', group_id: '', scope_tag: '',
+                            conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                        } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow') {
                           setS({ ...s, source: src, target: '', server_id: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
                         } else {
                           setS({ ...s, source: src })
@@ -1517,15 +1547,61 @@ export function AlertRuleWizardDialog({
                   </FormField>
                 ) : isServer ? (
                   <>
-                    <FormField label="Apply to" hint="All servers covers every agent-monitored server, including servers added later.">
-                      <Select value={s.server_id ? 'one' : 'all'} onValueChange={(v) => setS({ ...s, server_id: v === 'one' ? '__pick__' : '' })}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
+                    <FormField label="Apply to" hint={serverScope === 'tag' || serverScope === 'group'
+                      ? 'Servers that get the tag or join the group later are covered automatically.'
+                      : 'All servers covers every agent-monitored server, including servers added later.'}>
+                      <Select value={serverScope} onValueChange={(v) => setS({ ...s, ...serverScopeChange(v as ServerScopeMode, s) })}>
+                        <SelectTrigger aria-label="Servers the rule applies to"><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="all">All servers</SelectItem>
-                          <SelectItem value="one">Specific server</SelectItem>
+                          {SERVER_SCOPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </FormField>
+                    {(serverScope === 'tag' || serverScope === 'group') && (
+                      // Tag and group combine: a server must carry the tag and be in the group. The one the scope
+                      // is named after comes first; the other is optional.
+                      <div className={cn('flex gap-3', serverScope === 'group' ? 'flex-col-reverse' : 'flex-col')}>
+                        <FormField
+                          label={serverScope === 'tag' ? 'Tag' : 'And with tag (optional)'}
+                          hint="A user limited to tags can create rules for their own tags."
+                        >
+                          <TagPicker
+                            value={s.scope_tag ? [s.scope_tag] : []}
+                            // One tag: picking another replaces it.
+                            onChange={(next) => setS({ ...s, scope_tag: next.length ? next[next.length - 1] : '' })}
+                            placeholder={s.scope_tag ? 'Replace the tag…' : 'Choose a tag…'}
+                            allowCreate
+                          />
+                        </FormField>
+                        <FormField
+                          label={serverScope === 'group' ? 'Device group' : 'And in group (optional)'}
+                          hint="Static or dynamic; members of its subgroups are included."
+                        >
+                          <Select
+                            value={s.group_id || '__none__'}
+                            onValueChange={(v) => setS({ ...s, group_id: v === '__none__' ? '' : v })}
+                          >
+                            <SelectTrigger aria-label="Device group"><SelectValue placeholder="Select group" /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__none__" disabled={serverScope === 'group'}>
+                                {serverScope === 'group' ? 'Select group' : 'Any group'}
+                              </SelectItem>
+                              {s.group_id && !deviceGroups.some(({ group: g }) => g.id === s.group_id) && (
+                                <SelectItem value={s.group_id}>Group {s.group_id.slice(0, 8)}</SelectItem>
+                              )}
+                              {deviceGroups.map(({ group: g, depth }) => (
+                                <SelectItem key={g.id} value={g.id}>
+                                  <span style={{ paddingLeft: `${depth * 0.75}rem` }}>{g.name}</span>
+                                  <span className="ml-1.5 text-2xs text-muted">
+                                    · {g.kind === 'dynamic' ? 'dynamic' : 'static'}{(g.asset_kinds || []).includes('server') ? '' : ', devices only'}
+                                  </span>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </FormField>
+                      </div>
+                    )}
                     {s.server_id && (
                       <FormField label="Server">
                         <Select value={s.server_id} onValueChange={(v) => setS({ ...s, server_id: v })}>
@@ -1959,8 +2035,10 @@ export function AlertRuleWizardDialog({
                   </>
                 ) : isServer ? (
                   <>
-                    <ReviewRow label="Scope" value={!s.server_id ? 'All servers'
-                      : (() => { const x = servers.find((v: any) => v.id === s.server_id); return x ? (x.display_name || x.hostname) : 'One server' })()} />
+                    <ReviewRow label="Scope" value={serverScopeLabel(s, {
+                      server: (() => { const x = servers.find((v: any) => v.id === s.server_id); return x ? (x.display_name || x.hostname) : null })(),
+                      group: deviceGroups.find(({ group: g }) => g.id === s.group_id)?.group.name,
+                    })} />
                     {serverKind === 'pct' && <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />}
                   </>
                 ) : rebootRule ? null : (

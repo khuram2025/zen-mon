@@ -176,6 +176,13 @@ def iface_rows(ifaces) -> dict[str, dict]:
     return out
 
 
+def needles(rules: Iterable[dict]) -> dict:
+    """Names the rules' server inventory conditions look for (see
+    ``server_inventory_facts.needles``)."""
+    from app.services.server_inventory_facts import needles as _needles
+    return _needles(r.get("condition") for r in rules)
+
+
 def needs(rules: Iterable[dict]) -> set[str]:
     """Extra loaders the rules need: facts they test and actions they use
     (interfaces, topology, sensors, baselines, service_checks)."""
@@ -201,7 +208,7 @@ def needs(rules: Iterable[dict]) -> set[str]:
     return out
 
 
-ALL_EXTRAS = frozenset({"interfaces", "topology", "sensors", "baselines", "service_checks"})
+ALL_EXTRAS = frozenset({"interfaces", "topology", "sensors", "baselines", "service_checks", "server_inventory"})
 
 
 def facts_for(kind: str, row: Any) -> dict:
@@ -432,7 +439,7 @@ def _filters(kind: str, targets: dict, params: dict) -> str:
 
 
 async def load_assets(db: AsyncSession, targets: dict, *, limit: int = MAX_ASSETS,
-                      extras: Iterable[str] = ()) -> list[tuple[str, dict]]:
+                      extras: Iterable[str] = (), needles: dict | None = None) -> list[tuple[str, dict]]:
     """[(kind, row)] for the manual-run target filter.
 
     ``targets``: kinds (device, server, child), ids / device_ids /
@@ -450,11 +457,12 @@ async def load_assets(db: AsyncSession, targets: dict, *, limit: int = MAX_ASSET
         rows = (await db.execute(text(base + _filters(kind, targets, params) + f" ORDER BY {order} LIMIT :lim"),
                                  params)).mappings().all()
         out.extend((kind, dict(r)) for r in rows)
-    await attach_sets(db, out, extras)
+    await attach_sets(db, out, extras, needles)
     return out
 
 
-async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]], extras: Iterable[str] = ()) -> None:
+async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]], extras: Iterable[str] = (),
+                      needles: dict | None = None) -> None:
     """Current map placements (``_maps``), dependency parents (``_parents``),
     sensor assignments (``_sensor_ids``) and service checks made from templates
     (``_svc_templates``); with ``extras`` also interfaces, topology, sensors and
@@ -492,6 +500,11 @@ async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]], extras: 
             r["_policy_platforms"] = platforms
     if servers and "baselines" in extras:
         await _attach_baselines(db, servers)
+    if servers and "server_inventory" in extras and needles:
+        from app.services import server_inventory_facts
+        facts = await server_inventory_facts.load(db, [str(r["id"]) for r in servers], needles)
+        for r in servers:
+            r["_inventory"] = facts.get(str(r["id"]), {})
 
 
 def check_name(template_name: str, hostname: str | None) -> str:
@@ -643,7 +656,7 @@ def _manual(rules: list[dict]) -> list[dict]:
 
 
 async def preview_inventory(db: AsyncSession, rules: list[dict], targets: dict, *, limit: int = MAX_ASSETS) -> dict:
-    assets = await load_assets(db, targets, limit=limit, extras=needs(rules))
+    assets = await load_assets(db, targets, limit=limit, extras=needs(rules), needles=needles(rules))
     owned = await load_owned(db, assets)
     changes, matched, _ = evaluate_assets(assets, _manual(rules), owned, trigger="manual")
     names = {(k, str(r["id"])): (r.get("hostname") or r.get("display_name"),
@@ -1069,7 +1082,7 @@ async def explain(db: AsyncSession, kind: str, asset_id: uuid.UUID, rules: list[
     if row is None:
         return None
     row = dict(row)
-    await attach_sets(db, [(kind, row)], ALL_EXTRAS)
+    await attach_sets(db, [(kind, row)], ALL_EXTRAS, needles(rules))
     current = current_values(kind, row)
     owned = (await load_owned(db, [(kind, row)])).get((kind, str(asset_id)), {})
     plan = engine.evaluate(facts_for(kind, row), _manual(rules), trigger="manual", kind=kind)
@@ -1103,7 +1116,7 @@ async def explain(db: AsyncSession, kind: str, asset_id: uuid.UUID, rules: list[
 async def conflicts(db: AsyncSession, rules: list[dict], *, limit: int = MAX_ASSETS) -> dict:
     """Over the current inventory: how often each active rule matches and wins,
     which rules override which, and rules that match nothing or never win."""
-    assets = await load_assets(db, {}, limit=limit, extras=needs(rules))
+    assets = await load_assets(db, {}, limit=limit, extras=needs(rules), needles=needles(rules))
     stats = {r["id"]: {"rule_id": r["id"], "rule_name": r["name"], "priority": r["priority"], "matches": 0,
                        "wins": 0, "shadowed": 0} for r in rules}
     pairs: dict = {}
@@ -1197,7 +1210,7 @@ async def sweep_created(db: AsyncSession, *, batch: int = 200, apply_credential=
         created = [r for r in every if "created" in (r.get("triggers") or [])]
         active = [r for r in created if r["mode"] == "active"]
         simulating = [r for r in created if r["mode"] == "simulate"]
-        await attach_sets(db, assets, needs(active + simulating))
+        await attach_sets(db, assets, needs(active + simulating), needles(active + simulating))
         revision = engine.rules_revision(active)
         owned = await load_owned(db, assets)
         changes, matched, plans = evaluate_assets(assets, active, owned, trigger="created")

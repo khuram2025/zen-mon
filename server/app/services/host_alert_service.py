@@ -178,6 +178,41 @@ async def _servers(db: AsyncSession) -> dict[str, str]:
     return {str(r[0]): (r[1] or "server") for r in rows}
 
 
+async def _server_scope_rows(db: AsyncSession) -> dict[str, dict]:
+    """{server_id: {id, tags, _groups}} for rules scoped by tag or group, with
+    group membership (dynamic groups and subgroups) for this pass."""
+    rows = (await db.execute(text("SELECT id::text, tags FROM servers"))).all()
+    from app.services.device_groups import membership
+    groups = await membership.load(db, "server") or {}
+    return {sid: {"id": sid, "tags": tags, "_groups": groups.get(sid, set())} for sid, tags in rows}
+
+
+async def _resolve_out_of_scope(db: AsyncSession, rule, in_scope: set[str]) -> int:
+    """Open incidents of a tag/group-scoped rule on servers that left its scope
+    (tag removed, group membership changed) are resolved without a recovery
+    notice, the way an exclusion resolves them: the rule no longer watches the
+    server, so it cannot say the condition cleared."""
+    from app.services import alert_workflow as wf
+    rows = (await db.execute(text(
+        "SELECT id, status, server_id::text AS sid FROM alerts WHERE server_id IS NOT NULL"
+        " AND status IN ('pending','active','acknowledged')"
+        " AND (rule_id = CAST(:rid AS uuid) OR (rule_id IS NULL AND metadata->>'rule_id' = :srid))"),
+        {"rid": str(rule.id), "srid": str(rule.id)})).all()
+    note = f"Rule “{rule.name}” no longer covers this server (its tag or group scope)"
+    n = 0
+    for row in rows:
+        if row.sid in in_scope:
+            continue
+        await db.execute(text(
+            "UPDATE alerts SET status = 'resolved', resolved_at = NOW(),"
+            " metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :id"),
+            {"id": row.id, "m": json.dumps({"resolved_by": "out_of_scope", "resolution_note": note})})
+        await wf.record_event(db, row.id, "resolved", source="rule_scope", reason=note, old_status=row.status,
+                              new_status="resolved", detail={"rule_id": str(rule.id), "server_id": row.sid})
+        n += 1
+    return n
+
+
 async def _server_ips(db: AsyncSession) -> dict[str, str]:
     """{server_id: primary IP} so a message names "Server app-01 (10.0.0.5)"."""
     try:
@@ -1181,7 +1216,9 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     since = 0.0
     counts = {"raised": 0, "resolved": 0}
     from app.services import alert_rule_exclusions
+    from app.services import alert_rule_exclusions as rx
     excluded = await alert_rule_exclusions.load(db)
+    scoped_servers: dict | None = None
     # Per-server overrides (migrate-193), once per pass, with server group membership.
     from app.services import alert_rule_overrides as ovr
     overrides = await ovr.load(db)
@@ -1195,6 +1232,12 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
             getattr(rule, "schedule_days", None), _tz,
         )
         targets = [str(rule.server_id)] if rule.server_id else list(servers)
+        if not rule.server_id and (getattr(rule, "scope_tag", None) or getattr(rule, "group_id", None)):
+            # Tag / group scope (servers classified by tags or dynamic groups).
+            if scoped_servers is None:
+                scoped_servers = await _server_scope_rows(db)
+            targets = [sid for sid in targets if rx.server_scope_covers(rule, scoped_servers.get(sid) or {"id": sid})]
+            await _resolve_out_of_scope(db, rule, set(targets))
         if excluded:
             # A shared rule disabled for single servers (migrate-187) skips them.
             targets = [sid for sid in targets if not excluded.server(rule.id, sid)]

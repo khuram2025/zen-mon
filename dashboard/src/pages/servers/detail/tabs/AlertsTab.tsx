@@ -33,6 +33,8 @@ import { ExcludeRuleDialog, useRuleExclusion } from '@/components/alerts/RuleExc
 import { ruleSwitch, type RuleExclusion } from '@/components/alerts/exclusionModel'
 import { useCan } from '@/stores/auth'
 import type { ServerItem } from '@/types/servers'
+import { serverScopeLabel } from '@/components/forms/serverAlertRule'
+import { groupsApi } from '@/pages/groups/api'
 import { EmptyState, Panel, Pill, Segmented, StatTile, type Tone } from '../ui'
 
 /* ── Types and labels ────────────────────────────────────────────── */
@@ -65,6 +67,10 @@ export interface HostRule {
   auto_reset_threshold?: number | null
   recovery_alert?: boolean
   server_id: string | null
+  /** Shared rules: only servers carrying this tag (null = any). */
+  scope_tag?: string | null
+  /** Shared rules: only members of this device group, subgroups and dynamic membership included (null = any). */
+  group_id?: string | null
   target: string | null
   /** Global rules only: who disabled it for this server and when (null = runs here). */
   excluded?: RuleExclusion | null
@@ -214,6 +220,11 @@ export function AlertsTab({ server }: { server: ServerItem }) {
     queryFn: async () => (await api.get('/host-alert-rules', { params: { server_id: serverId } })).data,
   })
   const rules = rulesQ.data?.items || []
+  // Names for shared rules scoped to a device group (the API lists only the ones that cover this server).
+  const hasGroupScoped = rules.some((r) => !r.server_id && r.group_id)
+  const { data: groupList } = useQuery({ queryKey: ['groups-tree'], queryFn: groupsApi.list, enabled: hasGroupScoped, retry: false, staleTime: 60_000 })
+  const sharedScope = (r: HostRule) =>
+    serverScopeLabel({ scope_tag: r.scope_tag, group_id: r.group_id }, { group: (groupList || []).find((g) => g.id === r.group_id)?.name })
 
   const { data: silencesResp } = useQuery<{ items: Silence[] }>({
     queryKey: ['servers', serverId, 'silences'],
@@ -587,7 +598,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                 </Td>
                 <Td className="py-2"><SevPill sev={r.severity} /></Td>
                 <Td className="py-2 text-xs text-muted">
-                  {r.server_id ? 'This server' : 'All servers'}
+                  {r.server_id ? 'This server' : sharedScope(r)}
                   {sw.note && <div className={cn('mt-0.5 max-w-[16rem] text-2xs', r.excluded ? 'text-warning' : 'text-muted')}>{sw.note}</div>}
                 </Td>
                 <Td className="py-2 pr-4 text-right">
@@ -620,7 +631,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
       <ExcludeRuleDialog
         open={!!excluding}
         onOpenChange={(o) => { if (!o) setExcluding(null) }}
-        rule={excluding ? { name: excluding.name, scope: { label: 'All servers' } } : null}
+        rule={excluding ? { name: excluding.name, scope: { label: sharedScope(excluding) } } : null}
         kind="server"
         assetName={server.display_name || server.hostname}
         loading={exclude.isPending}

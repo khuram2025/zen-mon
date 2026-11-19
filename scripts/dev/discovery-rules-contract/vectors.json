@@ -101,6 +101,15 @@
         {"id": "jeddah", "name": "Jeddah", "priority": 20, "asset_kinds": ["device"], "condition": {"op": "all", "conditions": [{"field": "sites", "operator": "has_any", "value": ["jeddah"]}]}, "actions": [{"key": "interfaces", "value": [{"set": "ignore", "field": "if_type", "pattern": "24,53"}, {"set": "monitor", "field": "if_alias", "pattern": "uplink"}]}]}
       ],
       "expect": {"matched": ["behind-core", "jeddah"], "settings": {}, "tags": ["access"], "additive": {"interfaces": [{"set": "monitor", "field": "if_alias", "pattern": "uplink"}, {"set": "ignore", "field": "if_type", "pattern": "24,53"}]}}
+    },
+    {
+      "name": "server inventory: contains on software, running service, unknown services never match has_none",
+      "facts": {"hostname": "sql-01", "is_server": true, "software": ["Microsoft SQL Server 2019 (64-bit)"], "running_services": ["MSSQLSERVER", "SQL Server (MSSQLSERVER)"], "services": null},
+      "rules": [
+        {"id": "sql", "name": "SQL servers", "priority": 10, "asset_kinds": ["server"], "condition": {"op": "all", "conditions": [{"field": "software", "operator": "has_containing", "value": "microsoft sql server"}, {"field": "running_services", "operator": "has", "value": ["mssqlserver"]}]}, "actions": [{"key": "tags", "value": ["sql"]}]},
+        {"id": "no-iis", "name": "No IIS", "priority": 20, "asset_kinds": ["server"], "condition": {"op": "all", "conditions": [{"field": "services", "operator": "has_none", "value": ["W3SVC"]}]}, "actions": [{"key": "tags", "value": ["no-iis"]}]}
+      ],
+      "expect": {"matched": ["sql"], "settings": {}, "tags": ["sql"]}
     }
   ]
 }

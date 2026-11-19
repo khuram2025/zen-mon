@@ -88,7 +88,8 @@ async def preview(db: AsyncSession, condition: dict, asset_kinds: list[str], *, 
     defs = await gfacts.custom_defs(db)
     fields, enums = gfacts.catalog(defs)
     cond = conditions.validate(condition, fields=fields, enums=enums)
-    assets = await gfacts.load_assets(db, tuple(asset_kinds))
+    from app.services.server_inventory_facts import needles
+    assets = await gfacts.load_assets(db, tuple(asset_kinds), needles([cond]))
     hit = [(k, i, f) for k, i, f in assets if k in asset_kinds and conditions.evaluate(cond, f, fields=fields)]
     if scope is not None:
         from app.core import scoping
@@ -123,7 +124,12 @@ async def reconcile(db: AsyncSession, *, group_ids: Optional[list[str]] = None, 
     groups = [dict(r) for r in (await db.execute(text(sql), params)).mappings().all()]
     defs = await gfacts.custom_defs(db)
     fields, _ = gfacts.catalog(defs)
-    assets = await gfacts.load_assets(db)
+    from app.services.server_inventory_facts import needles
+
+    def _cond(g):
+        c = g["condition"]
+        return c if isinstance(c, dict) else json.loads(c)
+    assets = await gfacts.load_assets(db, needles=needles(_cond(g) for g in groups))
 
     if not group_ids and not force:
         fp = hashlib.sha256(json.dumps([groups, assets, defs], sort_keys=True, default=str).encode()).hexdigest()

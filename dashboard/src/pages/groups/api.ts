@@ -73,7 +73,10 @@ export const groupsApi = {
   members: async (id: string): Promise<Member[]> => (await api.get(`/device-groups/${id}/members`)).data.data,
   catalog: async (): Promise<RuleCatalog> => {
     const d = (await api.get('/device-groups/catalog')).data
-    return { ...d, actions: [], decisions: [], import_as: [], device_types: [] }
+    // The groups catalog has no applies_to (its help says "Devices: …" / "Servers: …"); without one the shared
+    // builder would label every field "scan only". Group conditions never see scan results, so no source hint.
+    const fields = (d.fields || []).map((f: any) => ({ ...f, applies_to: f.applies_to ?? ['scan', 'device', 'server'] }))
+    return { ...d, fields, actions: [], decisions: [], import_as: [], device_types: [] }
   },
   preview: async (condition: ConditionGroup, asset_kinds: AssetKind[]): Promise<Preview> =>
     (await api.post('/device-groups/preview', { condition, asset_kinds })).data,

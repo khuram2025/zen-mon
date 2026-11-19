@@ -17,7 +17,8 @@ import { roleLabel, ruleTakesOverrides } from '@/components/alerts/thresholdMode
 import { exclusionBadge } from '@/components/alerts/exclusionModel'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
-import { downRuleCoversServers, isServerMetric, serverMetricLabel, serverRuleCondition, serverRuleCopy } from '@/components/forms/serverAlertRule'
+import { downRuleCoversServers, isServerMetric, serverMetricLabel, serverRuleCondition, serverRuleCopy, serverScopeLabel } from '@/components/forms/serverAlertRule'
+import { groupsApi } from '@/pages/groups/api'
 import { effectivePriority, policyForPriority, ruleEscalationSummary, ruleRouteSource } from '@/features/escalation/model'
 import { usePolicies } from '@/features/escalation/api'
 import type { EscalationPolicy } from '@/features/escalation/types'
@@ -31,11 +32,11 @@ const TRIGGER_LABELS: Record<string, string> = {
   any: 'Any change',
 }
 
-function scopeLabel(r: any, serverNames: Map<string, string>): string {
+function scopeLabel(r: any, serverNames: Map<string, string>, groupNames: Map<string, string>): string {
   if (isApmEvent(r.metric)) return r.target ? (r.metric === 'apm_synthetic_down' ? 'One scenario' : 'One SLO') : apmEventScope(r.metric).all
+  // One server, all servers, or the servers with a tag and/or in a device group.
   if (isServerMetric(r.metric)) {
-    if (!r.server_id) return 'All servers'
-    return serverNames.get(r.server_id) || 'One server'
+    return serverScopeLabel(r, { server: r.server_id ? serverNames.get(r.server_id) : null, group: r.group_id ? groupNames.get(r.group_id) : null })
   }
   if (r.family === 'netflow' || isNetflowMetric(r.metric)) {
     const scope = r.flow_scope && typeof r.flow_scope === 'object' ? r.flow_scope : {}
@@ -116,6 +117,10 @@ export function AlertRulesPage() {
     () => new Map<string, string>((serversResp?.items || []).map((x: any) => [x.id, x.display_name || x.hostname])),
     [serversResp],
   )
+  // Names for server rules scoped to a device group.
+  const hasGroupScoped = (rules || []).some((r) => isServerMetric(r.metric) && r.group_id)
+  const { data: groupList } = useQuery({ queryKey: ['groups-tree'], queryFn: groupsApi.list, enabled: hasGroupScoped, retry: false, staleTime: 60_000 })
+  const groupNames = useMemo(() => new Map<string, string>((groupList || []).map((g) => [g.id, g.name])), [groupList])
 
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/alert-rules/${id}`),
@@ -247,7 +252,7 @@ export function AlertRulesPage() {
                       )}
                     </Td>
                     <Td>
-                      <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames)}</Badge>
+                      <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames, groupNames)}</Badge>
                       {(r.profile_id || r.if_role) && (
                         <div className="mt-1 text-2xs text-muted" title={r.pack_key ? 'Accepted from a template’s recommended rules' : undefined}>
                           {[r.profile_id ? 'Template devices' : null, r.if_role ? `${roleLabel(r.if_role)} interfaces` : null].filter(Boolean).join(' · ')}

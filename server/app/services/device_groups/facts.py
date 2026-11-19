@@ -43,6 +43,11 @@ BASE_FIELDS: dict[str, tuple[str, str, str]] = {
     "ping_enabled": ("boolean", "Ping on", "Devices: ping monitoring enabled"),
     "ncm_enrolled": ("boolean", "In Config Manager", "Devices: configuration backups enabled"),
 }
+# Servers: what the agent reports (services, software, watched processes), the
+# discovery rules' inventory facts (app.services.server_inventory_facts).
+from app.services.server_inventory_facts import FIELDS as _INVENTORY  # noqa: E402
+
+BASE_FIELDS.update({k: ("inventory", label, "Servers: " + help_) for k, (label, help_) in _INVENTORY.items()})
 
 BASE_ENUMS: dict[str, list[str]] = {"asset_kind": ["device", "server"]}
 
@@ -89,8 +94,11 @@ def _value(row: dict) -> Any:
     return None
 
 
-async def load_assets(db: AsyncSession, kinds: tuple[str, ...] = ("device", "server")) -> list[tuple[str, str, dict]]:
-    """[(kind, id, facts)] for every device and server."""
+async def load_assets(db: AsyncSession, kinds: tuple[str, ...] = ("device", "server"),
+                      needles: dict | None = None) -> list[tuple[str, str, dict]]:
+    """[(kind, id, facts)] for every device and server. ``needles``: the names
+    inventory conditions look for (``server_inventory_facts.needles``); only
+    those rows are read."""
     custom: dict[tuple[str, str], dict] = {}
     for r in (await db.execute(text("""
         SELECT v.asset_kind, v.asset_id::text AS asset_id, d.key, v.value_text, v.value_num, v.value_date, v.value_bool
@@ -123,10 +131,16 @@ async def load_assets(db: AsyncSession, kinds: tuple[str, ...] = ("device", "ser
                 "serial_number": r["serial_number"], "controller": r["controller"],
                 "is_managed_child": bool(r["is_child"]), "snmp_enabled": bool(r["snmp_enabled"]),
                 "ping_enabled": bool(r["ping_enabled"]), "ncm_enrolled": bool(r["ncm"]),
+                **{k: None for k in _INVENTORY},
             }
             facts.update(custom.get(("device", r["id"]), {}))
             out.append(("device", r["id"], facts))
     if "server" in kinds:
+        inv: dict = {}
+        if needles:
+            from app.services import server_inventory_facts
+            ids = [str(i) for (i,) in (await db.execute(text("SELECT id FROM servers"))).all()]
+            inv = await server_inventory_facts.load(db, ids, needles)
         rows = (await db.execute(text("""
             SELECT s.id::text AS id, s.display_name, s.hostname, host(s.primary_ip) AS ip, s.os_name, s.os_version,
                    s.environment, s.owner, s.tags, s.status, s.site_id::text AS site, s.hw_manufacturer, s.hw_model,
@@ -142,6 +156,7 @@ async def load_assets(db: AsyncSession, kinds: tuple[str, ...] = ("device", "ser
                 "location": None, "site": r["site"], "status": r["status"], "owner": r["owner"],
                 "environment": r["environment"], "serial_number": r["hw_serial"], "controller": None,
                 "is_managed_child": False, "snmp_enabled": None, "ping_enabled": None, "ncm_enrolled": None,
+                **{k: (inv.get(r["id"]) or {}).get(k) for k in _INVENTORY},
             }
             facts.update(custom.get(("server", r["id"]), {}))
             out.append(("server", r["id"], facts))

@@ -689,6 +689,56 @@ export function fieldSourceHint(field: Pick<CatalogField, 'applies_to'> | undefi
   return joinWords(src.map((k) => SOURCE_WORD[k] ?? k), 'and')
 }
 
+// ── server inventory conditions (services, software, watched processes) ────
+
+/** What an inventory field's names are, for the builder hint ("has" matches it exactly). */
+const INVENTORY_NAME: Record<string, string> = {
+  services: 'service name or display name',
+  running_services: 'service name or display name',
+  software: 'software name',
+  software_publishers: 'publisher name',
+  watched_processes: 'process name',
+}
+
+/** Example values per inventory field: [list ("has any of"), text ("has one containing")]. */
+const INVENTORY_EXAMPLE: Record<string, [string, string]> = {
+  services: ['MSSQLSERVER, W3SVC', 'SQL Server'],
+  running_services: ['MSSQLSERVER, W3SVC', 'SQL Server'],
+  software: ['Microsoft SQL Server 2019 (64-bit)', 'SQL Server'],
+  software_publishers: ['Microsoft Corporation, Oracle Corporation', 'Oracle'],
+  watched_processes: ['sqlservr.exe, nginx', 'java'],
+}
+
+export function isInventoryField(field: Pick<CatalogField, 'type'> | null | undefined): boolean {
+  return field?.type === 'inventory'
+}
+
+/**
+ * The hint under an inventory condition: names match ignoring case, "has" the exact name, "has one containing" part
+ * of one; a server that reported nothing for the field fails every test but "is not reported".
+ */
+export function inventoryHint(field: Pick<CatalogField, 'key' | 'type'> | null | undefined, operator: string): string {
+  if (!isInventoryField(field)) return ''
+  const name = INVENTORY_NAME[field!.key] ?? 'name'
+  const match =
+    operator === 'has' || operator === 'has_none'
+      ? `Matches the exact ${name}, ignoring case.`
+      : operator === 'has_containing' || operator === 'has_none_containing'
+        ? `Matches part of a ${name}, ignoring case.`
+        : ''
+  const missing =
+    'Not reported: the server\'s agent sent nothing for it (Linux servers report no services, servers without an agent ' +
+    'report nothing); every other test, “has none” included, is then false.'
+  return match ? `${match} ${missing}` : missing
+}
+
+/** Placeholder for an inventory condition's value. */
+export function inventoryPlaceholder(fieldKey: string, kind: OperatorValueKind | string): string {
+  const ex = INVENTORY_EXAMPLE[fieldKey]
+  if (!ex) return kind === 'list' ? 'Comma separated' : ''
+  return kind === 'list' ? ex[0] : ex[1]
+}
+
 /** The permissions activating (or running) a rule needs, as the API computes them (actions.permissions_needed). */
 export function activationPermissions(actions: RuleAction[], assetKinds: AssetKind[], catalog: RuleCatalog | null | undefined): string[] {
   const kinds = new Set<AssetKind>(assetKinds.length ? assetKinds : ['device'])

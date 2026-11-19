@@ -66,6 +66,10 @@ FIELDS: dict[str, tuple[str, str, str]] = {
     "baselines": ("set", "Software baselines", "Names of the enabled software baselines that apply to the server"),
     "baseline_status": ("enum", "Baseline compliance", "compliant, non_compliant or not_evaluated"),
 }
+# Server inventory the agent reports (services, software, watched processes).
+from app.services.server_inventory_facts import FIELDS as _INVENTORY  # noqa: E402
+
+FIELDS.update({k: ("inventory", label, help_) for k, (label, help_) in _INVENTORY.items()})
 
 # Which facts each source provides; a fact a source lacks is missing (see
 # conditions: missing facts fail positive tests). "scan" = a discovery scan
@@ -80,6 +84,7 @@ _DEVICE = {"ip_address", "hostname", "sys_descr", "sys_object_id", "vendor", "mo
 _SERVER = {"ip_address", "hostname", "fqdn", "os", "os_version", "device_type", "is_server", "tags", "owner",
            "status", "environment", "os_type", "collection_mode", "sites", "agent_policy", "baselines",
            "baseline_status"}
+_SERVER |= set(_INVENTORY)
 _DEVICE |= {"interface_count", "interface_names", "neighbors", "neighbor_count", "depends_on", "sensors", "sites",
             "controller_polling"}
 _CHILD = {"ip_address", "hostname", "vendor", "model", "device_type", "os_version", "serial_number", "is_server",
@@ -103,6 +108,7 @@ EXTRA_FACTS: dict[str, str] = {
     "neighbors": "topology", "neighbor_count": "topology", "depends_on": "topology",
     "sensors": "sensors", "sites": "sensors", "controller_polling": "sensors",
     "baselines": "baselines", "baseline_status": "baselines",
+    **{k: "server_inventory" for k in _INVENTORY},
 }
 
 # reference fields -> the catalog the dashboard picks values from
@@ -279,6 +285,8 @@ def facts_from_server(row: Any) -> dict[str, Any]:
     if _get(row, "_baselines") is not None:
         out["baselines"] = list(_get(row, "_baselines"))
         out["baseline_status"] = _get(row, "_baseline_status")
+    for k, v in (_get(row, "_inventory") or {}).items():
+        out[k] = v
     return out
 
 
