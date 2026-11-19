@@ -80,9 +80,9 @@ dynamic device groups; `app.services.server_inventory_facts`):
 
 | Fact | Source | What it holds |
 | --- | --- | --- |
-| Windows services | `server_service_inventory` | Every service on a Windows server (not only watched ones), by service name or display name; refreshed when anything changes and at least every 10 minutes |
-| Running Windows services | same | Services whose state is running |
-| Installed software | `server_software_inventory` | Installed programs / packages from the agent's inventory (every 6 hours; Windows and Linux) |
+| Services | `server_service_inventory` | Every service (not only watched ones), by service name or display name: Windows services, or systemd services from Linux agents that collect them (`nginx` for `nginx.service`, the unit's description as display name); refreshed when anything changes and at least every 10 minutes |
+| Running services | same | Services whose state is running |
+| Installed software | `server_software_inventory` | Installed programs / packages from the agent's inventory (every 6 hours; Windows agents only, Linux servers report none) |
 | Software publishers | same | Their publishers |
 | Watched processes running | `server_process_inventory` | Processes on the agent policy's watch list that are running |
 
@@ -104,7 +104,10 @@ reported.
   it (and so the scope of server alert rules scoped to them, which resolves
   their open incidents on it without notice), and `changed` rules re-evaluate
   it; it comes back with the agent's next report.
-* **Services are Windows only** for now; Linux agents report no services.
+* **Services**: Windows agents report Windows services; Linux agents report
+  systemd services once they run an agent version that collects them (older
+  Linux agents report none: "not reported"). **Software** comes from Windows
+  agents only.
 * **Processes**: the agent reports only its busiest processes plus the watched
   ones, so a general "process X is running" test would depend on load. Only
   watched processes are offered; add a process to the agent policy's watch list

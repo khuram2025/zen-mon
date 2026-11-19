@@ -269,7 +269,7 @@ export type FieldType =
   | 'enum'
   | 'reference'
   | 'boolean'
-  /** Names a server's agent reports (Windows services, installed software, watched processes). */
+  /** Names a server's agent reports (services, installed software, watched processes). */
   | 'inventory'
 export type RefSource =
   | 'device_groups'
