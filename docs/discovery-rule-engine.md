@@ -94,6 +94,16 @@ reported.
   agent, inventory not collected yet, a Linux server for services) fails every
   test except *is not reported*, the negative ones included: "has none of
   W3SVC" is not true for a server that reports no services.
+* **A list older than 24 hours is not reported either**
+  (`server_inventory_facts.STALE_AFTER_HOURS`). A reporting agent refreshes its
+  services at least every 10 minutes, its watched processes on every upload and
+  its software with each 6-hourly snapshot (`servers.inventory_updated_at`), so
+  an older list means the agent stopped reporting (uninstalled, server retired
+  or offline) and its last list no longer counts. Shorter outages change
+  nothing. When the list goes stale, the server leaves dynamic groups built on
+  it (and so the scope of server alert rules scoped to them, which resolves
+  their open incidents on it without notice), and `changed` rules re-evaluate
+  it; it comes back with the agent's next report.
 * **Services are Windows only** for now; Linux agents report no services.
 * **Processes**: the agent reports only its busiest processes plus the watched
   ones, so a general "process X is running" test would depend on load. Only
@@ -103,8 +113,9 @@ reported.
   and substrings collected from the conditions), plus one existence check per
   server, so thousands of packages per server are never loaded whole.
 * The `changed` pass re-evaluates a server when its services or watched
-  processes change, or when a new inventory snapshot arrives
-  (`servers.inventory_updated_at`), while a rule uses these facts.
+  processes change, when a new inventory snapshot arrives
+  (`servers.inventory_updated_at`) or when a list goes stale, while a rule uses
+  these facts.
 * To alert on the servers a condition finds: tag them with a rule, or make a
   dynamic group, and scope a server alert rule to that tag or group (server
   alert rules take a tag and a group scope, see `docs/device-groups.md`).

@@ -22,6 +22,13 @@ A server with nothing reported for a fact (no agent, a Linux server for
 services, inventory not collected yet) has the fact *missing*: every test fails
 except "is not reported". Unknown never means "does not have it".
 
+A list the agent has not refreshed for :data:`STALE_AFTER_HOURS` is missing too.
+A reporting agent refreshes every list continuously (services at least every
+10 minutes, watched processes on every upload, software with each inventory
+snapshot, every 6 hours), so an older list means the agent stopped reporting
+(uninstalled, server retired or offline); its last list no longer counts. A
+short outage changes nothing.
+
 Lists can be thousands of rows per server, so they are never loaded whole: the
 values conditions name are collected first (:func:`needles`) and only matching
 rows are read, plus one existence check per server and table.
@@ -47,6 +54,10 @@ FIELDS: dict[str, tuple[str, str]] = {
                           "The agent reports only its busiest processes plus watched ones, so add a process to the "
                           "policy's watch list to test it here."),
 }
+
+# A list older than this is "not reported" (see the module docstring).
+STALE_AFTER_HOURS = 24
+_FRESH = f"NOW() - INTERVAL '{STALE_AFTER_HOURS} hours'"
 
 _LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
 
@@ -112,6 +123,16 @@ _TABLES = {
     "watched_processes": ("server_process_inventory", ["name"], "watchlisted AND running"),
 }
 
+# Which rows are current, per table (``t`` = the table, ``i`` = the server id).
+# Service and process rows are stamped on every report; software rows change
+# only when the software does, so the server's inventory snapshot time counts.
+_CURRENT = {
+    "server_service_inventory": f"t.updated_at >= {_FRESH}",
+    "server_process_inventory": f"t.updated_at >= {_FRESH}",
+    "server_software_inventory": "EXISTS (SELECT 1 FROM servers sv WHERE sv.id = t.server_id"
+                                 f" AND sv.inventory_updated_at >= {_FRESH})",
+}
+
 
 async def load(db: AsyncSession, server_ids: list[str], wanted: dict[str, dict[str, set[str]]]) -> dict[str, dict]:
     """{server id: {field: [matching names] | None}} for the fields in ``wanted``.
@@ -124,19 +145,20 @@ async def load(db: AsyncSession, server_ids: list[str], wanted: dict[str, dict[s
     for table in sorted({_TABLES[f][0] for f in wanted}):
         rows = (await db.execute(text(
             f"SELECT i::text FROM unnest(CAST(:ids AS uuid[])) AS i"
-            f" WHERE EXISTS (SELECT 1 FROM {table} t WHERE t.server_id = i)"), {"ids": ids})).all()
+            f" WHERE EXISTS (SELECT 1 FROM {table} t WHERE t.server_id = i AND {_CURRENT[table]})"),
+            {"ids": ids})).all()
         present[table] = {r[0] for r in rows}
     for n, (field, slot) in enumerate(sorted(wanted.items())):
         table, cols, extra = _TABLES[field]
         params: dict = {"ids": ids}
         match = _filter(cols, slot, params, n)
-        where = f"({extra}) AND {match}" if extra else match
+        where = f"{_CURRENT[table]} AND " + (f"({extra}) AND {match}" if extra else match)
         found: dict[str, list[str]] = {}
         if match != "FALSE":
             select = ", ".join(cols)
             for row in (await db.execute(text(
-                    f"SELECT server_id::text, {select} FROM {table}"
-                    f" WHERE server_id = ANY(CAST(:ids AS uuid[])) AND {where}"), params)).all():
+                    f"SELECT t.server_id::text, {select} FROM {table} t"
+                    f" WHERE t.server_id = ANY(CAST(:ids AS uuid[])) AND {where}"), params)).all():
                 found.setdefault(row[0], []).extend(str(v) for v in row[1:] if v)
         for i in ids:
             out[i][field] = sorted(set(found.get(i, [])), key=str.lower) if i in present[table] else None
@@ -166,10 +188,12 @@ def evaluate(op: str, have: Any, want: Any) -> bool:
 
 
 HASH_PARTS = {
-    # changed-pass fingerprint pieces (discovery rules), per server ``s``
+    # changed-pass fingerprint pieces (discovery rules), per server ``s``; a
+    # list going stale changes its piece (to NULL), so the server is re-evaluated
     "services": "(SELECT md5(string_agg(lower(service_name) || ':' || COALESCE(lower(state), ''), ','"
-                " ORDER BY service_name)) FROM server_service_inventory WHERE server_id = s.id)",
-    "software": "s.inventory_updated_at::text",
+                " ORDER BY service_name)) FROM server_service_inventory"
+                f" WHERE server_id = s.id AND updated_at >= {_FRESH})",
+    "software": f"(CASE WHEN s.inventory_updated_at >= {_FRESH} THEN s.inventory_updated_at::text END)",
     "processes": "(SELECT md5(string_agg(lower(name), ',' ORDER BY name)) FROM server_process_inventory"
-                 " WHERE server_id = s.id AND watchlisted AND running)",
+                 f" WHERE server_id = s.id AND watchlisted AND running AND updated_at >= {_FRESH})",
 }
