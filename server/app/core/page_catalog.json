@@ -1184,7 +1184,7 @@
     },
     {
       "key": "/settings/general?tab=storage",
-      "label": "Storage",
+      "label": "System status",
       "group": "administration",
       "group_label": "Administration",
       "parent": "Settings",

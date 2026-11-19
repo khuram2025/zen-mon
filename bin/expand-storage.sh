@@ -1,6 +1,6 @@
 #!/bin/bash
 # /opt/zenplus/bin/expand-storage.sh
-# Operator CLI for growing the /data volume. Settings -> Storage drives the
+# Operator CLI for growing the /data volume. Settings -> System status drives the
 # same operations; both go through the root-owned volume helper, which finds
 # the logical volume behind /data (dedicated data LV or the root LV) and
 # validates every disk before touching it.
@@ -102,7 +102,7 @@ case "${1:-}" in
         echo "  $0 /dev/sdX [--wipe]     Add a new disk and expand /data"
         echo "  $0 --grow                Claim space after enlarging a virtual disk"
         echo ""
-        echo "Settings -> Storage -> Disks & Volumes offers the same operations, plus"
+        echo "Settings -> System status -> Disks & capacity offers the same operations, plus"
         echo "partial allocation and safe disk removal."
         exit 1
         ;;

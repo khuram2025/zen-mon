@@ -107,6 +107,7 @@ jobs:
       - run: node scripts/test-report-schedules.mjs
       - run: node scripts/test-report-designer.mjs
       - run: node scripts/test-storage-ui.mjs
+      - run: node scripts/test-system-status.mjs
       - run: node scripts/test-offline-assets.mjs
 
   poller:

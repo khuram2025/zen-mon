@@ -139,6 +139,9 @@ const tabRedirects: Record<string, string> = {
   sensors: '/sensors',
   snmp: '/credentials?tab=snmp',
   subscription: '/subscription',
+  // Settings → System status (the tab that was Storage) keeps `storage` as its address.
+  'system-status': '/settings/general?tab=storage',
+  system: '/settings/general?tab=storage',
 }
 /** Old /settings/<tab> addresses of tabs that still exist under the same name on Settings → General.
  *  They used to fall through to Company, so a bookmark for Security or a "profile" link opened the wrong tab. */

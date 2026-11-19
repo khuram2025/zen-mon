@@ -94,8 +94,8 @@ function RetentionBody({ r }: { r: RetentionInfo }) {
         <p>
           Retention is set in{' '}
           {can('system.admin')
-            ? <Link to="/settings/general?tab=storage" className="font-medium text-text underline underline-offset-2">Settings → Storage</Link>
-            : 'Settings → Storage (administrators)'}
+            ? <Link to="/settings/general?tab=storage&section=retention" className="font-medium text-text underline underline-offset-2">Settings → System status → Retention &amp; cleanup</Link>
+            : 'Settings → System status (administrators)'}
           .
         </p>
         {repair?.affected && (

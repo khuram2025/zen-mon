@@ -110,7 +110,7 @@ def _db(tmp_path):
     conn.execute(
         "CREATE TABLE storage_backups(id TEXT PRIMARY KEY, status TEXT, size_bytes INT, "
         "path TEXT, finished_at TEXT, error TEXT, last_restore_status TEXT, "
-        "last_restore_error TEXT)"
+        "last_restore_error TEXT, last_restore_at TEXT)"
     )
     return conn
 
@@ -157,12 +157,21 @@ def _make_appliance_backup(tmp_path, monkeypatch, backup_root, ch_root, fake):
 
 
 def _download_archive(dest, backup_root, ch_root, backup_id):
-    """Mirror download_backup: tar -C root <id> plus clickhouse-<id> transform."""
-    with tarfile.open(dest, "w:gz") as tar:
-        tar.add(str(backup_root / backup_id), arcname=backup_id)
-        ch_dir = ch_root / "appliance" / backup_id
-        if ch_dir.is_dir():
-            tar.add(str(ch_dir), arcname=f"clickhouse-{backup_id}")
+    """What download_backup streams: the real tar command, not a look-alike.
+
+    A hand-built archive here once hid that the route's ``--transform`` renamed
+    both trees, so its downloads could not be imported again.
+    """
+    import subprocess
+
+    with open(dest, "wb") as out:
+        subprocess.run(api.download_tar_args(backup_id), stdout=out, check=True)
+    with tarfile.open(dest, "r:gz") as tar:
+        tops = {m.name.split("/")[0] for m in tar.getmembers()}
+    expected = {backup_id}
+    if (ch_root / "appliance" / backup_id).is_dir():
+        expected.add(f"clickhouse-{backup_id}")
+    assert tops == expected
 
 
 def _archive(path, entries):

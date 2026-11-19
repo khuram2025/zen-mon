@@ -44,6 +44,10 @@ HISTORY_EVERY_S = 300
 HISTORY_KEEP_S = 48 * 3600
 AUDIT_MAX_BYTES = 512 * 1024
 REPEAT_EVENT_EVERY_S = 3600
+# A removal ClickHouse refused is not planned again for this long.
+FAILED_ACTION_COOLDOWN_S = 1800
+# Uploads resume this many points below the critical usage percentage.
+RESUME_MARGIN_PCT = 2.0
 STATE_RANK = {"ok": 0, "growth": 1, "pressure": 2, "critical": 3}
 
 
@@ -230,6 +234,9 @@ class Watchdog:
         self.last_pass: Optional[dict] = prior.get("last_pass")
         self.last_error: Optional[dict] = prior.get("last_error")
         self.last_recovered: Optional[dict] = prior.get("last_recovered")
+        # (table, partition) whose DROP failed, with the time: left out of the
+        # next plans for a while so one refused action cannot block the rest.
+        self.failed: dict[str, float] = {}
         self.paused: bool = os.path.exists(_path("ingest-paused"))
         self._ch_ok = False
 
@@ -254,7 +261,10 @@ class Watchdog:
             self.last_event_at[key] = now
 
     def policy(self) -> dict:
-        return P.normalize_policy((_read_json("policy.json") or {}).get("policy"))
+        stored = _read_json("policy.json")
+        # A file that is not an object is no policy: fall back to the defaults
+        # instead of failing every tick.
+        return P.normalize_policy(stored.get("policy") if isinstance(stored, dict) else None)
 
     def _record_samples(self, fss: list[P.FsSample], now: float) -> None:
         for fs in fss:
@@ -310,9 +320,27 @@ class Watchdog:
             return
         candidates = P.build_candidates(self._ch(ch_partitions), today, P.DEFAULT_POLICY)
         self.last_legacy_sweep_at = now     # only after a successful read
-        expired = P.legacy_expired(candidates, today)
+        expired = self._without_failed(P.legacy_expired(candidates, today), now)
         if expired:
-            self._execute(expired, None, "legacy_cleanup", now)
+            record = self._execute(expired, None, "legacy_cleanup", now)
+            if record["errors"]:
+                # Reported by the tick as its error; the copy is retried after the cool-down.
+                raise RuntimeError(record["errors"][0])
+
+    @staticmethod
+    def _action_key(c: P.Candidate) -> str:
+        return f"{c.database}.{c.table}:{c.partition_id}"
+
+    def _without_failed(self, candidates: list[P.Candidate], now: float) -> list[P.Candidate]:
+        """Candidates minus those whose removal failed recently.
+
+        A DROP the server keeps refusing (a table above its drop-size limit, a
+        broken part) was planned again on every tick: it "covered" the need, so
+        later tiers were never tried and nothing was freed while the disk
+        filled. It is skipped for a while and the next candidates get their turn.
+        """
+        self.failed = {k: at for k, at in self.failed.items() if now - at < FAILED_ACTION_COOLDOWN_S}
+        return [c for c in candidates if self._action_key(c) not in self.failed]
 
     def _execute(self, plan: list[P.Candidate], fs: Optional[P.FsSample], reason: Any,
                  now: float) -> dict:
@@ -323,6 +351,7 @@ class Watchdog:
                 self._ch(lambda cl, sql: cl.command(sql), c.sql())
             except Exception as exc:
                 errors.append(f"{c.database}.{c.table}: {str(exc)[:200]}")
+                self.failed[self._action_key(c)] = now
                 continue
             scheduled += c.bytes
             done.append({"tier": c.tier, "action": c.action, "table": f"{c.database}.{c.table}",
@@ -392,6 +421,9 @@ class Watchdog:
         self._record_samples(fss, now)
         self._settle_passes(fss, now)
         error = None
+        if not fss:
+            # No reading is not "0% used": nothing can be judged or protected.
+            error = "no filesystem could be measured"
         try:
             self._maybe_breakdown(now)
             self._sweep_legacy(today, now)
@@ -425,7 +457,8 @@ class Watchdog:
                 }, now)
             elif pressure.need_bytes > 0 and policy["enabled"]:
                 try:
-                    candidates = P.build_candidates(self._ch(ch_partitions), today, policy)
+                    candidates = self._without_failed(
+                        P.build_candidates(self._ch(ch_partitions), today, policy), now)
                     allow_app = P.application_allowed(candidates, pressure, fs.usage_pct)
                     plan = P.plan_pass(candidates, pressure, allow_application=allow_app)
                     if "application" in pressure.tiers and not allow_app:
@@ -438,7 +471,12 @@ class Watchdog:
                         }, now)
                     planned_bytes = sum(c.bytes for c in plan)
                     if plan:
-                        self._execute(plan, fs, pressure.reasons, now)
+                        record = self._execute(plan, fs, pressure.reasons, now)
+                        if record["errors"]:
+                            # Not silent: a removal the server refused is a
+                            # finding, and what was planned was not freed.
+                            error = f"ClickHouse: {record['errors'][0][:300]}"
+                            planned_bytes = record["scheduled_bytes"]
                     else:
                         exhausted = True
                         self._event_once(f"exhausted:{fs.device}", "watchdog_exhausted", {
@@ -485,10 +523,16 @@ class Watchdog:
             if STATE_RANK[pressure.state] > STATE_RANK[worst]:
                 worst = pressure.state
 
-        # Resume only with margin above the free-space floor (hysteresis).
+        # Resume only with margin above the floors that paused it (hysteresis):
+        # free space back above the minimum (the pause starts below the smaller
+        # critical floor) and usage clearly under the critical percentage.
+        # The cleanup state is not part of it. Requiring "ok" kept uploads
+        # paused for ever on a volume that settled between the cleanup
+        # threshold and critical with nothing left to purge.
         ch_evals = [e for e in evaluations if e["holds_clickhouse"]]
         if self.paused and ch_evals and all(
-                e["state"] in ("ok", "growth") and e["avail_bytes"] >= e["minimum_free_bytes"]
+                e["avail_bytes"] >= e["minimum_free_bytes"]
+                and e["usage_pct"] < policy["critical_pct"] - RESUME_MARGIN_PCT
                 for e in ch_evals):
             self._set_paused(False, "free space recovered", now)
 
@@ -557,11 +601,13 @@ def ingest_paused() -> Optional[dict]:
     """The pause marker's contents while free space is critical, else None."""
     try:
         with open(_path("ingest-paused"), "r", encoding="utf-8") as f:
-            return json.load(f)
+            marker = json.load(f)
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
         return {"reason": "free space critically low"}
+    # The marker's presence is the pause; its content is only the explanation.
+    return marker if isinstance(marker, dict) else {"reason": "free space critically low"}
 
 
 def main() -> int:
