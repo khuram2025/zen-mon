@@ -61,6 +61,8 @@ def service(db, sid, name, display, state="running"):
 def software(db, sid, name, vendor=None, version="1.0"):
     db.execute("INSERT INTO server_software_inventory (server_id, package_name, version, vendor)"
                " VALUES ($1, $2, $3, $4)", sid, name, version, vendor)
+    # the ingest stamps the server's snapshot time with every inventory snapshot
+    db.execute("UPDATE servers SET inventory_updated_at = COALESCE(inventory_updated_at, now()) WHERE id = $1", sid)
 
 
 def process(db, sid, pid, name, *, watched):
@@ -125,6 +127,68 @@ async def test_facts_are_narrow_and_unknown_is_not_absent(pg_db, fleet):
     assert proc[f["web-01"]]["watched_processes"] == []       # running but not watched: not this fact
     like = await facts(pg_db, list(f.values()), leaf("software", "has_containing", "100%_x"))
     assert all(v["software"] in ([], None) for v in like.values())   # LIKE wildcards are literal
+
+
+def age(db, sid, hours):
+    """Make every inventory list of ``sid`` ``hours`` old (no report since)."""
+    for table in ("server_service_inventory", "server_process_inventory"):
+        db.execute(f"UPDATE {table} SET updated_at = now() - make_interval(hours => $2) WHERE server_id = $1",
+                   sid, hours)
+    db.execute("UPDATE servers SET inventory_updated_at = now() - make_interval(hours => $2) WHERE id = $1",
+               sid, hours)
+
+
+def hash_parts(db, sid):
+    return db.query("SELECT " + ", ".join(sif.HASH_PARTS[k] for k in ("services", "software", "processes"))
+                    + " FROM servers s WHERE s.id = $1", sid)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_list_not_refreshed_for_24_hours_is_not_reported(pg_db, fleet):
+    f = fleet
+    fields = {"services": ["MSSQLSERVER"], "running_services": ["MSSQLSERVER"], "watched_processes": ["sqlservr.exe"],
+              "software": ["Microsoft SQL Server 2019 (64-bit)"], "software_publishers": ["Microsoft Corporation"]}
+    cond = {"op": "all", "conditions": [{"field": k, "operator": "has", "value": v} for k, v in fields.items()]}
+    before = hash_parts(pg_db, f["sql-01"])
+    age(pg_db, f["sql-01"], 23)                                   # a long outage, still within the horizon
+    got = (await facts(pg_db, [f["sql-01"]], cond))[f["sql-01"]]
+    assert all(got[k] for k in fields), got
+    age(pg_db, f["sql-01"], 25)                                   # the agent stopped reporting a day ago
+    got = (await facts(pg_db, [f["sql-01"]], cond))[f["sql-01"]]
+    assert got == {k: None for k in fields}                       # not reported: unknown, not absent
+    from app.services.discovery_rules.conditions import evaluate
+    for k, v in fields.items():
+        assert evaluate({"op": "all", "conditions": [{"field": k, "operator": "has_none", "value": v}]},
+                        {k: got[k]}) is False
+        assert evaluate({"op": "all", "conditions": [{"field": k, "operator": "not_reported"}]}, {k: got[k]}) is True
+    assert hash_parts(pg_db, f["sql-01"]) == (None, None, None)     # changed rules re-evaluate it
+    assert all(before), before
+    other = (await facts(pg_db, [f["sql-02"]], leaf("services", "has", ["mssqlserver"])))[f["sql-02"]]
+    assert other["services"]                                      # other servers are unaffected
+
+
+@pytest.mark.asyncio
+async def test_a_stale_server_leaves_a_dynamic_group_and_returns_with_its_next_report(pg_db, fleet):
+    f = fleet
+    with api_client(pg_db, role="ops", permissions=MANAGER, persist_user=True) as c:
+        g = c.post("/api/v1/device-groups", json={
+            "name": "SQL servers", "kind": "dynamic", "asset_kinds": ["server"],
+            "condition": leaf("services", "has", ["MSSQLSERVER"])})
+        assert g.status_code == 201, g.text
+        gid = g.json()["id"]
+    from app.services.device_groups import membership
+
+    async def members():
+        async with session(pg_db) as s:
+            await membership.reconcile(s, force=True)
+            await s.commit()
+        return {r[0] for r in pg_db.query("SELECT asset_id::text FROM device_group_members WHERE group_id = $1", gid)}
+
+    assert await members() == {f["sql-01"], f["sql-02"]}
+    age(pg_db, f["sql-02"], 25)
+    assert await members() == {f["sql-01"]}
+    pg_db.execute("UPDATE server_service_inventory SET updated_at = now() WHERE server_id = $1", f["sql-02"])
+    assert await members() == {f["sql-01"], f["sql-02"]}           # the agent reported again
 
 
 # ── dynamic groups + scoped alert rules: the owner's scenario ───────────────
