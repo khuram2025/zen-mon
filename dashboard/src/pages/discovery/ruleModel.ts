@@ -727,8 +727,8 @@ export function inventoryHint(field: Pick<CatalogField, 'key' | 'type'> | null |
         ? `Matches part of a ${name}, ignoring case.`
         : ''
   const missing =
-    'Not reported: the server\'s agent sent nothing for it (Linux servers report no services, servers without an agent ' +
-    'report nothing) or has not refreshed it for 24 hours; every other test, “has none” included, is then false.'
+    'Not reported: the server\'s agent sent nothing for it (servers without an agent report nothing, Linux servers no ' +
+    'software list, older Linux agents no services) or has not refreshed it for 24 hours; every other test, “has none” included, is then false.'
   return match ? `${match} ${missing}` : missing
 }
 

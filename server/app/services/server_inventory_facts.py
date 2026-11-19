@@ -2,17 +2,20 @@
 
 What a server's agent reports, as conditions can test it:
 
-* ``services`` / ``running_services``: Windows services (``server_service_inventory``).
-  The Windows agent reports **every** service with its state and start mode, not
-  only the services its policy watches, refreshed when anything changes and at
-  least every 10 minutes; a removed service is pruned. Linux agents do not
-  report services yet, so the fact is "not reported" for Linux servers. A
-  service matches by its service name (``MSSQLSERVER``) or its display name
-  (``SQL Server (MSSQLSERVER)``).
+* ``services`` / ``running_services``: services (``server_service_inventory``).
+  The agent reports **every** service with its state and start mode, not only
+  the services its policy watches, refreshed when anything changes and at least
+  every 10 minutes; a removed service is pruned. Windows agents report Windows
+  services; Linux agents with systemd service collection report systemd
+  services (``nginx`` for ``nginx.service``, the unit's description as display
+  name). An older Linux agent reports none, so the fact is "not reported" for
+  that server. A service matches by its service name (``MSSQLSERVER``) or its
+  display name (``SQL Server (MSSQLSERVER)``).
 * ``software`` / ``software_publishers``: installed software and its publishers
   (``server_software_inventory``, the agent's inventory snapshot every 6 hours;
-  Windows uninstall entries, Linux packages). A very long list may be capped
-  by the agent (``servers.software_truncated``).
+  Windows uninstall entries). The Linux agent sends no software list, so the
+  fact is "not reported" there. A very long list may be capped by the agent
+  (``servers.software_truncated``).
 * ``watched_processes``: processes on the agent policy's watch list that are
   running. The agent reports only its top processes by CPU and memory plus the
   watched ones, so "any process" cannot be tested reliably; put a process on
@@ -43,11 +46,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # key -> (label, help); the condition type is "inventory" for all of them.
 FIELDS: dict[str, tuple[str, str]] = {
-    "services": ("Windows services", "Services installed on a Windows server (name or display name), as its agent "
-                 "reports them: every service, not only watched ones. Not reported for Linux servers."),
-    "running_services": ("Running Windows services", "Windows services whose state is running, by name or display "
-                         "name. Not reported for Linux servers."),
-    "software": ("Installed software", "Installed programs and packages from the agent's inventory (every 6 hours)."),
+    "services": ("Services", "Services on the server (name or display name), as its agent reports them: every "
+                 "service, not only watched ones. Windows services, or systemd services (nginx for nginx.service) "
+                 "from Linux agents that collect them; older Linux agents report none."),
+    "running_services": ("Running services", "Services whose state is running, by name or display name (Windows "
+                         "services, or systemd services from Linux agents that collect them)."),
+    "software": ("Installed software", "Installed programs from the agent's inventory (every 6 hours). Windows "
+                 "agents only; Linux servers report no software list."),
     "software_publishers": ("Software publishers", "Publishers of the installed software (Microsoft Corporation, "
                             "Oracle ...)."),
     "watched_processes": ("Watched processes running", "Processes on the agent policy's watch list that are running. "

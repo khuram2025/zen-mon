@@ -58,7 +58,7 @@ per custom field:
 | status | enum |
 | managed child, SNMP enabled, ping enabled, NCM enrolled | boolean |
 | custom fields | their own type (text, number, date, choice, boolean) |
-| servers: Windows services, running Windows services, installed software, software publishers, watched processes running | inventory (has any of, has one containing, has none of, has none containing, is reported, is not reported); see `docs/discovery-rule-engine.md`, "Server inventory conditions" |
+| servers: services, running services, installed software, software publishers, watched processes running | inventory (has any of, has one containing, has none of, has none containing, is reported, is not reported); see `docs/discovery-rule-engine.md`, "Server inventory conditions" |
 
 A fact an asset does not have (a server's sysObjectID, an unset custom field)
 makes a positive test false and a negative test (`does not equal`, `is empty`)
