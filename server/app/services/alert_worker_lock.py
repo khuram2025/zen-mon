@@ -1,7 +1,8 @@
 """One evaluator pass at a time across API workers.
 
 Production runs two uvicorn workers and every background loop is started in
-both. The periodic alert evaluators (network, host, APM, APM SLO burn) and the
+both. The periodic alert evaluators (network, host, APM, APM SLO burn, appliance
+health) and the
 escalation sweeper were written as if that were harmless: they look up the
 open incident, decide, write and then notify. Two workers running the same
 pass at the same moment both decide, and both notify — the identical
@@ -34,6 +35,11 @@ APM_ALERT_PASS = "zenplus:apm_alert_pass"
 APM_SLO_PASS = "zenplus:apm_slo_pass"
 ESCALATION_PASS = "zenplus:escalation_pass"
 NOTIFICATION_DIGEST_PASS = "zenplus:notification_digest_pass"
+ALERT_EXPIRY_PASS = "zenplus:alert_expiry_pass"
+SERVICE_METRIC_ALERT_PASS = "zenplus:service_metric_alert_pass"
+APPLIANCE_ALERT_PASS = "zenplus:appliance_alert_pass"
+VIRTUALIZATION_ALERT_PASS = "zenplus:virtualization_alert_pass"
+MONITORING_GAP_ALERT_PASS = "zenplus:monitoring_gap_alert_pass"
 
 
 @contextlib.asynccontextmanager

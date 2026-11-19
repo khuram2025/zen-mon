@@ -28,7 +28,10 @@ Rule semantics:
   sweeper (F8's ``apm_nodata_sweeper``), not to threshold rules.
 
 Alerts dedupe on (rule_id, metadata->>'service'): a rule/service pair raises
-at most one active alert. Both uvicorn workers start this loop; a pass runs in
+at most one active alert. Cooldown (alerting plan 2.8): a trigger within the
+rule's ``cooldown`` seconds of its last notified trigger for the same service
+waits — recorded not-notified, and sent by the first pass after the cooldown
+if the service still breaches (never dropped while it breaches). Both uvicorn workers start this loop; a pass runs in
 one of them at a time (``alert_worker_lock``), as for the host and network
 evaluators, because the open-alert check and the insert are not atomic. ``apm_slo_burn`` is *not* evaluated here —
 the SLO burn loop and synthetic runner feed confirmed events into
@@ -335,6 +338,22 @@ def _render(template: str, variables: dict) -> str:
     return template
 
 
+async def _in_cooldown(db: AsyncSession, rule, service: str, alert_id=None) -> bool:
+    """True while the rule's last notified trigger for this service is younger
+    than its cooldown. A trigger that never went out starts no cooldown."""
+    cooldown = int(getattr(rule, "cooldown", 0) or 0)
+    if cooldown <= 0:
+        return False
+    row = (await db.execute(text(
+        "SELECT 1 FROM alerts WHERE rule_id = :rid AND metadata->>'service' = :svc "
+        "  AND (CAST(:aid AS uuid) IS NULL OR id <> CAST(:aid AS uuid)) "
+        "  AND metadata->>'notified' = 'true' "
+        "  AND triggered_at > now() - make_interval(secs => :cd) LIMIT 1"
+    ), {"rid": str(rule.id), "svc": service, "aid": str(alert_id) if alert_id else None,
+        "cd": cooldown})).first()
+    return row is not None
+
+
 async def _notify(db: AsyncSession, rule, service: str, value: float, *,
                   is_recovery: bool = False, duration: str = "", alert_id=None) -> bool:
     """Send an APM threshold alert, or its all-clear. True when dispatched.
@@ -351,20 +370,32 @@ async def _notify(db: AsyncSession, rule, service: str, value: float, *,
         getattr(rule, "schedule_days", None), tz,
     ):
         return False
+    if not is_recovery and await _in_cooldown(db, rule, service, alert_id):
+        return False   # waits: pending, sent by a later pass once the cooldown is over
     sev = rule.severity or "warning"
     rum_app, separator, rum_env = service.partition(_RUM_SCOPE_SEPARATOR)
     reading = ap.format_value(rule.metric, value)
     v = ap.rule_phrasing(rule, hostname=service, is_recovery=is_recovery,
                          reading=reading, duration=duration)
+    now = datetime.now(timezone.utc)
     v.update({"rule_name": rule.name or "Alert", "hostname": service,
               "ip_address": "", "severity": sev.upper(),
-              "status": "RESOLVED" if is_recovery else "ALERT"})
+              "status": "RESOLVED" if is_recovery else "ALERT",
+              "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
+              # An APM service has no site or device group.
+              **ap.place_variables()})
+    if alert_id:
+        v.update(ap.incident_context(alert_id=alert_id, first_seen=None, now=now,
+                                     lifecycle="recovered" if is_recovery else "new"))
+    # The rule's own templates when it has them, else the device wording.
+    templates = ap.effective_templates(rule, "device")
+    prefix = "recovery_" if is_recovery else ""
     await dispatch_to_channels(db, rule.notify_channels or [], {
-        "subject": _render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
-                           else ap.DEFAULT_EMAIL_SUBJECT, v),
-        "body": _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery
-                        else ap.DEFAULT_EMAIL_BODY, v),
-        "message": _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v),
+        "subject": _render(templates[prefix + "email_subject"], v),
+        "body": _render(templates[prefix + "email_body"], v),
+        "message": _render(templates[prefix + "sms_template"], v),
+        "event_sentence": v.get("event_sentence"),
+        **{k: v[k] for k in ap.INCIDENT_KEYS if v.get(k)},
         "hostname": service, "ip_address": "",
         "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
         "resolved": is_recovery,
@@ -417,9 +448,11 @@ def _rum_scopes_in_scope(rule, fleet: dict[str, dict]) -> list[str]:
 async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
     metric_list = ",".join(f"'{m}'" for m in sorted(APM_PULL_METRICS))
     rules = (await db.execute(text(
-        f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
+        f"SELECT id, name, metric, operator, threshold, severity, min_duration, cooldown, "
         f"notify_channels, target, recovery_alert, conditions, condition_logic, "
-        f"schedule_start, schedule_end, schedule_days "
+        f"schedule_start, schedule_end, schedule_days, "
+        f"email_subject, email_body, sms_template, "
+        f"recovery_email_subject, recovery_email_body, recovery_sms_template "
         f"FROM alert_rules WHERE enabled = true AND metric IN ({metric_list})"
     ))).all()
     if not rules:

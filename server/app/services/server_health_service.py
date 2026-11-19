@@ -4,7 +4,8 @@ Three jobs:
 
 * Compute a server's health (``healthy``/``warning``/``critical``) plus
   human-readable ``status_reasons`` from the freshest telemetry, every time a
-  metric batch is ingested.
+  metric batch is ingested. Health is a colour, not an alert: the alert rules
+  (host_alert_service) page for the same limits with a hold and recovery.
 * Periodically sweep agents/servers whose heartbeats stopped — agents roll
   ``online → stale → offline`` and their server rolls to ``stale``. Paging
   for a silent agent belongs to the availability rules (Device Down, Agent
@@ -182,21 +183,21 @@ async def compute_server_health(
             status = "warning"
 
     # A batch may legitimately omit cpu/memory (inventory-only or disk-only
-    # uploads). Carry forward the still-open cpu/memory health alerts instead
-    # of silently dropping them, so status doesn't flap healthy on every
-    # partial upload.
+    # uploads). Carry forward the last computed cpu/memory issue instead of
+    # silently dropping it, so status doesn't flap healthy on every partial
+    # upload. (Until 1.25.18 this read the open health_threshold alert rows,
+    # which are retired: see sync_health_alerts.)
+    previous_issues: Optional[list] = None
+
     async def _carry_forward(dedupe: str) -> None:
-        row = (await db.execute(
-            text("""SELECT severity, message FROM alerts
-                    WHERE server_id = :sid AND status IN ('active', 'acknowledged')
-                      AND metadata->>'source' = 'health_threshold'
-                      AND metadata->>'dedupe' = :dedupe
-                    LIMIT 1"""),
-            {"sid": server_id, "dedupe": dedupe},
-        )).first()
-        if row:
-            level = "critical" if row[0] == "critical" else "warning"
-            _bump(level, str(row[1]), dedupe)
+        nonlocal previous_issues
+        if previous_issues is None:
+            previous_issues = await _stored_health_issues(db, server_id)
+        for issue in previous_issues:
+            if isinstance(issue, dict) and issue.get("dedupe") == dedupe and issue.get("reason"):
+                level = "critical" if issue.get("level") == "critical" else "warning"
+                _bump(level, str(issue["reason"]), dedupe)
+                return
 
     cpu_rows = by_kind.get("cpu") or []
     if not cpu_rows:
@@ -250,32 +251,47 @@ async def compute_server_health(
     return status, reasons, issues
 
 
+async def _stored_health_issues(db: AsyncSession, server_id: str) -> list:
+    """The issues stored with the server's last health computation."""
+    try:
+        async with db.begin_nested():
+            raw = (await db.execute(
+                text("SELECT health_issues FROM servers WHERE id = :sid"), {"sid": server_id},
+            )).scalar()
+    except Exception:          # before migrate-196
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    return raw if isinstance(raw, list) else []
+
+
 async def sync_health_alerts(
     db: AsyncSession,
     server_id: str,
     issues: list[dict[str, str]],
 ) -> None:
-    """Mirror computed health issues into the alerts table (create + resolve)."""
-    active_dedupes = {issue["dedupe"] for issue in issues}
-    for issue in issues:
-        await create_server_alert(
-            db,
-            server_id,
-            severity=issue["level"],
-            message=issue["reason"],
-            source="health_threshold",
-            dedupe=issue["dedupe"],
-        )
+    """Retire the built-in health_threshold alerts (alerting audit N-02).
 
-    open_rows = (await db.execute(
-        text("""SELECT metadata->>'dedupe' AS dedupe FROM alerts
-                WHERE server_id = :sid AND status IN ('active', 'acknowledged')
+    Health used to be mirrored into alert rows: one row per agent upload above
+    a fixed limit, closed by the next upload below it — no hold, no clear
+    level, no asset name, no route. On one appliance that was 58% of all alert
+    rows (one server, 2,412 alerts in 30 days). The server alert rules (High /
+    Critical CPU, memory, filesystem) cover the same limits with a hold, a
+    clear level and a recovery. The health colour and reasons on the server
+    pages are unchanged; only the alert rows stop. Any still open is closed
+    administratively (migrate-196 closes the existing ones at upgrade)."""
+    await db.execute(
+        text("""UPDATE alerts SET status = 'resolved', resolved_at = NOW(),
+                       metadata = COALESCE(metadata, '{}'::jsonb)
+                                  || jsonb_build_object('resolved_by', 'migration',
+                                                        'retired', 'health_threshold')
+                WHERE server_id = :sid AND status IN ('pending', 'active', 'acknowledged')
                   AND metadata->>'source' = 'health_threshold'"""),
         {"sid": server_id},
-    )).all()
-    for row in open_rows:
-        if row.dedupe not in active_dedupes:
-            await resolve_server_alerts(db, server_id, row.dedupe)
+    )
 
 
 async def store_server_health(
@@ -295,6 +311,15 @@ async def store_server_health(
         {"sid": server_id, "st": status, "reasons": json.dumps(reasons)},
     )
     if issues is not None:
+        # The issues themselves, for the next partial upload's carry-forward.
+        try:
+            async with db.begin_nested():
+                await db.execute(
+                    text("UPDATE servers SET health_issues = CAST(:issues AS jsonb) WHERE id = :sid"),
+                    {"sid": server_id, "issues": json.dumps(issues)},
+                )
+        except Exception:      # before migrate-196
+            logger.debug("servers.health_issues missing; carry-forward disabled", exc_info=True)
         await sync_health_alerts(db, server_id, issues)
 
 
@@ -306,6 +331,17 @@ async def refresh_server_health(db: AsyncSession, server_id: str) -> tuple[str, 
 
 
 # ── Staleness sweep ──────────────────────────────────────────────────
+
+def agent_offline_message(hostname, last_heartbeat, branding=None) -> str:
+    """"Agent on srv-01 is offline. Last heartbeat 2026-11-19 14:44 +03." in
+    the organisation's regional time (``branding``; UTC without one)."""
+    text_ = f"Agent on {hostname or 'server'} is offline."
+    if not last_heartbeat:
+        return text_
+    from app.services.branding import Branding
+    from app.services.regional_time import timestamp_label
+    return f"{text_} Last heartbeat {timestamp_label(last_heartbeat, branding or Branding())}."
+
 
 async def sweep_stale(db: AsyncSession) -> dict[str, int]:
     """Roll agents online→stale→offline and servers →stale on missing data.
@@ -361,6 +397,7 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
     rules = await sa.covering_rules(db) if offline_rows else []
     signals = await sa.load_signals(db) if rules else {}
     now = datetime.now(timezone.utc).timestamp()
+    branding = None
     for row in offline_rows:
         agent_id, server_id, hostname, last_hb = row
         if not server_id:
@@ -368,11 +405,15 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
         sig = signals.get(str(server_id))
         if sig is not None and sa.covered(rules, sig, sa.judge(sig, now, AGENT_OFFLINE_AFTER_S)):
             continue
+        if branding is None and last_hb:
+            # The organisation's regional time, as every other alert text.
+            from app.services.regional_time import notification_branding
+            branding = await notification_branding(db)
         await create_server_alert(
             db,
             str(server_id),
             severity="critical",
-            message=f"Agent on {hostname or 'server'} is offline — last heartbeat {last_hb:%Y-%m-%d %H:%M UTC}" if last_hb else f"Agent on {hostname or 'server'} is offline",
+            message=agent_offline_message(hostname, last_hb, branding),
             source="agent_offline",
             dedupe="agent_offline",
             metadata={"agent_id": str(agent_id)},
@@ -380,21 +421,21 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
 
     # Device maintenance fallback: ping-enabled devices leave 'maintenance'
     # via the poller's next poll, but ping-disabled devices have no status
-    # writer — reset any whose windows have all ended. Tolerates the
-    # device_maintenance table not existing yet (pre-migrate-053).
+    # writer — reset any whose windows have all ended (one-off, or the
+    # current occurrence of a recurring one: maintenance_windows decides).
+    # Tolerates the device_maintenance table not existing yet (pre-migrate-053).
     maint_reset_n = 0
     try:
+        from app.services import maintenance_windows as mw
+        active = await mw.active_now_sql(db)
         maint_reset = await db.execute(
-            text("""
+            text(f"""
                 UPDATE devices SET status = 'unknown', status_changed_at = NOW(), updated_at = NOW()
                 WHERE status = 'maintenance' AND ping_enabled = false
                   AND NOT EXISTS (
                       SELECT 1 FROM device_maintenance m
-                      WHERE m.starts_at <= NOW() AND m.ends_at >= NOW()
-                        AND (   (m.scope_type = 'device' AND m.scope_device_id = devices.id)
-                             OR (m.scope_type = 'group'  AND m.scope_group_id = devices.group_id)
-                             OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(devices.tags, '[]'::jsonb), m.scope_tag))
-                             OR (m.scope_type = 'all'))
+                      JOIN devices d ON d.id = devices.id AND {mw.COVERS_DEVICE_SQL}
+                      WHERE {active}
                   )
                 RETURNING id
             """),

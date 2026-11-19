@@ -33,6 +33,7 @@ const ICON: Record<string, { icon: typeof CircleDot; cls: string }> = {
   recovered: { icon: CheckCircle2, cls: 'bg-success/10 text-success' },
   superseded: { icon: XCircle, cls: 'bg-surface2 text-muted' },
   hold_cancelled: { icon: XCircle, cls: 'bg-surface2 text-muted' },
+  expired: { icon: AlarmClockOff, cls: 'bg-surface2 text-muted' },
   closed: { icon: XCircle, cls: 'bg-surface2 text-text2' },
   // 1.24.17 escalation policies and grouping.
   review: { icon: RefreshCw, cls: 'bg-primary/10 text-primary' },

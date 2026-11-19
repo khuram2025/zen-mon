@@ -160,7 +160,7 @@ _SELECT = f"""
            {_count_jsonb('device_interfaces')}               AS link_count,
            {_count_jsonb('users', 'scope_tags')}             AS user_count,
            (SELECT COUNT(*) FROM device_maintenance m
-             WHERE m.scope_type = 'tag'
+             WHERE m.scope_type IN ('tag', 'server_tag')
                AND LOWER(m.scope_tag) = LOWER(t.name))       AS maintenance_count
     FROM tags t
 """

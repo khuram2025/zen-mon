@@ -7,7 +7,7 @@
 
 export type StormFamily =
   | 'reachability' | 'reboot' | 'service' | 'interface' | 'latency'
-  | 'hardware' | 'network' | 'process' | 'trap' | 'syslog'
+  | 'hardware' | 'network' | 'process' | 'trap' | 'syslog' | 'configuration'
 export type StormScope = 'all' | 'site' | 'device_group' | 'scope_tag' | 'appliance'
 
 export interface StormPolicy {
@@ -46,7 +46,7 @@ export interface Storm {
 }
 
 export const STORM_DEFAULTS: StormPolicy = {
-  enabled: false, threshold: 5, window_minutes: 5, families: ['reachability', 'reboot'],
+  enabled: false, threshold: 5, window_minutes: 5, families: ['reachability', 'reboot', 'latency', 'service'],
   scope: 'all', update_minutes: 15, hold_escalations: true,
 }
 
@@ -65,6 +65,7 @@ export const STORM_FAMILIES: { value: StormFamily; label: string; hint: string }
   { value: 'process', label: 'Server services and processes', hint: 'Stopped services or processes on servers' },
   { value: 'trap', label: 'SNMP traps', hint: 'Alerting SNMP traps' },
   { value: 'syslog', label: 'Syslog alerts', hint: 'Alerting syslog messages' },
+  { value: 'configuration', label: 'Configuration alerts', hint: 'Configuration changes, failed backups, compliance and unsaved configuration (NCM)' },
 ]
 
 export const STORM_SCOPES: { value: StormScope; label: string; hint: string }[] = [

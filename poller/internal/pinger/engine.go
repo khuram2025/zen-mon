@@ -139,6 +139,8 @@ type Engine struct {
 	snmpSessions     *snmp.SessionCache
 	snmpClassifier   *snmp.Classifier
 	snmpTrapListener *snmp.TrapListener
+	// snmpPolls records each poll's outcome (migration 202); nil records nothing.
+	snmpPolls SNMPPollRecorder
 
 	logger *zap.SugaredLogger
 
@@ -178,6 +180,10 @@ type Engine struct {
 	// (or first saw outside maintenance) for each check's service_status_log.
 	serviceMaint      map[uuid.UUID]struct{}
 	serviceLastLogged map[uuid.UUID]string
+	// serviceAlertFn sends a confirmed service transition to the alert
+	// engine; nil means evaluateServiceAlerts. Tests replace it so they never
+	// reach the API on localhost.
+	serviceAlertFn func(ctx context.Context, sc *checker.ServiceCheck, oldStatus, newStatus string, result *checker.ServiceCheckResult)
 }
 
 // NewEngine creates a new monitoring engine.
@@ -205,8 +211,10 @@ func NewEngine(
 	sessions := snmp.NewSessionCache()
 	collector := snmp.NewCollector(cfg.Poller.ID, sessions)
 	classifier := snmp.NewClassifier()
+	polls, _ := snmpLoader.(SNMPPollRecorder)
 
 	return &Engine{
+		snmpPolls:       polls,
 		cfg:             cfg,
 		pinger:          p,
 		loader:          loader,
@@ -785,9 +793,13 @@ func (e *Engine) runServiceAttempt(ctx context.Context, sc *checker.ServiceCheck
 // maintenance window ends. Status changes inside a window update the
 // in-memory status but write no service_status_log row, so when a check
 // leaves maintenance in a different state than the one last logged, one
-// row (last logged -> current, reason "maintenance ended") is written.
-// It never opens alerts or publishes events. A check whose last logged
-// status is unknown is left alone.
+// row (last logged -> current, reason "maintenance ended") is written, and
+// the transition goes to the alert engine like any confirmed change: a
+// check still failing when the window ends opens its alert then, and one
+// that recovered during the window closes the alert it had before it.
+// (Until 1.25.18 nothing was sent, so a check that failed inside a window
+// never alerted at all — alerting audit, engine review.) A check whose last
+// logged status is unknown is left alone.
 func (e *Engine) reconcileServiceMaintenance(ctx context.Context, attemptedID uuid.UUID, maintIDs map[uuid.UUID]struct{}) {
 	for _, ssc := range e.collectMaintenanceReconciliation(attemptedID, maintIDs, time.Now().UTC()) {
 		e.logger.Infof("Service status reconciled after maintenance: %s %s → %s",
@@ -795,6 +807,28 @@ func (e *Engine) reconcileServiceMaintenance(ctx context.Context, attemptedID uu
 		if err := e.svcWriter.WriteServiceStatusChange(ctx, ssc, 0); err != nil {
 			e.logger.Errorf("Failed to write maintenance reconciliation to CH: %v", err)
 		}
+		e.mu.Lock()
+		sc, ok := e.serviceChecks[ssc.ServiceCheckID]
+		var snapshot checker.ServiceCheck
+		if ok {
+			snapshot = *sc
+		}
+		e.mu.Unlock()
+		if !ok {
+			continue
+		}
+		result := &checker.ServiceCheckResult{
+			ServiceCheckID: ssc.ServiceCheckID, CheckType: ssc.CheckType,
+			IsUp: ssc.NewStatus == "up", Timestamp: ssc.Timestamp,
+		}
+		if ssc.NewStatus != "up" {
+			result.Error = "still failing when the maintenance window ended"
+		}
+		alert := e.serviceAlertFn
+		if alert == nil {
+			alert = e.evaluateServiceAlerts
+		}
+		go alert(ctx, &snapshot, ssc.OldStatus, ssc.NewStatus, result)
 	}
 }
 
@@ -1306,6 +1340,9 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 			e.snmpWriter.WriteSNMPIfMetric(m)
 		}
 	}
+
+	// 3) Whether the device answered at all (SNMP unreachable alerts).
+	e.recordSNMPPoll(ctx, d, r)
 }
 
 // seedSNMPProfiles optionally imports profile packs from disk (a dev /

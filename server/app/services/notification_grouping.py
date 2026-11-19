@@ -198,7 +198,8 @@ FAMILY_LABELS = {
     "hardware": "Hardware", "reboot": "Reboots and restarts", "network": "Network protocols",
     "process": "Processes and services", "apm": "Application performance",
     "endpoint": "Endpoints", "netpath": "Network paths", "netflow": "Traffic",
-    "trap": "SNMP traps", "syslog": "Syslog", "template": "Template metrics", "other": "Other",
+    "trap": "SNMP traps", "syslog": "Syslog", "template": "Template metrics",
+    "configuration": "Configuration", "virtualization": "Virtualisation", "other": "Other",
 }
 
 _FAMILY_EXACT = {
@@ -215,6 +216,8 @@ _FAMILY_EXACT = {
     "bgp_neighbor_down": "network",
     "host_service_down": "process", "host_process_down": "process",
     "trap": "trap", "syslog": "syslog",
+    "vm_host_disconnected": "virtualization", "vm_datastore_pct": "virtualization",
+    "vm_alarm": "virtualization",
 }
 _FAMILY_PREFIX = (("if_", "interface"), ("apm_", "apm"), ("udt_", "endpoint"),
                   ("netpath_", "netpath"), ("netflow_", "netflow"), ("tpl_", "template"))

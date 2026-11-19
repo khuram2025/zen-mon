@@ -302,7 +302,9 @@ async def _response_stats(ctx: SectionCtx, frm: datetime, to: datetime, targets:
                count(*) FILTER (WHERE x.status = 'resolved' AND x.resolved_at {w}
                                 AND x.reason = 'superseded') AS r_superseded,
                count(*) FILTER (WHERE x.status = 'resolved' AND x.resolved_at {w}
-                                AND x.reason = 'administrative') AS r_administrative
+                                AND x.reason = 'administrative') AS r_administrative,
+               count(*) FILTER (WHERE x.status = 'resolved' AND x.resolved_at {w}
+                                AND x.reason = 'expired') AS r_expired
         FROM x GROUP BY {grouping}
     """
     return [dict(r) for r in (await ctx.db.execute(text(sql), params)).mappings().all()]
@@ -392,7 +394,7 @@ async def alert_response_metrics(ctx: SectionCtx) -> dict:
     ]
 
     reasons = [(k, _num(total.get(f"r_{k}"))) for k in
-               ("recovered", "manual", "superseded", "suppressed", "administrative")]
+               ("recovered", "manual", "superseded", "suppressed", "administrative", "expired")]
     charts = []
     if any(n for _k, n in reasons):
         charts.append({"title": "How incidents were closed",

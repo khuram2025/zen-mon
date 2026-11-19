@@ -32,6 +32,11 @@ survives an API restart or a lost request (docs/device-status-policy.md).
   detection turned off, a reseed, polling handed over or stopped), so
   everyone told that notifications were held hears that they resumed.
 
+Sending is OFF by default (``system_settings['alert_flap_notices']``,
+*Escalation & On-call → Alert storms*): the start notice is then recorded with
+``notified`` false and ``notices_off`` true, and its stop ends silently like
+any unsent start. The flap hold itself is unaffected.
+
 Each notice sent (and each start notice a matching rule kept quiet) is
 recorded as ONE informational alert row: ``rule_id`` NULL, severity info,
 status resolved, ``metadata.flap_notice``. It is a notice, never an incident
@@ -56,7 +61,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -224,6 +228,9 @@ class _Sweep:
     action_base: str
     # Shared rules disabled for single devices (migrate-187).
     excluded: rx.Exclusions = rx.EMPTY
+    # Send the notices to channels (system_settings['alert_flap_notices']).
+    # Off by default since 1.25.18: the notice rows are still recorded.
+    send: bool = False
 
 
 @dataclass
@@ -238,6 +245,52 @@ class _Plan:
 
 _SUPPORTED = False
 _warned_missing = False
+
+
+# ── Whether notices go to channels ──────────────────────────────────────────
+#
+# Alerting audit 2026-11-19 (N-03): flapping notices were mailed to the same
+# lists as real alerts — 1,718 messages in 30 days on one appliance, 23% of
+# everything it delivered. The flap HOLD (status alerts wait until a status
+# lasts) is what protects people; the notices themselves are information. They
+# are now recorded in the alert list only, unless an operator turns sending on.
+
+SETTINGS_KEY = "alert_flap_notices"
+DEFAULT_SETTINGS: dict[str, Any] = {"send": False}
+
+
+def clean_settings(raw: Any) -> dict[str, Any]:
+    out = dict(DEFAULT_SETTINGS)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if isinstance(raw, dict) and isinstance(raw.get("send"), bool):
+        out["send"] = raw["send"]
+    return out
+
+
+async def load_settings(db: AsyncSession) -> dict[str, Any]:
+    try:
+        async with db.begin_nested():
+            row = (await db.execute(text("SELECT value FROM system_settings WHERE key = :k"),
+                                    {"k": SETTINGS_KEY})).first()
+    except Exception as exc:
+        logger.warning("flap notice settings unreadable, notices stay in-app: %s", exc)
+        return clean_settings(None)
+    return clean_settings(row[0] if row else None)
+
+
+async def save_settings(db: AsyncSession, body: Any, actor_id=None) -> dict[str, Any]:
+    clean = clean_settings(body)
+    await db.execute(text(
+        "INSERT INTO system_settings (key, value, updated_at, updated_by)"
+        " VALUES (:k, CAST(:v AS jsonb), now(), CAST(:by AS uuid))"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now(),"
+        " updated_by = EXCLUDED.updated_by"
+    ), {"k": SETTINGS_KEY, "v": json.dumps(clean), "by": str(actor_id) if actor_id else None})
+    return clean
 
 
 async def _supported(db: AsyncSession) -> bool:
@@ -323,6 +376,7 @@ async def _load_sweep(db: AsyncSession) -> _Sweep:
         tz=await get_configured_timezone(db),
         action_base=await engine._dashboard_url(db, "/devices"),
         excluded=await rx.load(db),
+        send=(await load_settings(db))["send"],
     )
 
 
@@ -371,17 +425,26 @@ def _host(device) -> tuple[str, str]:
     return (device.hostname or ip or "device"), ip
 
 
-def _since_text(ts, tz_name: str) -> str:
+def _since_text(ts, tz_name: str, branding=None) -> str:
+    """When a flap started or the current status began, in the one style
+    every notification uses (regional_time.timestamp_label: the
+    organisation's date and time format, "GMT+3" rather than "+03")."""
     if not ts:
         return "an unknown time"
+    from app.services.branding import Branding
+    from app.services.regional_time import timestamp_label
+    if branding is None:
+        branding = Branding(timezone=tz_name or "UTC")
+    return timestamp_label(ts, branding)
+
+
+async def _branding(db: AsyncSession, sweep: "_Sweep"):
+    """The organisation's notification branding (date and time format)."""
+    from app.services.regional_time import notification_branding
     try:
-        tz = ZoneInfo(tz_name or "UTC")
-    except (ZoneInfoNotFoundError, ValueError):
-        tz = timezone.utc
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    local = ts.astimezone(tz)
-    return f"{local.strftime('%Y-%m-%d %H:%M')} {local.tzname() or tz_name}"
+        return await notification_branding(db)
+    except Exception:
+        return None
 
 
 def _render(flap_event: str, variables: dict) -> dict:
@@ -426,7 +489,9 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
             quiet_rules.append(rid)
         else:
             targets.append(rule)
-    channels = await _deliverable(db, union_channels(targets))
+    # Sending is off by default: the notice is still recorded (in-app), nobody
+    # is messaged, and its stop then ends silently as for any unsent start.
+    channels = await _deliverable(db, union_channels(targets)) if sweep.send else []
 
     policy = sweep.policy
     hostname, ip = _host(device)
@@ -443,6 +508,7 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
     }
     text_ = _render("start", variables)
     sent = bool(channels)
+    unsent_reason = "no_channels" if sweep.send else "notices_off"
     notice = {
         "message": (f"{ap.host_label(hostname, ip)} is flapping: {changes} status changes "
                     f"in {window} minutes ({kind_label})"),
@@ -473,7 +539,7 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
         "details": [
             ("Status changes", f"{changes} in {window} minutes"),
             ("Flapping", kind_label),
-            ("Flapping since", _since_text(episode.started_at, sweep.tz)),
+            ("Flapping since", _since_text(episode.started_at, sweep.tz, await _branding(db, sweep))),
             ("Status now", (device.status or "unknown").upper()),
         ],
         "action_url": _device_url(sweep, did),
@@ -483,7 +549,9 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
         "event_type": "flap_start",
         "delivery_kind": "flap_start",
     }
-    return _Plan("sent" if sent else "skipped", "" if sent else "no_channels",
+    if not sent and not sweep.send:
+        notice["metadata"]["notices_off"] = True
+    return _Plan("sent" if sent else "skipped", "" if sent else unsent_reason,
                  channels=channels, notice=notice, dispatch=dispatch if sent else None)
 
 
@@ -505,7 +573,7 @@ async def _plan_stop(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
     did = str(device.id)
     hostname, ip = _host(device)
     status = (device.status or "unknown").lower()
-    since = _since_text(device.status_changed_at, sweep.tz)
+    since = _since_text(device.status_changed_at, sweep.tz, await _branding(db, sweep))
     reason_label = ap.flap_end_reason_label(episode.end_reason)
     variables = {
         "hostname": hostname, "ip": ip, "ip_address": ip,

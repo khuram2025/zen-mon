@@ -13,7 +13,15 @@ Recommendations come from two places:
   custom template recommends rules too;
 * the template's own ``rule_pack`` (built-ins ship interface rules on roles:
   uplink down, WAN down, uplink utilisation), inherited by customised
-  templates while they have none of their own.
+  templates while they have none of their own;
+* every enum (state) metric with an unambiguous bad state in its value map
+  (``app.services.template_states``): HA out of sync, tunnel down, power
+  supply or fan failed, BGP peer not established, pool member offline, red
+  alarm. One incident per row, 2 minute hold, recovery notice on; critical
+  P2 for power, HA, sync, BGP and red alarms, warning P3 otherwise.
+
+Metrics of controller-managed child groups (FortiAPs, FortiSwitches) are
+never recommended on the controller: they belong to the children.
 
 A later template revision never changes an accepted rule. When the
 recommendation differs from what was accepted, the template page shows
@@ -31,6 +39,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import interface_roles as roles
+from app.services import template_states as ts
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +112,15 @@ def validate_pack(items: Any) -> Optional[list[dict]]:
 
 
 def _derived(groups: list[dict]) -> list[dict]:
-    """"Above warn" / "above crit" recommendations from metric display thresholds."""
+    """"Above warn" / "above crit" recommendations from metric display thresholds.
+
+    Groups of controller-managed children (FortiAPs, FortiSwitches: a ``children``
+    mapping, ``display: "children"`` or ``belongs_to``) are skipped: their
+    readings belong to the child devices, whose own cpu/memory series the
+    ordinary device rules already cover (docs/controller-managed-children.md)."""
     out = []
     for g in groups or []:
-        if g.get("display") == "children":
+        if ts.child_scoped(g):
             continue
         for m in g.get("metrics") or []:
             th = m.get("thresholds") or {}
@@ -136,12 +150,18 @@ def _derived(groups: list[dict]) -> list[dict]:
 
 
 def recommendations(groups: list[dict], pack: Optional[list[dict]]) -> list[dict]:
-    explicit = [{**it, "source": "template"} for it in (pack or [])]
-    return explicit + _derived(groups)
+    child = ts.child_metric_keys(groups)
+    explicit = [{**it, "source": "template"} for it in (pack or [])
+                if not (str(it.get("metric") or "").startswith("tpl_") and it["metric"][4:] in child)]
+    derived = _derived(groups)
+    taken = {it["key"] for it in explicit + derived}
+    return explicit + derived + [it for it in ts.recommendations(groups) if it["key"] not in taken]
 
 
 def values(item_or_rule: dict) -> dict:
-    """The comparable recommendation values."""
+    """The comparable recommendation values. ``states`` (the bad codes of a state
+    recommendation) only appears when set, so threshold recommendations accepted
+    before state rules existed compare unchanged."""
     out = {}
     for f in VALUE_FIELDS:
         v = item_or_rule.get(f)
@@ -150,6 +170,8 @@ def values(item_or_rule: dict) -> dict:
         if f in ("min_duration",) and v is not None:
             v = int(v)
         out[f] = v
+    if item_or_rule.get("states") is not None:
+        out["states"] = [int(c) for c in item_or_rule["states"]]
     return out
 
 
@@ -158,7 +180,8 @@ def changes(accepted: Optional[dict], current: dict) -> list[dict]:
     if not accepted:
         return []
     a, c = values(accepted), values(current)
-    return [{"field": f, "from": a.get(f), "to": c.get(f)} for f in VALUE_FIELDS if a.get(f) != c.get(f)]
+    return [{"field": f, "from": a.get(f), "to": c.get(f)} for f in VALUE_FIELDS + ("states",)
+            if a.get(f) != c.get(f)]
 
 
 ACCEPTED_SQL = """
@@ -214,13 +237,19 @@ def find(items: list[dict], key: str) -> Optional[dict]:
 
 
 def rule_fields(item: dict) -> dict:
-    """The alert rule columns an accepted recommendation sets."""
-    cond = {"metric": item["metric"], "operator": item["operator"], "threshold": float(item["threshold"])}
-    if item.get("reset_threshold") is not None:
-        cond["reset_threshold"] = float(item["reset_threshold"])
+    """The alert rule columns an accepted recommendation sets. A state
+    recommendation brings its own AND-combined conditions on the one metric."""
+    if item.get("conditions"):
+        conds = [{"metric": c["metric"], "operator": c["operator"], "threshold": float(c["threshold"])}
+                 for c in item["conditions"]]
+    else:
+        cond = {"metric": item["metric"], "operator": item["operator"], "threshold": float(item["threshold"])}
+        if item.get("reset_threshold") is not None:
+            cond["reset_threshold"] = float(item["reset_threshold"])
+        conds = [cond]
     return {
         "metric": item["metric"], "operator": item["operator"], "threshold": float(item["threshold"]),
-        "conditions": [cond], "min_duration": int(item.get("min_duration") or 0),
+        "conditions": conds, "min_duration": int(item.get("min_duration") or 0),
         "clear_duration": item.get("clear_duration"), "severity": item.get("severity") or "warning",
         "priority": item.get("priority"), "if_role": item.get("if_role"),
     }

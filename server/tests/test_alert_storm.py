@@ -286,3 +286,38 @@ def test_settings_are_cleaned_and_described():
 
 def test_reboot_and_restart_metrics_share_the_reboot_family():
     assert ng.event_family("uptime_reset") == ng.event_family("host_restart") == "reboot"
+
+
+def test_default_families_include_latency_and_service_checks():
+    assert storm.clean_settings(None)["families"] == ["reachability", "reboot", "latency", "service"]
+
+
+@pytest.mark.asyncio
+async def test_a_storm_covering_most_devices_points_at_the_monitoring_path():
+    class _Db:
+        def __init__(self, total):
+            self.total = total
+
+        def begin_nested(self):
+            import contextlib
+
+            @contextlib.asynccontextmanager
+            async def cm():
+                yield
+            return cm()
+
+        async def execute(self, *_a, **_k):
+            total = self.total
+
+            class _R:
+                def scalar(self):
+                    return total
+            return _R()
+
+    from types import SimpleNamespace as NS
+    s = NS(family="reachability", scope_label=None)
+    assert "30 of 34 monitored devices" in await storm._monitoring_path_hint(_Db(34), s, 30)
+    assert await storm._monitoring_path_hint(_Db(34), s, 10) == ""
+    assert await storm._monitoring_path_hint(_Db(6), s, 6) == ""                 # too few devices to tell
+    assert await storm._monitoring_path_hint(_Db(34), NS(family="reachability", scope_label="Site A"), 30) == ""
+    assert await storm._monitoring_path_hint(_Db(34), NS(family="reboot", scope_label=None), 30) == ""

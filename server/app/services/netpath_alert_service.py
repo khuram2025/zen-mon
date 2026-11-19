@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.services import alert_funnel
+from app.services import alert_phrasing as ap
 
 logger = logging.getLogger("netpath.alerts")
 
@@ -38,7 +39,9 @@ async def _rules(db: AsyncSession) -> list:
     prio = await alert_funnel.rule_priority_column(db)
     rows = (await db.execute(text(f"""
         SELECT id, name, metric, operator, threshold, severity, enabled, target,
-               notify_channels, cooldown, schedule_start, schedule_end, schedule_days, {prio}
+               notify_channels, cooldown, schedule_start, schedule_end, schedule_days,
+               email_subject, email_body, sms_template,
+               recovery_email_subject, recovery_email_body, recovery_sms_template, {prio}
         FROM alert_rules
         WHERE enabled AND metric LIKE 'netpath\\_%' ESCAPE '\\'
     """))).mappings().all()
@@ -101,8 +104,11 @@ async def _resolve(db: AsyncSession, alert_id) -> None:
         "UPDATE alerts SET status = 'resolved', resolved_at = NOW() WHERE id = :id"), {"id": alert_id})
 
 
-_OP_WORD = {">": "above", "gt": "above", ">=": "at or above", "gte": "at or above",
-            "<": "below", "lt": "below", "<=": "at or below", "lte": "at or below"}
+_OP_WORD = {">": "above", "gt": "above", ">=": "at or above", "gte": "at or above", "ge": "at or above",
+            "<": "below", "lt": "below", "<=": "at or below", "lte": "at or below", "le": "at or below",
+            # Never a raw operator in a message.
+            "==": "equal to", "eq": "equal to", "!=": "other than", "ne": "other than",
+            "neq": "other than"}
 
 
 def _path_label(probe: dict) -> str:
@@ -110,6 +116,47 @@ def _path_label(probe: dict) -> str:
     from app.services.alert_phrasing import host_label
     target = str(probe.get("target_ip") or probe.get("target_host") or "")
     return f"Path to {host_label(probe.get('name') or '', target)}"
+
+
+def render_variables(rule, probe: dict, message: str, *, is_recovery: bool = False,
+                     alert_id=None, now: datetime | None = None) -> dict:
+    """Template variables of one NetPath notification: the event sentence is
+    the evaluator's message, the asset is the path ("Path to Office-365
+    (40.97.1.1)"). A path has no site: {site} stays empty."""
+    r = dict(rule)
+    now = now or datetime.now(timezone.utc)
+    target = str(probe.get("target_ip") or probe.get("target_host") or "")
+    v = ap.rule_phrasing({"metric": r.get("metric"), "operator": r.get("operator"),
+                          "threshold": r.get("threshold")}, hostname=_path_label(probe),
+                         is_recovery=is_recovery)
+    sentence = (message or "").strip()
+    v.update({
+        "event_sentence": sentence if sentence.endswith(".") else f"{sentence}.",
+        "rule_name": r.get("name") or "Alert", "hostname": probe.get("name") or "",
+        "ip_address": target, "severity": str(r.get("severity") or "warning").upper(),
+        "status": "RESOLVED" if is_recovery else "ALERT",
+        "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
+        **ap.place_variables(),
+    })
+    if alert_id:
+        v.update(ap.incident_context(alert_id=alert_id, first_seen=None, now=now,
+                                     lifecycle="recovered" if is_recovery else "new"))
+    return v
+
+
+def render_templates(rule, variables: dict, *, is_recovery: bool = False) -> dict:
+    """{email_subject, email_body, sms_template} as sent: the rule's own
+    templates (alert_phrasing.effective_template) or the device wording."""
+    r = dict(rule)
+    defaults = ap.default_templates("device")
+    prefix = "recovery_" if is_recovery else ""
+    out = {}
+    for field in ("email_subject", "email_body", "sms_template"):
+        text_ = ap.effective_template(r.get(prefix + field), defaults[prefix + field])
+        for key, value in variables.items():
+            text_ = text_.replace("{" + key + "}", str(value))
+        out[field] = text_
+    return out
 
 
 async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recovery: bool = False,
@@ -137,6 +184,11 @@ async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recov
         sev = rule["severity"] or "warning"
         status = "RESOLVED" if is_recovery else "ALERT"
         name = probe.get("name") or ""
+        # The message is the event sentence of the rule's templates (the
+        # device wording unless the rule has its own).
+        variables = render_variables(rule, probe, message, is_recovery=is_recovery,
+                                     alert_id=alert_id)
+        texts = render_templates(rule, variables, is_recovery=is_recovery)
         ctx = {
             "rule_name": rule["name"],
             "severity": sev,
@@ -144,9 +196,11 @@ async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recov
             "resolved": is_recovery,
             "hostname": name,
             "ip_address": str(probe.get("target_ip") or probe.get("target_host") or ""),
-            "message": f"ZenPlus {'resolved' if is_recovery else sev.upper()} — {rule['name']}: {message}",
-            "subject": f"[{sev.upper()}] {'RESOLVED' if is_recovery else 'ALERT'}: {rule['name']}",
-            "body": message if message.endswith(".") else f"{message}.",
+            "message": texts["sms_template"],
+            "subject": texts["email_subject"],
+            "body": texts["email_body"],
+            "event_sentence": variables["event_sentence"],
+            **{k: variables[k] for k in ap.INCIDENT_KEYS if variables.get(k)},
             "rule_name_display": rule["name"],
             "headline_metric": headline,
             "details": details or [("Alert rule", rule["name"]), ("Probe", name)],
@@ -281,7 +335,7 @@ async def _process_numeric(db: AsyncSession, rules, outbox: list | None = None) 
                 msg = (f"{label} on {_path_label(probe)} is {disp} "
                        f"(limit {_OP_WORD.get(str(rule['operator']), rule['operator'])} {rule['threshold']:g}{unit if unit!='hops' else ' hops'})")
                 headline = {"label": label, "value": disp,
-                            "secondary_label": "Threshold", "secondary_value": f"{rule['operator']} {rule['threshold']:g}{unit if unit!='hops' else ''}"}
+                            "secondary_label": "Threshold", "secondary_value": f"{_OP_WORD.get(str(rule['operator']), rule['operator'])} {rule['threshold']:g}{unit if unit!='hops' else ' hops'}"}
                 alert_id = await _raise(db, rule, msg, {"netpath_dedupe": dedupe,
                                                         "probe_id": str(pr["id"]),
                                                         "probe_name": pr["name"],

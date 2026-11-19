@@ -151,6 +151,7 @@ To avoid Microsoft SmartScreen or "Unknown Publisher" warnings for customers, si
 - Durable local spool with bbolt.
 - CPU, memory, filesystem, disk IO, network, process, service_state, event_log, agent_health, and inventory samples using the `kind/timestamp/data` contract.
 - Windows CPU user/system/iowait/load fields, memory committed/cache counters, and host boot time/uptime inventory.
+- Linux (systemd) service state and inventory, load average 1/5/15 from `/proc/loadavg`, and restart/shutdown/unexpected-shutdown evidence recorded by the agent (`event_detail`, provider `zenplus-agent`, Windows IDs 12/13/41; state in `<data_dir>/state/lifecycle.json`). See `Documentation/23-SERVER-MONITORING-MODULE.md` §2a.
 - Controller-only registration and appliance-managed authorization without reinstalling.
 - Local status file and administration subcommands of `zenplus-agent.exe` (installed with a `zenplus-agentctl` shim for existing scripts).
 - Native Windows desktop dashboard through `zenplus-agent-app.exe`.

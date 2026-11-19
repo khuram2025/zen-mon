@@ -163,6 +163,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer log.Close()
 	log.Printf("ZenPlus Agent %s starting controller=%s data_dir=%s", model.AgentVersion, cfg.ControllerURL, cfg.DataDir)
+	collectors.SetLogger(log.Printf)
 
 	store, err := spool.Open(paths.SpoolDB)
 	if err != nil {
@@ -214,8 +215,13 @@ func Run(ctx context.Context, opts Options) error {
 	apmManager := apmruntime.New(paths, log.Printf)
 	defer apmManager.Close()
 
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	ctx, stop := signal.NotifyContext(ctx, stopSignals()...)
 	defer stop()
+	if !opts.Once {
+		// Restart/shutdown evidence belongs to the long-running agent only; a
+		// one-shot run beside the service must not move its boot state.
+		collectors.StartLifecycle(paths.StateDir)
+	}
 	if opts.Duration > 0 {
 		var timeout context.CancelFunc
 		ctx, timeout = context.WithTimeout(ctx, opts.Duration)
@@ -312,6 +318,7 @@ func Run(ctx context.Context, opts Options) error {
 		select {
 		case <-ctx.Done():
 			log.Printf("agent stopping: %v", ctx.Err())
+			recordStop(cfg, store, up, enrollment, log.Printf)
 			return nil
 		case <-collectTicker.C:
 			runCollection(ctx, cfg, paths, store, &status, enrollment, log.Printf)
@@ -622,6 +629,7 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 		logf("spool enqueue failed: %v", err)
 		return
 	}
+	collectors.LifecycleQueued()
 	status.LastCollection = &now
 	status.CollectorErrors = result.Errors
 	// Detail checkpoints promise that queued events survive until acknowledgement.
@@ -876,7 +884,7 @@ func capabilitiesForConfig(cfg config.Config, privileged bool) []string {
 		}
 		capabilities = append(capabilities, capability)
 	}
-	return capabilities
+	return append(capabilities, platformCapabilities(hostOS)...)
 }
 
 func probeLocalAPM(cfg config.Config) *model.AgentAPMHeartbeat {

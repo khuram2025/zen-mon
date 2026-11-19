@@ -305,8 +305,8 @@ async def _sync_controller(db: AsyncSession, ctrl) -> dict:
         text("""
             INSERT INTO topology_dependencies
                 (parent_device_id, child_device_id, dependency_type,
-                 suppress_alerts, enabled, notes)
-            SELECT :cid, d.id, 'controller', TRUE, TRUE, 'auto: managed-device sync'
+                 suppress_alerts, enabled, notes, source)
+            SELECT :cid, d.id, 'controller', TRUE, TRUE, 'auto: managed-device sync', 'controller'
             FROM devices d
             WHERE d.managed_by_device_id = :cid AND d.poll_mode = 'via_controller'
             ON CONFLICT (parent_device_id, child_device_id, dependency_type) DO NOTHING

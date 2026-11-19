@@ -21,7 +21,7 @@ export type AlertEntity = {
 }
 
 export type ClosureReason =
-  | 'recovered' | 'manual' | 'suppressed' | 'superseded' | 'hold_cancelled' | 'dependency' | 'notice' | 'flapping'
+  | 'recovered' | 'manual' | 'suppressed' | 'superseded' | 'hold_cancelled' | 'dependency' | 'notice' | 'flapping' | 'expired'
 
 export type AlertClosure = {
   reason: ClosureReason
@@ -141,7 +141,7 @@ export type AlertSummary = {
     basis: string
     opened: number
     closed: number
-    by_reason: { recovered: number; manual: number; suppressed: number; superseded: number; administrative?: number }
+    by_reason: { recovered: number; manual: number; suppressed: number; superseded: number; administrative?: number; expired?: number }
     notices: number
     time_to_recover: DurationStats
     time_to_close: DurationStats
@@ -212,7 +212,7 @@ export type AlertRuleDetail = {
 export type AlertEventKind =
   | 'triggered' | 'held' | 'confirmed' | 'acknowledged' | 'assigned' | 'unassigned' | 'comment'
   | 'snoozed' | 'unsnoozed' | 'suppression_expired' | 'escalated' | 'resolved' | 'recovered'
-  | 'superseded' | 'hold_cancelled' | 'closed'
+  | 'superseded' | 'hold_cancelled' | 'expired' | 'closed'
 
 export type AlertEvent = {
   at: string
@@ -235,6 +235,13 @@ export type AlertDelivery = {
   outcome: 'accepted' | 'failed' | 'skipped'
   error: string | null
   latency_ms: number | null
+  /** What was sent (1.25.18+): email subject or chat title; null for SMS and older rows. */
+  subject?: string | null
+  /** The text as handed to the transport; only for users with alerts.manage. */
+  content?: string | null
+  /** True when a text exists but this user may not read it. */
+  content_withheld?: boolean
+  recipients_count?: number | null
 }
 
 export type RelatedAlert = AlertRow & {

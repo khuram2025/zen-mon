@@ -21,6 +21,7 @@ import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { SeverityBadge } from '@/components/alerts/AlertBits'
 import { changeWords, conditionWords, holdWords, roleLabel } from '@/components/alerts/thresholdModel'
+import { templateIndex, type StateInfo } from '@/components/forms/alertRuleCatalog'
 import { type Recommendation, type TemplateDetail, recommendationPath, templatesApi } from './api'
 
 const STATUS_BADGE: Record<Recommendation['status'], { label: string; variant: 'outline' | 'success' | 'warning' }> = {
@@ -29,21 +30,42 @@ const STATUS_BADGE: Record<Recommendation['status'], { label: string; variant: '
   changed: { label: 'changed', variant: 'warning' },
 }
 
-/** key → metric name and unit over the template's groups (and the parent's, on a customised template). */
-function metricNames(t: TemplateDetail): { names: Record<string, string>; units: Record<string, string> } {
+type Meta = { names: Record<string, string>; units: Record<string, string>; states: Record<string, StateInfo> }
+
+/** key → metric name, unit and state value map over the template's groups (and the parent's, on a customised template). */
+function metricNames(t: TemplateDetail): Meta {
   const names: Record<string, string> = {}
   const units: Record<string, string> = {}
   for (const g of [...(t.parent_groups || []), ...(t.oid_groups || [])]) {
     for (const m of g.metrics || []) { names[m.key] = m.name; if (m.unit) units[m.key] = m.unit }
   }
-  return { names, units }
+  const states = templateIndex([{ oid_groups: [...(t.oid_groups || []), ...(t.parent_groups || [])] as any }]).states
+  return { names, units, states }
 }
 
-/** The recommendation's condition in words, with the template metric's unit. */
-function itemWords(it: Recommendation, meta: { names: Record<string, string>; units: Record<string, string> }): string {
+/**
+ * The recommendation's condition in words, with the template metric's unit. A state recommendation reads as
+ * its label ("Status is Down"), never as the numeric conditions it is stored as.
+ */
+function itemWords(it: Recommendation, meta: Meta): string {
+  if (it.source === 'state' && it.condition_label) return it.condition_label
   const unit = it.metric.startsWith('tpl_') ? meta.units[it.metric.slice(4)] ?? '' : undefined
   return conditionWords({ metric: it.metric, operator: it.operator, threshold: it.threshold, reset_threshold: it.reset_threshold },
     { names: meta.names, unit })
+}
+
+/** "IPsec Tunnels: Status ≥ 3 and ≠ 5": a state rule's stored conditions, shown under its label. */
+function storedConditions(it: Recommendation, meta: Meta): string | null {
+  if (it.source !== 'state' || !it.conditions || it.conditions.length < 1) return null
+  return it.conditions.map((c) => conditionWords({ metric: c.metric, operator: c.operator, threshold: c.threshold }, { names: meta.names, unit: '' })).join(' and ')
+}
+
+/** A changed field in words; a state recommendation's codes as the template's labels ("Down, Negotiating"). */
+function changeText(it: Recommendation, c: { field: string; from: unknown; to: unknown }, meta: Meta): string {
+  if (c.field !== 'states') return changeWords(c)
+  const info = meta.states[it.metric.replace(/^tpl_/, '')]
+  const words = (v: unknown) => (Array.isArray(v) ? v.map((code) => info?.labels[Number(code)]?.[0] ?? String(code)) : v)
+  return changeWords({ field: c.field, from: words(c.from), to: words(c.to) })
 }
 
 export function RecommendedAlertsTab({ t }: { t: TemplateDetail }) {
@@ -95,10 +117,11 @@ export function RecommendedAlertsTab({ t }: { t: TemplateDetail }) {
                   <Td className="text-sm">
                     {itemWords(it, meta)}
                     {' '}{holdWords(it.min_duration)}
+                    {storedConditions(it, meta) && <div className="text-xs text-muted">stored as {storedConditions(it, meta)}</div>}
                     {it.if_role && <div className="text-xs text-muted">on {roleLabel(it.if_role)} interfaces</div>}
                   </Td>
                   <Td><SeverityBadge severity={it.severity} />{it.priority && <span className="ml-1 text-xs text-muted">{it.priority}</span>}</Td>
-                  <Td className="text-xs text-muted">{it.source === 'template' ? 'template' : 'from threshold'}</Td>
+                  <Td className="text-xs text-muted">{it.source === 'template' ? 'template' : it.source === 'state' ? 'from states' : 'from threshold'}</Td>
                   <Td>
                     {inherited ? (
                       <span className="text-xs text-muted">Accepted on {acc!.template_name || 'the parent template'}</span>
@@ -113,7 +136,7 @@ export function RecommendedAlertsTab({ t }: { t: TemplateDetail }) {
                         )}
                         {it.status === 'changed' && it.changes.length > 0 && (
                           <ul className="mt-1 space-y-0.5 text-xs text-warning-fg" aria-label="What the recommendation changed">
-                            {it.changes.map((c) => <li key={c.field}>{changeWords(c)}</li>)}
+                            {it.changes.map((c) => <li key={c.field}>{changeText(it, c, meta)}</li>)}
                           </ul>
                         )}
                       </>
@@ -161,7 +184,7 @@ const CHANNEL_TYPE_LABEL: Record<string, string> = {
 }
 
 function AcceptDialog({ t, item, meta, onClose, onDone }: {
-  t: TemplateDetail; item: Recommendation; meta: { names: Record<string, string>; units: Record<string, string> }
+  t: TemplateDetail; item: Recommendation; meta: Meta
   onClose: () => void; onDone: () => void
 }) {
   const [enabled, setEnabled] = useState(true)

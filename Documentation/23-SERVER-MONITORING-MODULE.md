@@ -114,6 +114,36 @@ Reviewed against the live Windows 10 agent (DESKTOP-F3HUMGT, agent v1.0.0).
 4. Service watchlist is baked into the local `agent.yaml` — it must come from the policy
    config endpoint (the server already serves `service_watchlist`; agent should consume it).
 
+### 2a. Platform support (agent 1.14.4 source, November 2026)
+
+Both builds send the same payload shapes, so the controller, the server pages and the
+server alert rules need no per-platform handling.
+
+| Data | Windows | Linux |
+|---|---|---|
+| Services (`service_state` metric + `services` inventory; `host_service_down`) | Service Control Manager | systemd: `systemctl list-units --type=service --all` + one `systemctl show` per 256 units. Name = unit without `.service` (`nginx`, `getty@tty1`); display name = unit Description. State: `active`/`reloading` → running (a finished oneshot that stays active counts as running), `activating` → start_pending, `deactivating` → stop_pending, `inactive` → stopped, `failed` → failed. Start mode: enabled/linked/alias → auto, masked → disabled, disabled/static/indirect/generated/transient → manual. A host not booted with systemd sends no services and logs this once (no collector error). |
+| Restart / shutdown (`event_detail`, `host_restart` / `host_shutdown`) | System event log: Kernel-General 12/13, Kernel-Power 41, EventLog 6008, User32 1074 (needs event details) | Recorded by the agent itself, provider `zenplus-agent`, channel `System`, the Windows IDs: **12** a new boot found at agent start (time = `/proc/stat` btime); **41** the previous boot ended while the agent was still running and never saw a system shutdown (power loss, crash, reset; dated at the new boot); **13** the agent was stopped (SIGTERM) while `systemctl is-system-running` said `stopping` — spooled and uploaded before the agent exits (8 s budget). State: `<data_dir>/state/lifecycle.json` (boot id, boot time, `running`/`agent_stopped`/`system_shutdown`). Nothing is reported on the first run, on an agent restart in the same boot, or for a boot that followed a plain `systemctl stop` of the agent. Independent of the event-log policy (Linux agents get `event_log` off). |
+| Load (`load_1/5/15` in the `cpu` metric) | `load_1` = Processor Queue Length | `/proc/loadavg` 1/5/15. CPU count comes from the hardware inventory (`servers.cpu_cores`). The Performance tab labels the series "Load average" for Linux servers and judges it against the core count (Windows: 2 × cores). |
+| Event-log summaries / details, software inventory | ✓ | — (not collected) |
+| Swap (`host_swap_pct`), NIC errors (`host_nic_errors`), clock offset (`host_clock_skew_s`), days until full (`host_fs_days_left`), stopped automatic services (`host_auto_service_stopped`) | ✓ | ✓ |
+| Disk latency (`host_disk_latency_ms`) | — (gopsutil reports disk times in whole seconds; rules skip Windows servers) | ✓ |
+
+Alertable server metrics (host alert rules; lifecycle and details in
+`docs/alert-notification-policy.md` "Server rules"): CPU, memory, swap, filesystem
+usage per mount, days until a filesystem is full, disk utilisation, disk latency per
+disk, NIC errors per interface, clock offset, service / process stopped, any automatic
+service stopped (per service), agent offline / server down, restart, shutdown. Not
+alertable because the agent does not collect them: a Windows pending reboot and a
+meaningful disk queue length. Windows event-log counts per log and level
+(`host_event_log_summary`) are collected but have no rule yet.
+
+The controller also records a restart when the inventory's OS boot time moves by more
+than two minutes; a restart already recorded within two minutes of that boot (the agent's
+boot report, or Windows Kernel-General 12) is not recorded again, so one boot is one
+restart. Linux agents advertise `systemd_services_v1`; for them `/agents/config` turns
+service collection on unless the policy's feature flags set `service_state`, because the
+Linux install default had services off when the agent could not read them.
+
 ---
 
 ## 3. Recommendations for the agent team (prioritized)
@@ -228,3 +258,8 @@ multi-use enrollment tokens (`max_uses` ≤ 100 per token) for agent rollouts, a
   agent starts sending full event text.
 * Listing live-gauges call ClickHouse on each poll (4 grouped queries) — cheap now;
   consider a 10 s in-process cache at ~1k servers.
+* Linux: enabled units that finished or were skipped by a condition (`inactive`,
+  Result=success, e.g. `e2scrub_reap`, `grub-common`) report as stopped auto-start, so the
+  Services tab's "Stopped · auto-start" count includes them; `host_service_down` is
+  unaffected (it only watches the named target). A shutdown that kills the agent before
+  it can ask systemd (SIGKILL after the stop timeout) is later reported as unexpected.

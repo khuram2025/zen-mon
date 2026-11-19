@@ -117,6 +117,14 @@ func isUndefinedTable(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
+// isUndefinedFunction reports PostgreSQL undefined_function (42883): a
+// function from a migration that has not run yet (device_maintenance_active,
+// 207).
+func isUndefinedFunction(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42883"
+}
+
 // templatesLegacy reports whether the pre-189 statements are in use: a
 // missing column was seen less than sysInfoLegacyRetry ago.
 func (s *PostgresStore) templatesLegacy(now time.Time) bool {

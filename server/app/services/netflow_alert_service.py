@@ -1444,6 +1444,9 @@ async def notify(db: AsyncSession, rule: NetflowRule, reading: Reading, *, alert
               "ip_address": reading.exporter or "", "severity": sev.upper(),
               "status": "RESOLVED" if is_recovery else "ALERT",
               "timestamp": datetime.now(timezone.utc).strftime("%H:%M UTC on %d %b %Y")})
+    # {site}, {group}, {site_suffix} of the exporter's device (notification_context).
+    from app.services import notification_context
+    v.update(await notification_context.asset_place(db, {"alert_id": alert_id}))
     if is_recovery:
         subject_tpl = ap.effective_template(rule.templates.get("recovery_email_subject"),
                                             ap.DEFAULT_RECOVERY_EMAIL_SUBJECT)

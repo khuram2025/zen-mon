@@ -84,7 +84,13 @@ async def send_sms_request(config: dict, values: dict, *, client_factory=None):
     """
     from app.services.alert_delivery_log import outcome_for_exception
 
+    from app.services.sms_text import to_gsm7
+
     recipients = sms_recipients(values.get('recipients'))
+    if values.get('message') is not None:
+        # Every SMS leaves in the GSM-7 alphabet (one dash or curly quote sent
+        # the whole text as UCS-2 in 2-4 parts). Idempotent.
+        values = {**values, 'message': to_gsm7(str(values['message']))}
     outcomes = []
     response = None
     for recipient in recipients:

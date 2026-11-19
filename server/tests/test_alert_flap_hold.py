@@ -221,11 +221,32 @@ async def test_only_the_paged_rule_recovers_when_another_rule_was_held(run, sent
     assert [(c["event_type"], c["rule_id"]) for c in sent] == [("recovery", str(paged.id))]
 
 
+_DOWN_OR_LOSS = [{"metric": "ping_status", "operator": "==", "threshold": 0},
+                 {"metric": "packet_loss", "operator": ">", "threshold": 5}]
+
+
 def _loss_rule(**kw):
-    """The seeded 'Packet Loss' rule (any, packet_loss > 5): it matches a
-    move into degraded and a move into down alike."""
-    return device_down_rule(name="Packet Loss", trigger_on="any", metric="packet_loss",
-                            operator="gt", threshold=5, notify_channels=[CHANNEL], **kw)
+    """A rule that matches a move into degraded and a move into down alike:
+    'any' with ping_status == 0 OR packet_loss > 5. (The seeded 'Packet Loss'
+    rule no longer matches a move into down: no reply is not a loss reading.)"""
+    return device_down_rule(name="Down or loss", trigger_on="any", metric="ping_status",
+                            operator="==", threshold=0, conditions=_DOWN_OR_LOSS,
+                            condition_logic="OR", notify_channels=[CHANNEL], **kw)
+
+
+@pytest.mark.asyncio
+async def test_the_seeded_packet_loss_rule_never_fires_on_a_move_into_down(run, sent):
+    """Audit N-01: 'any' packet_loss > 5 used to page every outage at once,
+    beside and ahead of the held Device Down alert. It owns Degraded only."""
+    rule = device_down_rule(name="Packet Loss", trigger_on="any", metric="packet_loss",
+                            operator="gt", threshold=5, notify_channels=[CHANNEL])
+    db = _with_channel(AlertsDB([rule]))
+    await run(db, "up", "down", packet_loss=1.0)
+    await run(db, "down", "up")
+    assert db.alerts == []
+    await run(db, "up", "degraded", packet_loss=0.33)
+    [paged] = db.alerts
+    assert paged["metadata"]["new_status"] == "degraded"
 
 
 @pytest.mark.asyncio
@@ -513,10 +534,11 @@ async def test_postgres_flap_hold_confirms_a_sustained_outage(world):
 
 
 def _loss_rule_world(w):
-    """The world's rule as the seeded 'Packet Loss' (any, packet_loss > 5),
-    without cooldown: it matches degraded and down alike."""
-    w.db.execute("UPDATE alert_rules SET trigger_on = 'any', metric = 'packet_loss',"
-                 " operator = 'gt', threshold = 5, cooldown = 0 WHERE id = $1", w.rule)
+    """The world's rule as 'any' ping_status == 0 OR packet_loss > 5, without
+    cooldown: it matches degraded and down alike."""
+    w.db.execute("UPDATE alert_rules SET trigger_on = 'any', metric = 'ping_status',"
+                 " operator = '==', threshold = 0, conditions = $2::jsonb, condition_logic = 'OR',"
+                 " cooldown = 0 WHERE id = $1", w.rule, _DOWN_OR_LOSS)
 
 
 def _by_status(w):

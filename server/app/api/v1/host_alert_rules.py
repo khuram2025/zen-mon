@@ -13,6 +13,13 @@ metrics: 2 points on the healthy side, returned as ``auto_reset_threshold``);
 ``recovery_alert`` whether a recovery notice is sent. The reset level is
 stored as the rule's single condition, like network rules.
 
+Depth metrics (``host_depth_metrics``): ``host_swap_pct``,
+``host_disk_latency_ms`` (per disk), ``host_nic_errors`` (per NIC),
+``host_clock_skew_s``, ``host_fs_days_left`` (per mount; ``<``/``<=`` only)
+and ``host_auto_service_stopped`` (per service; stored as ``> 0``, ``target``
+= service name patterns to leave out). ``cooldown`` delays a re-opened
+incident's trigger until that long after the last notified one.
+
 The schedule (``schedule_start``/``schedule_end`` as HH:MM, ``schedule_days``
 1-7 for Mon-Sun) limits when notifications go out, as on every other rule;
 an update may move a rule between one server and all servers (``server_id``
@@ -43,7 +50,11 @@ from app.models.user import User
 
 router = APIRouter(prefix="/host-alert-rules", tags=["Host Alert Rules"])
 
-_METRIC = "^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down|host_process_down|host_agent_offline|host_restart|host_shutdown)$"
+_METRIC = ("^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down"
+           "|host_process_down|host_agent_offline|host_restart|host_shutdown"
+           # Server depth metrics (alerting plan G-9/G-10, migrate-208; host_depth_metrics).
+           "|host_swap_pct|host_disk_latency_ms|host_nic_errors|host_clock_skew_s|host_fs_days_left"
+           "|host_auto_service_stopped)$")
 _OPERATOR = "^(gt|gte|lt|lte|eq|neq|>|<|>=|<=|==|!=)$"
 _HHMM = "^([01][0-9]|2[0-3]):[0-5][0-9]$"
 
@@ -54,7 +65,29 @@ _COLUMNS = (
     "schedule_start, schedule_end, schedule_days, scope_tag, group_id, created_at, updated_at"
 )
 # Threshold metrics: the ones a reset threshold and clear hold apply to.
-_PCT_METRICS = ("host_cpu_pct", "host_memory_pct", "host_filesystem_pct", "host_disk_util_pct")
+_PCT_METRICS = ("host_cpu_pct", "host_memory_pct", "host_filesystem_pct", "host_disk_util_pct",
+                "host_swap_pct", "host_disk_latency_ms", "host_nic_errors", "host_clock_skew_s",
+                "host_fs_days_left")
+_LOW_OPS = ("lt", "lte", "<", "<=")
+
+
+def _metric_rule(metric, operator, threshold, target):
+    """(operator, threshold) as stored for a metric with its own shape, 422
+    when they cannot work:
+
+    * host_auto_service_stopped fires per stopped automatic service: the
+      stored condition is always "> 0" (a stopped service reads 1); ``target``
+      is optional and lists service name patterns to leave out.
+    * host_fs_days_left is "fewer than N days until full": < or <=, N > 0.
+    """
+    if metric == "host_auto_service_stopped":
+        return "gt", 0.0
+    if metric == "host_fs_days_left":
+        if operator not in _LOW_OPS:
+            raise HTTPException(422, "A days-until-full rule fires below a number of days: use < or <=")
+        if threshold is None or float(threshold) <= 0:
+            raise HTTPException(422, "Days until full must be more than 0")
+    return operator, threshold
 
 
 class HostRuleCreate(BaseModel):
@@ -175,7 +208,8 @@ def _condition_json(metric, operator, threshold, reset) -> Optional[str]:
     if reset is None:
         return None
     if metric not in _PCT_METRICS:
-        raise HTTPException(422, "A reset threshold applies to CPU, memory, filesystem and disk utilisation rules")
+        raise HTTPException(422, "A reset threshold applies to threshold rules (CPU, memory, swap, filesystem, "
+                                 "disk, network errors, clock offset, days until full)")
     from app.services.network_conditions import validate_conditions
     cond = {"metric": metric, "operator": operator, "threshold": float(threshold or 0),
             "reset_threshold": float(reset)}
@@ -187,6 +221,8 @@ def _condition_json(metric, operator, threshold, reset) -> Optional[str]:
 
 
 def _auto_reset(metric, operator, threshold) -> Optional[float]:
+    if metric == "host_fs_days_left" and operator in _LOW_OPS and threshold is not None:
+        return float(threshold) + 1.0   # one day on the healthy side (host_alert_service)
     from app.services.network_conditions import auto_reset_threshold
     return auto_reset_threshold({"metric": metric, "operator": operator, "threshold": threshold})
 
@@ -273,6 +309,7 @@ async def create_host_rule(
 ):
     if data.metric in ("host_process_down", "host_service_down") and not data.target:
         raise HTTPException(400, f"target is required for {data.metric}")
+    data.operator, data.threshold = _metric_rule(data.metric, data.operator, data.threshold, data.target)
     scope_tag, group_id = await _scope_or_422(db, data.server_id, data.scope_tag, data.group_id)
     await rs.guard_rule_change(db, user, {**data.model_dump(), "scope_tag": scope_tag, "group_id": group_id})
     conditions = _condition_json(data.metric, data.operator, data.threshold, data.reset_threshold)
@@ -340,6 +377,12 @@ async def update_host_rule(
                 "min_duration", "cooldown", "name", "severity"):
         if key in fields and fields[key] is None:
             del fields[key]
+    if any(k in fields for k in ("metric", "operator", "threshold")):
+        merged = {**before, **fields}
+        op, thr = _metric_rule(merged.get("metric"), merged.get("operator"), merged.get("threshold"),
+                               merged.get("target"))
+        if (op, thr) != (merged.get("operator"), merged.get("threshold")):
+            fields["operator"], fields["threshold"] = op, thr
     # The reset level lives in the rule's condition; rebuild it whenever the
     # trigger or the reset changes (a reset left on the wrong side is a 422).
     if any(k in fields for k in ("metric", "operator", "threshold", "reset_threshold")):

@@ -374,7 +374,7 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
 
     opened = closed = notices = anomalies = 0
     by_reason: dict[str, int] = {"recovered": 0, "manual": 0, "suppressed": 0,
-                                 "superseded": 0, "administrative": 0}
+                                 "superseded": 0, "administrative": 0, "expired": 0}
     ttr, ttc, tta = [], [], []
     for r in wrows:
         if r.is_notice:

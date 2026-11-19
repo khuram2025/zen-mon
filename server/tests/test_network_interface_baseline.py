@@ -131,7 +131,7 @@ async def test_notification_carries_the_ip(monkeypatch):
     await worker._notify(None, _rule(), 'core-sw', iface_label='Gi1/0/1',
                          ip_address='10.0.0.1', is_recovery=True, duration='5 minutes')
     ctx = sink.call_args.args[2]
-    assert ctx['subject'] == '[CRITICAL] Resolved: Interface down — core-sw (10.0.0.1) / Gi1/0/1'
+    assert ctx['subject'] == '[RESOLVED] Interface down — core-sw (10.0.0.1) / Gi1/0/1'
 
 
 @pytest.mark.asyncio

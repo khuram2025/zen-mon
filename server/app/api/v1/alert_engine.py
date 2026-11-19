@@ -23,17 +23,20 @@ from sqlalchemy import text
 
 from app.core.database import get_db
 from app.services.email_render import alert_subject, build_alert_email_html
+from app.services import notification_payload as npl
+from app.services import notification_context
 from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_funnel as funnel
 from app.services import alert_rule_exclusions as rx
 from app.services import alert_notify_state as ns
+from app.services import event_alerts
 from app.services import device_status_machine as dsm
 from app.services import alert_condition
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
     DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
-    service_check_variables,
+    service_check_variables, trap_variables,
     conditions_label, default_templates, duration_between, effective_template,
     format_reading, format_threshold, host_label, incident_context, rule_phrasing,
     asset_type_label,
@@ -253,11 +256,10 @@ def _severity_color(severity: str) -> int:
 
 
 async def _send_webhook(ch_config: dict, ctx: dict) -> None:
-    """Generic JSON webhook. Posts the alert ctx + optional templated body.
-
-    `ctx` carries: hostname, ip_address, status (UP/DOWN/DEGRADED), severity,
-    message, triggered_at, map_id (optional), rule_id, is_recovery.
-    """
+    """Generic JSON webhook: the documented field set
+    (notification_payload.webhook_fields, docs/alerts-api-contract.md), or the
+    channel's own body template filled from those fields. Never the whole
+    dispatch ctx: that holds recipient addresses and the HTML mail."""
     url = ch_config.get("url") or ch_config.get("webhook_url")
     if not url:
         return
@@ -266,9 +268,9 @@ async def _send_webhook(ch_config: dict, ctx: dict) -> None:
     if ch_config.get("auth_bearer"):
         headers["Authorization"] = f"Bearer {ch_config['auth_bearer']}"
     body = ch_config.get("body_template")
-    payload: dict | str = ctx
+    payload: dict | str = npl.webhook_fields(ctx)
     if isinstance(body, str) and body.strip():
-        payload = _render(body, ctx)
+        payload = _render(body, npl.template_values(ctx))
     async with NotificationHTTPClient(timeout=10.0, verify=ch_config.get("tls_verify", True)) as client:
         if isinstance(payload, str):
             resp = await client.post(url, content=payload, headers=headers)
@@ -277,33 +279,52 @@ async def _send_webhook(ch_config: dict, ctx: dict) -> None:
     ensure_accepted(resp)
 
 
+def slack_payload(ctx: dict) -> dict:
+    """Slack incoming-webhook payload: the event sentence, then the facts."""
+    v = npl.chat_view(ctx)
+    emoji = (":large_green_circle:" if v["recovery"] else
+             ":red_circle:" if v["severity"] == "critical" else ":warning:")
+    attachment = {
+        "color": "good" if v["recovery"] else ("danger" if v["severity"] == "critical" else "warning"),
+        "title": v["title"],
+        "fields": [{"title": label, "value": value, "short": label not in ("Value", "Rule")}
+                   for label, value in v["facts"]],
+        "footer": "ZenPlus",
+        "ts": int(datetime.now(timezone.utc).timestamp()),
+    }
+    if v["url"]:
+        attachment["title_link"] = v["url"]
+    return {"text": f"{emoji} {v['title']}", "attachments": [attachment]}
+
+
 async def _send_slack(ch_config: dict, ctx: dict) -> None:
     """Slack incoming-webhook compatible payload."""
     url = ch_config.get("url") or ch_config.get("webhook_url")
     if not url:
         return
-    is_recovery = bool(ctx.get("is_recovery"))
-    emoji = ":large_green_circle:" if is_recovery else (":red_circle:" if ctx.get("severity") == "critical" else ":warning:")
-    title = f"{emoji} {ctx['hostname']} is {ctx['status']}"
-    payload = {
-        "text": title,
-        "attachments": [{
-            "color": "good" if is_recovery else ("danger" if ctx.get("severity") == "critical" else "warning"),
-            "title": title,
-            "fields": [
-                {"title": "Host",       "value": ctx["hostname"],            "short": True},
-                {"title": "IP",         "value": ctx.get("ip_address", "—"), "short": True},
-                {"title": "Severity",   "value": ctx.get("severity", "—"),   "short": True},
-                {"title": "Triggered",  "value": ctx.get("triggered_at", "—"), "short": True},
-                {"title": "Message",    "value": ctx.get("message", ""),     "short": False},
-            ],
-            "footer": "ZenPlus",
-            "ts": int(datetime.now(timezone.utc).timestamp()),
-        }],
-    }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=slack_payload(ctx))
     ensure_accepted(resp)
+
+
+def teams_payload(ctx: dict) -> dict:
+    """Microsoft Teams Adaptive Card: the event sentence, the facts, a link."""
+    v = npl.chat_view(ctx)
+    color = "good" if v["recovery"] else ("attention" if v["severity"] == "critical" else "warning")
+    content = {
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {"type": "TextBlock", "size": "Large", "weight": "Bolder", "wrap": True,
+             "text": v["title"], "color": color},
+            {"type": "FactSet", "facts": [{"title": label, "value": value}
+                                          for label, value in v["facts"]]},
+        ],
+    }
+    if v["url"]:
+        content["actions"] = [{"type": "Action.OpenUrl", "title": "View incident", "url": v["url"]}]
+    return {"type": "message", "attachments": [{
+        "contentType": "application/vnd.microsoft.card.adaptive", "content": content}]}
 
 
 async def _send_teams(ch_config: dict, ctx: dict) -> None:
@@ -311,33 +332,26 @@ async def _send_teams(ch_config: dict, ctx: dict) -> None:
     url = ch_config.get("url") or ch_config.get("webhook_url")
     if not url:
         return
-    is_recovery = bool(ctx.get("is_recovery"))
-    severity = ctx.get("severity", "warning")
-    color = "good" if is_recovery else ("attention" if severity == "critical" else "warning")
-    card = {
-        "type": "message",
-        "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {
-                "type": "AdaptiveCard",
-                "version": "1.4",
-                "body": [
-                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
-                     "text": f"{ctx['hostname']} is {ctx['status']}",
-                     "color": color},
-                    {"type": "FactSet", "facts": [
-                        {"title": "IP",        "value": ctx.get("ip_address", "—")},
-                        {"title": "Severity",  "value": severity},
-                        {"title": "Triggered", "value": ctx.get("triggered_at", "—")},
-                        {"title": "Message",   "value": ctx.get("message", "")},
-                    ]},
-                ],
-            },
-        }],
-    }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        resp = await client.post(url, json=card)
+        resp = await client.post(url, json=teams_payload(ctx))
     ensure_accepted(resp)
+
+
+def discord_payload(ctx: dict, username: str = "ZenPlus") -> dict:
+    """Discord webhook embed: the event sentence as title, the facts as fields."""
+    v = npl.chat_view(ctx)
+    embed = {
+        "title": v["title"][:256],
+        "color": 0x16A34A if v["recovery"] else _severity_color(v["severity"]),
+        "fields": [{"name": label, "value": value[:1000], "inline": label not in ("Value", "Rule")}
+                   for label, value in v["facts"]],
+        "footer": {"text": "ZenPlus"},
+    }
+    if v["url"]:
+        embed["url"] = v["url"]
+    if ctx.get("triggered_at"):
+        embed["timestamp"] = str(ctx["triggered_at"])
+    return {"username": username, "embeds": [embed]}
 
 
 async def _send_discord(ch_config: dict, ctx: dict) -> None:
@@ -345,26 +359,41 @@ async def _send_discord(ch_config: dict, ctx: dict) -> None:
     url = ch_config.get("url") or ch_config.get("webhook_url")
     if not url:
         return
-    is_recovery = bool(ctx.get("is_recovery"))
-    color = 0x16A34A if is_recovery else _severity_color(ctx.get("severity", "warning"))
-    payload = {
-        "username": ch_config.get("username", "ZenPlus"),
-        "embeds": [{
-            "title":  f"{ctx['hostname']} is {ctx['status']}",
-            "color":  color,
-            "fields": [
-                {"name": "IP",        "value": ctx.get("ip_address", "—"), "inline": True},
-                {"name": "Severity",  "value": ctx.get("severity", "—"),   "inline": True},
-                {"name": "Triggered", "value": ctx.get("triggered_at", "—"), "inline": False},
-                {"name": "Message",   "value": ctx.get("message", "")[:1000] or "—", "inline": False},
-            ],
-            "timestamp": ctx.get("triggered_at"),
-            "footer": {"text": "ZenPlus"},
-        }],
-    }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=discord_payload(ctx, ch_config.get("username", "ZenPlus")))
     ensure_accepted(resp)
+
+
+def pagerduty_payload(ctx: dict, routing_key: str) -> dict:
+    """PagerDuty Events API v2: trigger / resolve, the event sentence as the
+    summary and the documented webhook fields as custom_details."""
+    v = npl.chat_view(ctx)
+    # Trigger and resolve must share one key per condition. Device alerts key
+    # on device_id as before; server/service/host alerts used to collapse into
+    # "<rule>:unknown", so one entity's recovery resolved another's incident.
+    subject = (ctx.get("device_id") or ctx.get("server_id") or ctx.get("service_check_id")
+               or ctx.get("hostname") or "unknown")
+    dedup_key = ctx.get("dedup_key") or f"zenplus:{ctx.get('rule_id', 'unknown')}:{subject}"
+    body = {
+        "summary": v["title"][:1024],
+        "source": ctx.get("ip_address") or ctx.get("hostname") or "ZenPlus",
+        "severity": {"critical": "critical", "warning": "warning", "info": "info"}.get(
+            v["severity"], "warning"),
+        "custom_details": npl.webhook_fields(ctx),
+    }
+    if ctx.get("site"):
+        body["group"] = str(ctx["site"])
+    if ctx.get("triggered_at"):
+        body["timestamp"] = str(ctx["triggered_at"])
+    payload = {
+        "routing_key": routing_key,
+        "event_action": "resolve" if v["recovery"] else "trigger",
+        "dedup_key": dedup_key,
+        "payload": body,
+    }
+    if v["url"]:
+        payload["links"] = [{"href": v["url"], "text": "View incident"}]
+    return payload
 
 
 async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
@@ -372,28 +401,9 @@ async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
     routing_key = ch_config.get("routing_key") or ch_config.get("integration_key")
     if not routing_key:
         return
-    is_recovery = bool(ctx.get("is_recovery"))
-    # Trigger and resolve must share one key per condition. Device alerts key
-    # on device_id as before; server/service/host alerts used to collapse into
-    # "<rule>:unknown", so one entity's recovery resolved another's incident.
-    subject = (ctx.get("device_id") or ctx.get("server_id") or ctx.get("service_check_id")
-               or ctx.get("hostname") or "unknown")
-    dedup_key = ctx.get("dedup_key") or f"zenplus:{ctx.get('rule_id', 'unknown')}:{subject}"
-    payload = {
-        "routing_key": routing_key,
-        "event_action": "resolve" if is_recovery else "trigger",
-        "dedup_key": dedup_key,
-        "payload": {
-            "summary":   f"{ctx['hostname']} is {ctx['status']} — {ctx.get('message', '')}".strip(),
-            "source":    ctx.get("ip_address") or ctx.get("hostname"),
-            "severity":  {"critical": "critical", "warning": "warning", "info": "info"}.get(
-                ctx.get("severity", "warning"), "warning",
-            ),
-            "custom_details": {k: v for k, v in ctx.items() if k not in ("severity",)},
-        },
-    }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        resp = await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
+        resp = await client.post("https://events.pagerduty.com/v2/enqueue",
+                                 json=pagerduty_payload(ctx, routing_key))
     ensure_accepted(resp)
 
 
@@ -528,10 +538,16 @@ def _recovery_map(closed_rows) -> dict:
         rid = str(row.rule_id)
         sent = row.notified is None or str(row.notified).lower() == "true"
         entry = out.get(rid)
+        status = getattr(row, "new_status", None)
         if entry is None:
             out[rid] = {"notified": sent, "since": row.triggered_at,
-                        "alert_id": getattr(row, "id", None)}
+                        "alert_id": getattr(row, "id", None),
+                        # Which statuses it closed: the all-clear of a Down
+                        # says "Down for", a degraded one "Degraded for".
+                        "statuses": {status} if status else set()}
             continue
+        if status:
+            entry.setdefault("statuses", set()).add(status)
         entry["notified"] = entry["notified"] or sent
         if entry.get("alert_id") is None:
             entry["alert_id"] = getattr(row, "id", None)
@@ -709,10 +725,13 @@ def _conditions_match(rule, values: dict, *, unknown: frozenset = frozenset()) -
 
 
 # What a move into down carries (see metric_values in evaluate_status_change):
-# the check got no answer, so ping_status 0, 100% loss and no round-trip time
-# at all — an unanswered check has no latency, and an rtt rule must never read
-# it as 0 ms.
-_INTO_DOWN_READINGS = {"ping_status": 0.0, "rtt": None, "packet_loss": 100.0}
+# the check got no answer, so ping_status 0 and neither a round-trip time nor
+# a packet-loss reading. An unanswered check has no latency (an rtt rule must
+# never read it as 0 ms), and "no reply" is a reachability event, not 100%
+# packet loss: a "loss > 5%" rule with trigger Any used to page every outage
+# at once, alongside and ahead of the held Device Down alert (alerting audit
+# 2026-11-19, N-01). Latency and loss rules own the Degraded state only.
+_INTO_DOWN_READINGS = {"ping_status": 0.0, "rtt": None, "packet_loss": None}
 
 RTT_UNAVAILABLE = "unavailable (no reply)"
 
@@ -754,7 +773,7 @@ def _could_fire_into(rule, new_status: str) -> bool:
     The flap notices tell only the rules a flap can actually hold: the seeded
     "Device Down" (any, ping_status == 0) never fires on degraded, so it must
     not hear that up/degraded notifications are held, and an 'any' rtt > 100
-    rule never fires on a move into down. Into degraded the device still
+    or packet_loss > 5 rule never fires on a move into down. Into degraded the device still
     answers (ping_status 1) with a latency/loss reading nobody knows in
     advance, so rtt and packet_loss conditions count as satisfiable.
     """
@@ -858,32 +877,13 @@ async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
 
     Defense in depth: the poller already suppresses transitions for devices in
     maintenance, but this also covers events raised while a window was being
-    created, and traps. Tolerates the table not existing yet (rolling upgrade
-    before migrate-053 has run).
+    created, and traps. One-off and recurring windows are decided by
+    ``app.services.maintenance_windows`` (the same SQL function every
+    evaluator and the poller use); a failed lookup counts as not in
+    maintenance.
     """
-    try:
-        row = await db.execute(
-            text("""
-                SELECT 1
-                FROM devices d
-                WHERE d.id = :did AND (d.status = 'maintenance' OR EXISTS (
-                    SELECT 1 FROM device_maintenance m WHERE (
-                       (m.scope_type = 'device' AND m.scope_device_id = d.id)
-                    OR (m.scope_type = 'group'  AND (m.scope_group_id = d.group_id OR EXISTS (
-                           SELECT 1 FROM device_group_member_closure c
-                            WHERE c.group_id = m.scope_group_id AND c.asset_kind = 'device' AND c.asset_id = d.id)))
-                    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
-                    OR (m.scope_type = 'all')
-                )
-                AND m.starts_at <= now() AND m.ends_at >= now()
-                ))
-                LIMIT 1
-            """),
-            {"did": device_id},
-        )
-        return row.first() is not None
-    except Exception:
-        return False
+    from app.services.maintenance_windows import device_in_maintenance
+    return await device_in_maintenance(db, device_id)
 
 
 async def _offline_sensor_owner(db: AsyncSession, device_id: str):
@@ -1008,6 +1008,10 @@ async def evaluate_status_change(
     # Custom fields as {custom.<key>} placeholders (migrate-192); never blocks a send.
     from app.services import custom_fields as _cf
     variables.update(await _cf.placeholders(db, "device", event.device_id))
+    # {site} and {site_suffix} ("... at Site Riyadh-HQ" in the SMS); {group}
+    # stays the device's primary group read above.
+    place = await notification_context.asset_place(db, {"device_id": event.device_id})
+    variables.update(site=place["site"], site_suffix=place["site_suffix"])
 
     notifications_sent = 0
     resolved_alerts = 0
@@ -1081,12 +1085,16 @@ async def evaluate_status_change(
 
     # E1: live metric values for condition evaluation. packet_loss arrives from
     # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
-    # An unanswered check has no rtt (None): rtt conditions do not match it.
-    metric_values = {
-        "ping_status": _ping_status_value(event.new_status),
-        "rtt": rtt_value,
-        "packet_loss": loss_pct,
-    }
+    # A move into down has no reply to measure: neither rtt nor packet_loss
+    # conditions match it (see _INTO_DOWN_READINGS) — reachability rules own it.
+    if event.new_status == "down":
+        metric_values = dict(_INTO_DOWN_READINGS)
+    else:
+        metric_values = {
+            "ping_status": _ping_status_value(event.new_status),
+            "rtt": rtt_value,
+            "packet_loss": loss_pct,
+        }
 
     # Flapping: hold, not drop. The flap hold is the policy's stable time,
     # loaded once per evaluation and only when a held trigger needs it.
@@ -1143,6 +1151,23 @@ async def evaluate_status_change(
         if branding is None:
             from app.services.regional_time import notification_branding
             branding = await notification_branding(db)
+        # What this rule's all-clear closes: a Down rule still open from
+        # before a degraded spell recovers from down, whatever the last
+        # transition was ("came back up", "Down for"), never "latency and
+        # packet loss back within limits".
+        rule_recovered_from = None
+        if is_recovery:
+            closed_statuses = recovered.get(str(rule.id), {}).get("statuses") or set()
+            rule_recovered_from = ("down" if "down" in closed_statuses else
+                                   "degraded" if "degraded" in closed_statuses else event.old_status)
+            rule_condition = alert_condition.status_condition(
+                event.new_status, rule_recovered_from, None, None, None)
+        else:
+            rule_condition = condition
+        # An rtt/packet-loss rule leads with its own reading against its own
+        # limit; the status policy's cause is added only when it differs.
+        rule_cause = ("" if is_recovery else
+                      alert_condition.status_cause(rule_metric, event.new_status, condition["title"]))
         variables.update(rule_phrasing(
             rule, hostname=host_label(event.hostname, event.ip_address), is_recovery=is_recovery,
             reading=RTT_UNAVAILABLE if rule_metric == "rtt" and rtt_value is None else None,
@@ -1151,7 +1176,9 @@ async def evaluate_status_change(
             # "Switch core-sw (10.0.0.1) is down: it does not answer ping (since 14:44)."
             asset_type=asset_type_label(device_type), event_time=now, branding=branding, now=now,
             status_detail=(condition.get("title") if event.new_status == "degraded"
-                           or (is_recovery and event.old_status == "degraded") else None),
+                           else rule_condition.get("title")
+                           if is_recovery and rule_recovered_from == "degraded" else None),
+            recovered_from=rule_recovered_from, status_cause=rule_cause or None,
         ))
 
         p_col, p_val, p_params = funnel.priority_insert(
@@ -1179,6 +1206,11 @@ async def evaluate_status_change(
                         "old_status": event.old_status,
                         "new_status": event.new_status,
                         "suppressed_by_dependency": True,
+                        # Never sent: without this a missing key read as
+                        # notified and started the rule's cooldown, so the
+                        # first real page after the parent recovered could be
+                        # swallowed (alerting audit, engine review).
+                        "notified": False,
                         "dependency_id": str(suppressing_dependency["dependency_id"]),
                         "parent_device_id": str(suppressing_dependency["parent_device_id"]),
                         "parent_hostname": suppressing_dependency["parent_hostname"],
@@ -1279,8 +1311,13 @@ async def evaluate_status_change(
         # only (persisting sms_body here put "[ZenPlus WARNING] ..." template
         # text all over the alert UIs).
         row_metadata = {"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery,
-                        "condition": condition["title"], "condition_metric": condition["metric"],
-                        "condition_value": condition["value"], "condition_limit": condition["limit"]}
+                        "condition": rule_condition["title"], "condition_metric": rule_condition["metric"],
+                        "condition_value": rule_condition["value"], "condition_limit": rule_condition["limit"],
+                        # What the transition measured, so a confirmed hold
+                        # words its notice like an immediate one.
+                        "rtt_ms": rtt_value, "loss_pct": loss_pct}
+        if rule_metric in alert_condition.RULE_READING_METRICS:
+            row_metadata["rule_value"] = rule_value
         if held:
             row_metadata["notified"] = False
             row_metadata["hold_until"] = (now + timedelta(seconds=hold_s)).isoformat()
@@ -1300,7 +1337,12 @@ async def evaluate_status_change(
                 "rule_id": str(rule.id),
                 "status": "resolved" if is_recovery else ("pending" if held else "active"),
                 "severity": rule.severity or "warning",
-                "message": alert_condition.alert_message(condition["title"], event.hostname, event.ip_address),
+                "message": (
+                    alert_condition.rule_alert_message(
+                        rule_metric, rule_value, rule.operator, rule.threshold,
+                        event.hostname, event.ip_address, rule_cause)
+                    if rule_metric in alert_condition.RULE_READING_METRICS and not is_recovery else
+                    alert_condition.alert_message(rule_condition["title"], event.hostname, event.ip_address)),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
                 "metadata": json.dumps(row_metadata),
@@ -1390,6 +1432,8 @@ async def evaluate_status_change(
             "subject": email_subject,
             "body": email_body,
             "message": sms_body,
+            # The chat/incident title (notification_payload).
+            "event_sentence": variables.get("event_sentence"),
             "hostname": event.hostname,
             "ip_address": event.ip_address,
             "status": (event.new_status or "").upper(),
@@ -1523,6 +1567,9 @@ async def evaluate_service_status_change(
             FROM alert_rules
             WHERE enabled = true
               AND (service_check_id IS NOT NULL OR service_check_group_id IS NOT NULL OR metric = 'service_status')
+              -- Certificate-expiry / response-time rules are levels evaluated
+              -- by service_metric_alert_service, never status transitions.
+              AND COALESCE(metric, '') NOT IN ('service_tls_days', 'service_response_ms', 'f5_cert_days')
         """)
     )
     rules = rules_result.fetchall()
@@ -1553,6 +1600,11 @@ async def evaluate_service_status_change(
         "status_intro": "The following service alert has been resolved:"
             if is_recovery else "A service alert has been triggered:",
     }
+    # The site of the check's sensor or linked device; {group} stays the
+    # check's service group, else the linked device's group.
+    place = await notification_context.asset_place(db, {"service_check_id": event.service_check_id})
+    variables.update(site=place["site"], site_suffix=place["site_suffix"],
+                     group=variables["group"] or place["group"])
 
     notifications_sent = 0
     resolved_alerts = 0
@@ -1665,6 +1717,11 @@ async def evaluate_service_status_change(
                         "old_status": event.old_status,
                         "new_status": event.new_status,
                         "suppressed_by_dependency": True,
+                        # Never sent: without this a missing key read as
+                        # notified and started the rule's cooldown, so the
+                        # first real page after the parent recovered could be
+                        # swallowed (alerting audit, engine review).
+                        "notified": False,
                         "dependency_id": str(suppressing_dependency["dependency_id"]),
                         "parent_device_id": str(suppressing_dependency["parent_device_id"]),
                         "parent_hostname": suppressing_dependency["parent_hostname"],
@@ -1685,18 +1742,6 @@ async def evaluate_service_status_change(
         failed_for = variables.get("duration") or ""
         variables["duration_sentence"] = variables["duration_suffix"] = (
             f" Failing for {failed_for}." if is_recovery and failed_for else "")
-        # Defaults live in alert_phrasing so the rule editors advertise exactly
-        # the text this path sends.
-        svc_defaults = default_templates("service")
-        if is_recovery:
-            email_subject = _render(effective_template(rule.recovery_email_subject, svc_defaults["recovery_email_subject"]), variables)
-            email_body = _render(effective_template(rule.recovery_email_body, svc_defaults["recovery_email_body"]), variables)
-            sms_body = _render(effective_template(rule.recovery_sms_template, svc_defaults["recovery_sms_template"]), variables)
-        else:
-            email_subject = _render(effective_template(rule.email_subject, svc_defaults["email_subject"]), variables)
-            email_body = _render(effective_template(rule.email_body, svc_defaults["email_body"]), variables)
-            sms_body = _render(effective_template(rule.sms_template, svc_defaults["sms_template"]), variables)
-
         # "Condition must exist for" hold, exactly as on the device path: park
         # the row as 'pending' and let the hold sweeper confirm the check is
         # still failing after min_duration before anything is dispatched.
@@ -1730,9 +1775,9 @@ async def evaluate_service_status_change(
                 # SMS is a transport payload and made every alert list read
                 # like "[ZenPlus WARNING] ..." template dumps.
                 "message": (
-                    f"{rule.name}: {event.check_name} ({target}) is passing again"
+                    f"{rule.name}: {event.check_name} ({target}) is passing again."
                     if is_recovery else
-                    f"{rule.name}: {event.check_name} ({target}) {variables['check_result']}"
+                    f"{rule.name}: {event.check_name} ({target}) {variables['check_result']}."
                     + (variables.get("error_sentence") or "")
                 ),
                 "triggered_at": now,
@@ -1768,6 +1813,27 @@ async def evaluate_service_status_change(
         is_reset = is_recovery and trigger != "up"
         delivery_alert_id = (recovered.get(str(rule.id), {}).get("alert_id")
                              if is_reset else svc_alert_id)
+        # Which incident and where it is in its life, as on the device path
+        # and the hold path: "[New]" / "[Recovered]" and "[INC-...]".
+        if is_reset:
+            closed_inc = recovered.get(str(rule.id), {})
+            svc_incident = incident_context(alert_id=closed_inc.get("alert_id"),
+                                            first_seen=closed_inc.get("since"), now=now,
+                                            lifecycle="recovered")
+        else:
+            svc_incident = incident_context(alert_id=svc_alert_id, first_seen=now, now=now,
+                                            lifecycle="new")
+        variables.update(svc_incident)
+        # Defaults live in alert_phrasing so the rule editors advertise exactly
+        # the text this path sends.
+        svc_defaults = default_templates("service")
+        prefix = "recovery_" if is_recovery else ""
+        email_subject = _render(effective_template(getattr(rule, prefix + "email_subject"),
+                                                   svc_defaults[prefix + "email_subject"]), variables)
+        email_body = _render(effective_template(getattr(rule, prefix + "email_body"),
+                                                svc_defaults[prefix + "email_body"]), variables)
+        sms_body = _render(effective_template(getattr(rule, prefix + "sms_template"),
+                                              svc_defaults[prefix + "sms_template"]), variables)
         # Sent after the commit below, through the shared dispatcher (see the
         # device path). The webhook family keeps its keys (service_check_id,
         # not device_id, so PagerDuty's dedup key is unchanged); the email
@@ -1776,6 +1842,9 @@ async def evaluate_service_status_change(
             "subject": email_subject,
             "body": email_body,
             "message": sms_body,
+            # The chat/incident title: the default mail sentence, whatever
+            # the rule's own body says.
+            "event_sentence": _render(svc_defaults[prefix + "email_body"], variables),
             "hostname": variables.get("check_name") or variables.get("hostname"),
             "ip_address": variables.get("target") or "",
             "status": (event.new_status or "").upper(),
@@ -1810,6 +1879,7 @@ async def evaluate_service_status_change(
             **funnel.notification_fields(rule.severity or "warning",
                                          getattr(rule, "priority", None),
                                          trigger=not is_recovery),
+            **svc_incident,
         }))
 
     await db.commit()
@@ -1909,6 +1979,7 @@ async def evaluate_trap(
     _tz = await get_configured_timezone(db)
 
     alerts_created = 0
+    alerts_updated = 0
     for rule in rules:
         if rule.device_id and (not did or str(rule.device_id) != did):
             continue
@@ -1924,8 +1995,11 @@ async def evaluate_trap(
         await db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))'),
                          {'key': f'trap:{rule.id}:{did or event.source_ip}'})
         if event.event_id:
+            # A merged row (event_alerts) keeps its newest event ids in
+            # recent_occurrences, so a retried delivery is still recognised.
             replayed = (await db.execute(text("SELECT 1 FROM alerts WHERE rule_id = :rid "
-                "AND metadata->>'trap_event_id' = :event_id LIMIT 1"),
+                "AND (metadata->>'trap_event_id' = :event_id OR metadata->'recent_occurrences'"
+                " @> jsonb_build_array(jsonb_build_object('event_id', CAST(:event_id AS text)))) LIMIT 1"),
                 {'rid': str(rule.id), 'event_id': str(event.event_id)})).first()
             if replayed:
                 continue
@@ -1943,9 +2017,44 @@ async def evaluate_trap(
 
         label = event.trap_name or event.trap_oid
         message = event.message or f"SNMP trap {label} from {event.source_ip}"
+        cooldown_s = max(int(rule.cooldown or 0), 60)
+
+        # One open row per condition (rule + device + trap OID; the source
+        # address stands in for an unknown device): a repeat updates the open
+        # row instead of stacking another one (event_alerts, audit G-7).
+        open_row = (await db.execute(
+            text(f"""
+                SELECT id, triggered_at, metadata FROM alerts
+                WHERE rule_id = :rid AND status IN {event_alerts.OPEN_STATUSES_SQL}
+                  AND COALESCE(metadata->>'trap', 'false') = 'true'
+                  AND device_id IS NOT DISTINCT FROM CAST(:did AS uuid)
+                  AND (CAST(:did AS uuid) IS NOT NULL OR metadata->>'source_ip' = :source_ip)
+                  AND COALESCE(metadata->>'trap_oid', '') = :trap_oid
+                ORDER BY triggered_at DESC LIMIT 1
+                FOR UPDATE
+            """),
+            {"rid": str(rule.id), "did": did, "source_ip": event.source_ip,
+             "trap_oid": event.trap_oid or ""},
+        )).first()
+        repeat_patch: dict | None = None
+        alert_id = None
+        if open_row is not None:
+            repeat_patch = event_alerts.occurrence_patch(
+                open_row.metadata, now, message, event_id=event.event_id,
+                extra={"trap_event_id": str(event.event_id) if event.event_id else None,
+                       "trap_name": event.trap_name, "trap_severity": event.severity,
+                       "last_source_ip": event.source_ip})
+            await db.execute(
+                text("UPDATE alerts SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb)"
+                     " WHERE id = :id"),
+                {"id": open_row.id, "m": json.dumps(repeat_patch)},
+            )
+            alerts_updated += 1
+            alert_id = open_row.id
+
         p_col, p_val, p_params = funnel.priority_insert(
             priority_ok, getattr(rule, "priority", None), rule.severity or event.severity or "warning")
-        inserted = await db.execute(
+        inserted = None if open_row is not None else await db.execute(
             text(f"""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata{p_col})
                 VALUES (:device_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb){p_val})
@@ -1966,11 +2075,13 @@ async def evaluate_trap(
                     "trap_name": event.trap_name,
                     "source_ip": event.source_ip,
                     "trap_severity": event.severity,
+                    **event_alerts.first_metadata(now, message, event.event_id),
                 }),
             },
         )
-        alerts_created += 1
-        alert_id = (inserted.first() or [None])[0]
+        if inserted is not None:
+            alerts_created += 1
+            alert_id = (inserted.first() or [None])[0]
 
         # Dispatch the rule's channels. Traps arrive in storms, so the rule's
         # cooldown (floor 60s) dedupes per rule+device: one page per burst.
@@ -1981,9 +2092,14 @@ async def evaluate_trap(
             rule.schedule_start, rule.schedule_end,
             getattr(rule, "schedule_days", None), _tz,
         )
-        if allowed:
+        if allowed and open_row is not None:
+            # A repeat pages again only once the cooldown has passed since
+            # this condition's last page.
+            allowed = event_alerts.repeat_page_due(open_row.metadata, open_row.triggered_at,
+                                                   now, cooldown_s)
+        elif allowed:
             prior = (await db.execute(
-                text("""
+                text(f"""
                     SELECT 1 FROM alerts
                     WHERE rule_id = :rid
                       AND device_id IS NOT DISTINCT FROM CAST(:did AS uuid)
@@ -1991,11 +2107,11 @@ async def evaluate_trap(
                       AND id <> :aid
                       AND COALESCE(metadata->>'notified', 'true') = 'true'
                       AND COALESCE(metadata->>'trap', 'false') = 'true'
-                      AND triggered_at > now() - make_interval(secs => :cd)
+                      AND {event_alerts.last_page_sql('alerts')} > now() - make_interval(secs => :cd)
                     LIMIT 1
                 """),
                 {"rid": str(rule.id), "did": did, "aid": alert_id, "source_ip": event.source_ip,
-                 "cd": max(int(rule.cooldown or 0), 60)},
+                 "cd": cooldown_s},
             )).first()
             allowed = prior is None
         if not allowed:
@@ -2014,6 +2130,8 @@ async def evaluate_trap(
             "trap_name": event.trap_name or "",
             "source_ip": event.source_ip or "",
             "trap_message": message,
+            **(await notification_context.asset_place(db, {"device_id": did})),
+            **trap_variables(event.trap_name, event.trap_oid, event.message),
             **rule_phrasing(rule, hostname=host_label(subject_name, device_ip or event.source_ip),
                             asset_type=asset_type_label(getattr(dev, "device_type", None)) if dev else None),
         }
@@ -2028,6 +2146,7 @@ async def evaluate_trap(
                 "subject": email_subject,
                 "body": email_body,
                 "message": sms_body,
+                "event_sentence": _render(trap_defaults["email_body"], variables),
                 "hostname": subject_name,
                 "ip_address": device_ip or event.source_ip,
                 "status": "TRAP", "severity": sev, "resolved": False,
@@ -2046,10 +2165,19 @@ async def evaluate_trap(
                 # Keyed on the trap's own alert row: a retried dispatch of
                 # this trap never pages twice, and the log links the incident.
                 "alert_id": str(alert_id) if alert_id else None,
-                "delivery_event": "trigger",
+                "delivery_event": (event_alerts.repeat_event(repeat_patch) if repeat_patch
+                                   else "trigger"),
                 **funnel.notification_fields(sev, getattr(rule, "priority", None), trigger=True),
             })
-            await ns.stamp(db, alert_id, bool(sent))
+            if repeat_patch is None:
+                await ns.stamp(db, alert_id, bool(sent))
+            elif sent:
+                await db.execute(
+                    text("UPDATE alerts SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb)"
+                         " WHERE id = :id"),
+                    {"id": alert_id, "m": json.dumps({"notified": True,
+                                                      "last_notified_at": now.isoformat()})},
+                )
         except Exception as exc:
             print(f"ERROR trap notification for rule {rule.id}: {exc}")
 
@@ -2057,5 +2185,6 @@ async def evaluate_trap(
     return {
         "matched_rules": len(rules),
         "alerts_created": alerts_created,
+        "alerts_updated": alerts_updated,
         "trap_oid": event.trap_oid,
     }

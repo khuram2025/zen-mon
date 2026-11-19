@@ -17,8 +17,21 @@ silent          none / unknown     ``down``           (Device Down rules)
 silent          up / degraded      ``agent_offline``  (Agent offline rules)
 silent          down               ``device_down``    (the device path pages)
 silent          maintenance        ``maintenance``    (nobody pages)
+silent          any, server in     ``maintenance``    (nobody pages)
+                a maintenance
+                window
+silent          none / unknown,    ``upstream_down``  (nobody pages: the
+                parent device                          parent's own alert
+                down                                   is the root cause)
 never seen      any                ``unknown``
 ==============  =================  =====================================
+
+A parent device is one a ``topology_dependencies`` row names for the server
+(``child_server_id``, migrate-203; enabled and suppressing). It counts as down
+in the same states the device dependency suppression uses
+(``topology_dependencies.SUPPRESSING_PARENT_STATUSES``: down, degraded,
+unknown). Ping that answers beats the dependency: a server that answers ping
+is not cut off by its parent.
 
 A heartbeat is silent once it is older than the rule's ``min_duration``, or
 ``DOWN_AFTER_S`` when that is 0. ``MIN_DOWN_AFTER_S`` keeps a rule from paging
@@ -61,6 +74,14 @@ class ServerSignals:
     # Status of the linked ping-enabled device, or None when there is none.
     ping: Optional[str] = None
     ping_device_id: Optional[str] = None
+    # The most significant unhealthy parent device of a device -> server
+    # dependency (status and name), or None.
+    upstream: Optional[str] = None
+    upstream_name: Optional[str] = None
+    # A maintenance window covers the server itself (server, server group or
+    # server tag scope, migrate-207). A window on the linked device shows as
+    # ping == "maintenance", since the device's status is then 'maintenance'.
+    maintenance: bool = False
 
 
 def _get(rule: Any, key: str):
@@ -86,12 +107,14 @@ def judge(signals: ServerSignals, now: float, after_s: int, recovery=None) -> st
         return "up"
     if recovery and recovery.hold_missing(signals.heartbeat_at, now, after_s):
         return "monitoring_interrupted"
-    if signals.ping == "maintenance":
+    if signals.maintenance or signals.ping == "maintenance":
         return "maintenance"
     if signals.ping == "down":
         return "device_down"
     if signals.ping in ("up", "degraded"):
         return "agent_offline"
+    if signals.upstream:
+        return "upstream_down"
     return "down"
 
 
@@ -197,12 +220,15 @@ def describe(rule: Any, state: str, signals: ServerSignals, after_s: int) -> str
     if state == "down":
         how = "ping not monitored" if signals.ping is None else "ping status unknown"
         return f"agent silent for over {mins} min; {how}"
+    if state == "upstream_down":
+        return (f"agent silent for over {mins} min; upstream {signals.upstream_name or 'device'} "
+                f"is {signals.upstream}")
     return state.replace("_", " ")
 
 
 _SIGNALS_SQL = """
 SELECT s.id::text, COALESCE(s.hostname, s.display_name, 'server'), s.tags,
-       hb.last_heartbeat_at, d.status, d.id::text
+       hb.last_heartbeat_at, d.status, d.id::text{upstream_cols}
 FROM servers s
 LEFT JOIN LATERAL (
     SELECT max(a.last_heartbeat_at) AS last_heartbeat_at
@@ -216,9 +242,22 @@ LEFT JOIN LATERAL (
       AND (dv.id = s.device_id OR (s.primary_ip IS NOT NULL AND dv.ip_address = s.primary_ip))
     ORDER BY (dv.id = s.device_id) DESC NULLS LAST
     LIMIT 1
-) d ON TRUE
+) d ON TRUE{upstream_join}
 WHERE s.collection_mode = 'agent' AND s.status <> 'disabled'
 """
+
+# The parent device of a device -> server dependency (migrate-203) that
+# suppresses the server's availability alerts: down first, then degraded, then
+# unknown (the order the device path uses).
+_UPSTREAM_JOIN = """
+LEFT JOIN LATERAL (
+    SELECT p.status, p.hostname
+    FROM topology_dependencies td JOIN devices p ON p.id = td.parent_device_id
+    WHERE td.child_server_id = s.id AND td.enabled AND td.suppress_alerts
+      AND p.status IN ('down', 'degraded', 'unknown')
+    ORDER BY CASE p.status WHEN 'down' THEN 1 WHEN 'degraded' THEN 2 ELSE 3 END, td.updated_at DESC
+    LIMIT 1
+) up ON TRUE"""
 
 
 def _tags(raw) -> set[str]:
@@ -232,10 +271,27 @@ def _tags(raw) -> set[str]:
 
 
 async def load_signals(db: AsyncSession, server_id: str | None = None) -> dict[str, ServerSignals]:
-    query = _SIGNALS_SQL + (" AND s.id = CAST(:server_id AS uuid)" if server_id else "")
-    rows = (await db.execute(text(query), {"server_id": server_id} if server_id else {})).all()
+    where = " AND s.id = CAST(:server_id AS uuid)" if server_id else ""
+    params = {"server_id": server_id} if server_id else {}
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(_SIGNALS_SQL.format(
+                upstream_cols=", up.status, up.hostname", upstream_join=_UPSTREAM_JOIN) + where),
+                params)).all()
+    except Exception as exc:
+        if "child_server_id" not in str(exc):
+            raise
+        # Before migrate-203 there are no device -> server dependencies.
+        rows = (await db.execute(text(_SIGNALS_SQL.format(
+            upstream_cols=", NULL, NULL", upstream_join="") + where), params)).all()
+    from app.services import maintenance_windows
+    if server_id:
+        maintained = {server_id} if rows and await maintenance_windows.server_in_maintenance(db, server_id) else set()
+    else:
+        maintained = await maintenance_windows.active_server_ids(db)
     return {r[0]: ServerSignals(server_id=r[0], hostname=r[1] or "server", tags=_tags(r[2]),
-                                heartbeat_at=r[3], ping=r[4], ping_device_id=r[5])
+                                heartbeat_at=r[3], ping=r[4], ping_device_id=r[5],
+                                upstream=r[6], upstream_name=r[7], maintenance=r[0] in maintained)
             for r in rows}
 
 
@@ -282,7 +338,7 @@ def covered(rules: Iterable, signals: ServerSignals, state: str) -> bool:
     staleness sweep raises its built-in, unrouted *agent offline* alert only
     when none does, so a covered server never gets two alerts for one outage.
     A server in maintenance is never paged for."""
-    if state in ("maintenance", "monitoring_interrupted"):
+    if state in ("maintenance", "monitoring_interrupted", "upstream_down"):
         return True
     if state == "agent_offline":
         def wanted(r):

@@ -35,7 +35,7 @@ def _get(rule: Any, key: str):
 
 def family(rule) -> str:
     metric = (_get(rule, "metric") or "").lower()
-    if metric.startswith("host_"):
+    if metric.startswith("host_") or metric == "agent_no_metrics":
         return "server"
     if metric.startswith("apm_"):
         return "apm"
@@ -45,8 +45,12 @@ def family(rule) -> str:
         return "udt"
     if metric.startswith("netflow_"):
         return "netflow"
+    if metric.startswith("appliance_"):
+        return "appliance"
+    if metric in ("vm_host_disconnected", "vm_datastore_pct", "vm_alarm"):
+        return "virtualization"
     if (_get(rule, "service_check_id") or _get(rule, "service_check_group_id")
-            or metric == "service_status"):
+            or metric in ("service_status", "service_tls_days", "service_response_ms")):
         return "service"
     return "device"
 
@@ -82,9 +86,32 @@ def describe_scope(rule, names: dict | None = None) -> dict:
                 "target": target}
     if fam == "udt":
         return {"kind": "udt", "label": "User device tracking", "target": target}
+    if fam == "appliance":
+        metric = _get(rule, "metric")
+        if metric == "appliance_delivery_failures":
+            label = f"Notification channel {target}" if target else "Every notification channel"
+        elif metric == "appliance_sensor_offline":
+            label = f"Remote sensor {target}" if target else "Every remote sensor"
+        elif metric == "appliance_login_failures":
+            label = f"Account {target}" if target else "Every account and source address"
+        elif metric == "appliance_report_failed":
+            label = f"Report schedule {target}" if target else "Every report schedule"
+        else:
+            label = "ZenPlus appliance"
+        return {"kind": "appliance", "label": label, "target": target}
     if fam == "netflow":
         return {"kind": "netflow", "label": f"NetFlow — {_netflow_scope_label(rule)}", "target": target,
                 "flow_scope": _netflow_scope(rule)}
+    if fam == "virtualization":
+        if target:
+            label = f"Virtualisation source {n.get('virtualization_source') or ''}".strip()
+        elif _get(rule, "device_id"):
+            label = f"Virtualisation sources on device {n.get('device') or ''}".strip()
+        else:
+            label = "All virtualisation sources"
+        if _get(rule, "scope_tag"):
+            label += f", tagged {_get(rule, 'scope_tag')}"
+        return {"kind": "virtualization", "label": label, "target": target}
     if fam == "service":
         if _get(rule, "service_check_id"):
             return {"kind": "service_check",
@@ -174,6 +201,13 @@ async def scope_names(db: AsyncSession, rule) -> dict:
         table = 'apm_synthetic_monitors' if _get(rule, 'metric') == 'apm_synthetic_down' else 'apm_slos'
         out['apm_entity'] = (await db.execute(text(f'SELECT name FROM {table} WHERE id::text=:id'),
                                             {'id': str(_get(rule, 'target'))})).scalar()
+    if family(rule) == "virtualization" and _get(rule, "target"):
+        try:
+            out["virtualization_source"] = (await db.execute(text(
+                "SELECT name FROM virtualization_connectors WHERE id::text = :id"),
+                {"id": str(_get(rule, "target"))})).scalar()
+        except Exception:
+            await db.rollback()
     queries = [
         ("device", "device_id", "SELECT hostname FROM devices WHERE id = :id"),
         ("group", "group_id", "SELECT name FROM device_groups WHERE id = :id"),
@@ -237,6 +271,25 @@ async def affected(db: AsyncSession, rule) -> dict:
             count = (await db.execute(text(f'SELECT count(*) FROM {table}{where}'),
                                      {'target': str(_get(rule, 'target'))})).scalar() or 0
             return {'count': count, 'noun': 'scenarios' if synthetic else 'SLOs', 'shared': count != 1}
+        if fam == "appliance":
+            metric = _get(rule, "metric")
+            if metric in ("appliance_delivery_failures", "appliance_sensor_offline") and not _get(rule, "target"):
+                table, noun = (("notification_channels", "notification channels")
+                               if metric == "appliance_delivery_failures" else ("sensors", "remote sensors"))
+                n = (await db.execute(text(f"SELECT count(*) FROM {table}"))).scalar() or 0
+                return {"count": int(n), "noun": noun, "shared": n != 1}
+            if metric == "appliance_report_failed" and not _get(rule, "target"):
+                n = (await db.execute(text(
+                    "SELECT count(*) FROM report_schedules WHERE enabled"))).scalar() or 0
+                return {"count": int(n), "noun": "report schedules", "shared": n != 1}
+            if metric == "appliance_login_failures" and not _get(rule, "target"):
+                return {"count": None, "noun": "accounts and source addresses", "shared": True}
+            return {"count": 1, "noun": "appliance", "shared": False}
+        if fam == "virtualization":
+            if _get(rule, "target"):
+                return {"count": 1, "noun": "virtualisation source", "shared": False}
+            n = (await db.execute(text("SELECT count(*) FROM virtualization_connectors"))).scalar() or 0
+            return {"count": int(n), "noun": "virtualisation sources", "shared": n != 1}
         if fam in ("apm", "udt"):
             return {"count": None, "noun": "APM services" if fam == "apm" else "tracked endpoints",
                     "shared": not bool(_get(rule, "target"))}
@@ -287,6 +340,11 @@ async def rule_in_user_scope(db: AsyncSession, rule, scope: list[str] | None) ->
     """Whether a tag-scoped user may create/change this rule."""
     if scope is None:
         return True
+    if family(rule) == "virtualization" and _get(rule, "target"):
+        # One virtualisation source: the same tag visibility as the connector API.
+        tags = (await db.execute(text("SELECT tags FROM virtualization_connectors WHERE id::text = :id"),
+                                 {"id": str(_get(rule, "target"))})).scalar()
+        return tags is not None and scoping.entity_visible(tags, scope)
     if _get(rule, "device_id"):
         tags = (await db.execute(text("SELECT tags FROM devices WHERE id = :id"),
                                  {"id": _get(rule, "device_id")})).scalar()
@@ -311,7 +369,7 @@ async def rule_in_user_scope(db: AsyncSession, rule, scope: list[str] | None) ->
         owner = (await resolve_exporter_owners(db, [ip])).get(ip) if ip else None
         return owner is not None and bool(set(owner.tags) & set(scope))
     tag = _get(rule, "scope_tag")
-    if tag and family(rule) in ("device", "server"):
+    if tag and family(rule) in ("device", "server", "virtualization"):
         return bool(tag_set([tag]) & set(scope))
     return False
 

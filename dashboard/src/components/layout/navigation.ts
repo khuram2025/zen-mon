@@ -211,6 +211,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/ncm', label: 'Config Manager (NCCM)', icon: FileCode, section: 'Configuration', hint: 'NCCM configuration backups, change tracking and compliance', permission: 'ncm.view' },
       { to: '/device-templates', label: 'Device Templates', icon: LayoutTemplate, hint: 'What each kind of device reports: templates, classification and device types', permission: 'devices.view' },
       { to: '/device-groups', label: 'Groups & Fields', icon: Boxes, hint: 'Static and dynamic device groups, and custom fields', permission: 'devices.view' },
+      { to: '/dependencies', label: 'Dependencies', icon: GitBranch, hint: 'Which devices and servers sit behind which parent, so one outage pages once', permission: 'devices.view' },
       {
         to: '/discovery',
         label: 'Discovery',

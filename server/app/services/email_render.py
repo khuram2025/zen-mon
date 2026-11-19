@@ -313,7 +313,34 @@ def alert_subject(subject: str, ctx: dict | None) -> str:
         # recognised in its usual place, then put it back.
         subject = " ".join(w for w in (subject or "").split(" ") if w != tag)
     out = incident_subject(subject, ctx)
+    out = _resolved_subject(out, ctx)
     return priority_subject(out, (ctx or {}).get("priority"))
+
+
+_SEVERITY_TAGS = ("[CRITICAL]", "[WARNING]", "[INFO]", "[MAJOR]", "[MINOR]", "[ALERT]")
+
+
+def _resolved_subject(subject: str, ctx: dict | None) -> str:
+    """A recovery subject leads with "[RESOLVED]", not the severity of the
+    fault that ended: "[CRITICAL] [Recovered] Router down [INC-1]" reads as a
+    new critical alert in an inbox list. The priority and incident ref stay;
+    "[Recovered]" and a leading "Resolved:" are what "[RESOLVED]" says."""
+    c = ctx or {}
+    recovered = (bool(c.get("resolved")) or bool(c.get("is_recovery"))
+                 or str(c.get("lifecycle") or "").lower() == "recovered")
+    if not recovered or not subject:
+        return subject
+    rest = subject.strip()
+    head = rest.split(" ", 1)[0]
+    if head.upper() in _SEVERITY_TAGS or head.upper() == "[RESOLVED]":
+        rest = rest[len(head):].lstrip()
+    for tag in ("[Recovered] ", "[Recovered]"):
+        if rest.startswith(tag):
+            rest = rest[len(tag):].lstrip()
+    for word in ("Resolved: ", "RESOLVED: "):
+        if rest.startswith(word):
+            rest = rest[len(word):]
+    return f"[RESOLVED] {rest}".rstrip()
 
 
 def _priority_row(ctx: dict, existing_labels) -> list[tuple[str, str]]:

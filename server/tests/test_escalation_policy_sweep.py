@@ -206,7 +206,7 @@ async def test_steps_follow_their_deadlines(world):
     await sweep(w, plus_minutes=5)
     assert [p.ctx["delivery_event"] for p in w.pages] == ["trigger:S0", "escalation:S1:r0"]
     assert w.pages[1].people == ["+966501234567", "omar@example.test"]
-    assert w.pages[1].ctx["lifecycle"] == "escalated" and "Escalation S1" in w.pages[1].ctx["subject"]
+    assert w.pages[1].ctx["lifecycle"] == "escalated" and "Escalation step 2" in w.pages[1].ctx["subject"]  # step index 1, read one-based
     assert w.state(alert_id)["history"].keys() == {"0", "1"}
 
 

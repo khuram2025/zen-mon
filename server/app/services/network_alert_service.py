@@ -28,7 +28,11 @@ name/descr/alias contains it (case-insensitive) or whose if_index matches
 exactly; empty target = all monitored interfaces.
 
 Unsupported canonical state keys are rejected at rule authoring; collected
-template state series are evaluated independently per component.
+template state series are evaluated independently per component. A template
+row (and a temperature sensor) is named by its label, and a template state
+(enum) incident reads with the template's metric name and value label
+("IPsec tunnel Branch-12 on Firewall FGT-01 (10.0.0.1) is Down."; see
+``app.services.template_states``).
 """
 
 from __future__ import annotations
@@ -60,6 +64,9 @@ UPTIME_LOOKBACK_S = 900      # how far back to look for a sysUpTime reset
 INTERFACE_METRICS = {
     "if_in_bps", "if_out_bps", "if_util_pct",
     "if_errors", "if_discards", "if_oper_status",
+    # Interface quality (alerting plan G-12): error/discard share of packets,
+    # oper-status changes in a window, a renegotiated link speed.
+    "if_error_rate_pct", "if_discard_rate_pct", "if_flaps", "if_speed_changed",
 }
 # Device scalar metrics (from snmp_metrics, keyed by metric_key).
 SCALAR_METRICS = {"cpu", "memory", "temperature", "session_count"}
@@ -306,7 +313,25 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
     # Group membership (primary, static, dynamic, with subgroups) for the group
     # scope; None when unavailable, then the primary group decides (old behaviour).
     from app.services.device_groups import membership
+    from app.services import template_states
     groups = await membership.load(db, "device")
+    # Template metric names and units for the messages ("UPS load 88.5%",
+    # not "Ups load pct 88.5").
+    for profile_groups in {id(r[7]): r[7] for r in rows if r[7]}.values():
+        try:
+            ap.register_template_metrics(profile_groups)
+        except Exception:
+            logger.debug("template metric names unavailable", exc_info=True)
+    # Template metric definitions (names, value maps), parsed once per template.
+    tmetrics: dict = {}
+    for r in rows:
+        key = str(r[9]) if r[9] else None
+        if key not in tmetrics:
+            try:
+                tmetrics[key] = template_states.metric_index(r[7]) if key else {}
+            except Exception:
+                logger.warning("network alert: template %s metric definitions unreadable", key)
+                tmetrics[key] = {}
     return {
         str(r[0]): {
             "groups": (groups.get(str(r[0]), set()) if groups is not None else None),
@@ -319,9 +344,70 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
             "metric_intervals": template_intervals(r[7], int(r[6] or 60)),
             "ip": r[8] or "",
             "profile_id": str(r[9]) if r[9] else None,
+            "template_metrics": tmetrics.get(str(r[9]) if r[9] else None, {}),
         }
         for r in rows
     }
+
+
+async def _component_labels(db: AsyncSession, rules) -> dict[tuple[str, str], str]:
+    """{(device_id, series key): row label} for the template rows and
+    temperature sensors the rules evaluate ("Branch-12", "PS2", "Inlet").
+    One query each per pass; an unreadable table leaves the labels out."""
+    from app.services.network_history import is_component_root
+    keys, temperature = set(), False
+    for rule in rules:
+        conds = rule.conditions
+        if isinstance(conds, str):
+            conds = json.loads(conds)
+        for c in conds or [dict(metric=rule.metric)]:
+            m = str(c.get("metric") or "")
+            if m.startswith("tpl_"):
+                keys.add(m[4:])
+            elif is_component_root(m):
+                temperature = True
+    out: dict[tuple[str, str], str] = {}
+    if keys:
+        try:
+            async with _savepoint(db):
+                for r in (await db.execute(text(
+                        "SELECT device_id::text, series_key, label FROM device_template_values "
+                        "WHERE metric_key = ANY(:keys) AND instance <> '' AND label <> ''"),
+                        {"keys": sorted(keys)})).all():
+                    out[(r[0], r[1])] = r[2]
+        except Exception as exc:
+            logger.warning("network alert: template row labels unavailable: %s", exc)
+    if temperature:
+        try:
+            async with _savepoint(db):
+                for r in (await db.execute(text(
+                        "SELECT s.device_id::text, s.sensor_index, "
+                        "COALESCE(NULLIF(e.name, ''), NULLIF(s.description, '')) "
+                        "FROM device_sensors s LEFT JOIN device_entities e "
+                        "ON e.device_id = s.device_id AND e.ent_index = s.sensor_index "
+                        "WHERE s.sensor_type = 'celsius'"))).all():
+                    if r[2]:
+                        out[(r[0], f"temperature_{r[1]}")] = r[2]
+        except Exception as exc:
+            logger.warning("network alert: sensor names unavailable: %s", exc)
+    return out
+
+
+def _component(rule_metric_root: str, suffix: str, did: str, dev: dict, labels: dict):
+    """(MetricInfo or None, component label or None) for one template row /
+    sensor series: "IPsec tunnel Branch-12", "Temperature sensor Inlet"."""
+    from app.services import template_states as ts
+    series_key = rule_metric_root + suffix
+    instance = (suffix or "").lstrip("_")
+    if rule_metric_root.startswith("tpl_"):
+        info = dev.get("template_metrics", {}).get(rule_metric_root[4:])
+        if not instance:
+            return info, None
+        return info, ts.component_label(info, labels.get((did, series_key)) or instance)
+    if not instance:
+        return None, None
+    name = labels.get((did, series_key)) or f"sensor {instance}"
+    return None, name if name.lower().startswith("temperature") else f"Temperature sensor {name}"
 
 
 def template_intervals(groups, default):
@@ -456,8 +542,11 @@ async def _raise(db: AsyncSession, rule, device_id: str, message: str,
     now = datetime.now(timezone.utc)
     # The trigger is "sending" until _apply stamps its outcome: neither pending
     # nor notified, so another pass never announces it a second time.
+    # `trigger_value` keeps the reading the incident opened at; `value` may
+    # follow the current one.
     meta = {"rule_id": str(rule.id), "metric": rule.metric,
-            "value": round(value, 2), "threshold": float(rule.threshold or 0),
+            "value": round(value, 2), "trigger_value": round(value, 2),
+            "threshold": float(rule.threshold or 0),
             **ns.sending_metadata()}
     if if_index is not None:
         meta["if_index"] = str(if_index)
@@ -548,7 +637,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
                   alert_id=None, first_seen=None, event: str | None = None,
                   checked: bool = False, asset_type: str | None = None,
                   branding=None, context: dict | None = None,
-                  lifecycle: str | None = None) -> bool:
+                  lifecycle: str | None = None, state: dict | None = None) -> bool:
     """Send one metric alert — or its all-clear. True when it was dispatched.
 
     ``alert_id`` + ``event`` key the delivery (one send per incident event,
@@ -588,28 +677,41 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
               "status": "RESOLVED" if is_recovery else "ALERT",
               "timestamp": now.strftime("%H:%M UTC on %d %b %Y")})
     v.update(incident)
+    if state is not None:
+        v.update(_state_variables(state))
     # Custom fields as {custom.<key>} placeholders (migrate-192); never blocks a send.
     from app.services import custom_fields as _cf
     v.update(await _cf.placeholders(db, "device", device_id))
+    # {site}, {group}, {site_suffix} ("... at Site Riyadh-HQ" in the SMS).
+    from app.services import notification_context
+    v.update(await notification_context.asset_place(db, {"device_id": device_id, "alert_id": alert_id}))
     prefix = 'recovery_' if is_recovery else ''
-    body = _render(getattr(rule, prefix + 'email_body', None) or (ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY), v)
-    sms = _render(getattr(rule, 'recovery_sms_template' if is_recovery else 'sms_template', None) or (ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS), v)
-    subject = _render(getattr(rule, prefix + 'email_subject', None) or (ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery else ap.DEFAULT_EMAIL_SUBJECT), v)
+    # A rule still carrying a template the wizard pre-filled gets the current
+    # wording (effective_template), like every other sender.
+    body = _render(ap.effective_template(getattr(rule, prefix + 'email_body', None),
+                                         ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY), v)
+    sms = _render(ap.effective_template(getattr(rule, 'recovery_sms_template' if is_recovery else 'sms_template', None),
+                                        ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS), v)
+    subject = _render(ap.effective_template(getattr(rule, prefix + 'email_subject', None),
+                                            ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
+                                            else ap.DEFAULT_EMAIL_SUBJECT), v)
     sent = await dispatch_to_channels(db, rule.notify_channels or [], {
         "subject": subject,
         "body": body, "message": sms,
+        "event_sentence": v.get("event_sentence"),
         "hostname": hostname, "ip_address": ip_address or "",
         "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
         "resolved": is_recovery,
         "rule_name": rule.name,
-        "headline_metric": (
+        "headline_metric": {"label": state["metric_name"], "value": state["value_label"]} if state else (
             ap.headline_metric(rule.metric, value, rule.operator, threshold, context=value_context)
             if value is not None else {
                 "label": ap.metric_noun(rule.metric), "value": reading,
                 "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
             }) if reading else None,
         "details": [("Alert rule", rule.name),
-                    ("Interface", iface_label),
+                    ("Component" if state or (iface_label and rule.metric not in INTERFACE_METRICS)
+                     else "Interface", iface_label),
                     ("Condition", v.get("condition_label")),
                     ("Active for", duration if is_recovery and not event_metric else None)],
         "triggered_at": now.isoformat(),
@@ -621,6 +723,17 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         **incident,
     })
     return bool(sent)
+
+
+def _state_variables(state: dict) -> dict:
+    """Template variables for a state incident: the template's metric name and
+    value label replace the generic numeric phrasing (never a raw code)."""
+    sentence = state["sentence"]
+    label = f'{state["metric_name"]} is {state["value_label"]}'
+    return {"event_sentence": sentence, "condition_sentence": sentence, "recovery_sentence": sentence,
+            "condition": label, "condition_label": label, "metric_label": state["metric_name"],
+            "reading": state["value_label"], "reading_value": state["value_label"],
+            "threshold_value": "", "reading_detail": ""}
 
 
 def _render(template: str, variables: dict) -> str:
@@ -682,6 +795,7 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
     if not devices:
         return {"rules": len(rules), "raised": 0, "resolved": 0}
     interfaces = await _interfaces(db)
+    component_labels = await _component_labels(db, rules)
 
     # Active device-scoped silences (snoozes), loaded once per pass. Keys match
     # the dedupe written by the snooze endpoint: rule:<id>[:if:<idx>].
@@ -711,6 +825,7 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
     dependency_cache = {}
     maintenance_cache = {}
     history_cache = {}
+    speed_changes = None    # loaded once, by the first speed-change rule
     for rule in rules:
         conditions = rule.conditions
         if isinstance(conditions, str):
@@ -724,14 +839,22 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
             continue
         metrics = tuple(sorted({c['metric'] for c in conditions}))
         reboot_rule = metrics == ('uptime_reset',)
+        # Flapping and speed-change rules count over a window instead of
+        # holding a level (interface_window): no breach hold of their own.
+        window_rule = metrics in (('if_flaps',), ('if_speed_changed',))
         hold = 0 if reboot_rule else int(rule.min_duration or 0)
         clear_hold = (event_hold_seconds(getattr(rule, 'clear_duration', None)) if reboot_rule
                       else clear_hold_seconds(getattr(rule, 'clear_duration', None)))
+        window = 0
+        if window_rule:
+            hold, clear_hold, window = interface_window(rule)
+            if metrics == ('if_speed_changed',) and speed_changes is None:
+                speed_changes = await _speed_changes(db)
         # Include enough context for the first breach (or the whole clear
         # hold) and freshness expiry — for the longest hold an override sets too.
         max_gap = max(max(freshness_budgets(d, metrics).values()) for d in devices.values())
         o_hold, o_clear = overrides.longest_holds(rule.id) if not reboot_rule else (0, 0)
-        lookback = max(max(hold, clear_hold, o_hold, o_clear) + 2 * max_gap, 900)
+        lookback = max(max(hold, clear_hold, window, o_hold, o_clear) + 2 * max_gap, 900)
         cache_key = (metrics, lookback)
         if cache_key not in history_cache:
             try:
@@ -828,6 +951,13 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                     e_hold = int(e_rule.min_duration or 0)
                     e_clear = clear_hold_seconds(getattr(e_rule, 'clear_duration', None))
                     extra['override'] = override.summary()
+                window_state = None
+                if window_rule:
+                    # The window comes from the (overridden) rule's holds.
+                    e_hold, e_clear, e_window = interface_window(e_rule)
+                    history = dict(history)
+                    window_state = _window_series(metrics[0], history, e_window, did, identity,
+                                                  speed_changes or {})
                 result = evaluate(e_conditions, rule.condition_logic or 'AND', history,
                                   now=now, hold=e_hold, max_gap=freshness_budgets(dev, metrics),
                                   active=existing is not None, clear_hold=e_clear)
@@ -846,6 +976,32 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                     value = next((v for v in result.values.values() if v is not None), 0)
                 context = _counter_context(history, rule.metric, now)
                 detail = _detail_text(e_rule, e_conditions, result.values, context)
+                asset_type = ap.asset_type_label(dev.get('device_type'))
+                state = None
+                if 'series_suffix' in extra:
+                    # A template row or sensor is named as an operator knows it
+                    # ("IPsec tunnel Branch-12"), never by its series key; a
+                    # template state reads with its value label ("is Down").
+                    root = next((c['metric'] for c in conditions
+                                 if _nh.is_component_root(c['metric'])), rule.metric)
+                    info, component = _component(root, extra['series_suffix'], did, dev, component_labels)
+                    label = component
+                    if component:
+                        extra['component'] = component
+                    if info is not None and info.is_state:
+                        state = _state_text(info, result.values.get(root), e_conditions, root,
+                                            component=component, who=ap.asset_label(
+                                                dev['hostname'], dev.get('ip', ''), asset_type),
+                                            recovered=not result.breach)
+                        detail = state['sentence'].rstrip('.')
+                        extra.update({'state': state['value_label'], 'state_metric': info.name})
+                if window_state is not None:
+                    # "Interface Gi1/0/24 on Switch core-1 (10.0.0.1) changed state
+                    # 6 times in 15 minutes" / "now runs at 100 Mb/s (was 1 Gb/s)".
+                    state = window_sentence(window_state, iface=label, who=ap.asset_label(
+                        dev['hostname'], dev.get('ip', ''), asset_type), recovered=not result.breach)
+                    detail = state['sentence'].rstrip('.')
+                    extra.update(window_state['meta'])
                 extra.update({'held_seconds': result.held_seconds, 'values': result.values,
                               'data_state': 'current',
                               'suppressed_by_dependency': False})
@@ -854,13 +1010,27 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 raised, resolved = await _apply(db, e_rule, did, dev['hostname'], identity,
                     label, result.breach, value, detail, extra, raised, resolved, silences,
                     ip_address=dev.get('ip', ''), value_context=context,
-                    asset_type=ap.asset_type_label(dev.get('device_type')), branding=branding)
+                    asset_type=asset_type, branding=branding, state=state)
                 await db.commit()
         await db.commit()
 
     if raised or resolved:
         logger.info("network alert eval: %d rules, %d raised, %d resolved", len(rules), raised, resolved)
     return {"rules": len(rules), "raised": raised, "resolved": resolved}
+
+
+def _state_text(info, value, conditions, root: str, *, component, who: str,
+                recovered: bool) -> dict:
+    """The sentence for a template state incident (template_states.describe):
+    "IPsec tunnel Branch-12 on Firewall FGT-01 (10.0.0.1) is Down."."""
+    from app.services import template_states as ts
+    from app.services.network_conditions import OPS
+    mine = [c for c in conditions if c.get('metric') == root]
+    bad = [info.label(code) for code in info.known_codes()
+           if mine and all(OPS[c['operator']](code, float(c['threshold'])) for c in mine)]
+    bad_label = " or ".join(b for b in bad if b) or None
+    return ts.describe(info, value, component=component, who=who, recovered=recovered,
+                       bad_label=bad_label)
 
 
 def _detail_text(rule, conditions, values: dict, context: dict | None = None) -> str:
@@ -879,7 +1049,8 @@ def _detail_text(rule, conditions, values: dict, context: dict | None = None) ->
             shown = ap.reading_text(m, v, c.get('operator'), c.get('threshold'),
                                     context if m == rule.metric else None)
             limit = ap.format_threshold(m, c.get('threshold'), c.get('operator'), v)
-            parts.append(f"{ap.metric_noun(m)} {shown} (limit {limit})")
+            rate = rate_detail(m, context) if m == rule.metric else ""
+            parts.append(f"{ap.metric_noun(m)} {shown} (limit {limit})" + (f": {rate}" if rate else ""))
     text_ = '; '.join(p for p in parts if p)
     return text_[:1].upper() + text_[1:]
 
@@ -1054,9 +1225,158 @@ async def _evaluate_reboot(db: AsyncSession, rule, did: str, dev: dict, series: 
     return 0, n
 
 
+# ─── Interface quality (alerting plan G-12) ─────────────────────────────────
+#
+# * if_error_rate_pct / if_discard_rate_pct: errors (discards) as a share of
+#   the packets in the same poll interval, the worse direction; quiet
+#   directions give no reading (network_history.packet_rates).
+# * if_flaps: oper-status changes into or out of "up" in the rule's window,
+#   ``min_duration`` (NULL/0 = 15 minutes). The window replaces the breach
+#   hold. The incident clears once a whole window holds no change (the
+#   automatic reset level), plus ``clear_duration`` when the rule sets one.
+# * if_speed_changed: 1 for ``clear_duration`` (NULL = 15 minutes, like a
+#   reboot) after the negotiated speed of an up interface changed, else 0.
+#   device_interfaces records the change (migrate-205 trigger). Duplex is not
+#   collected, so there is no duplex rule.
+
+def interface_window(rule) -> tuple[int, int, int]:
+    """(breach hold, clear hold, window seconds) of a flapping or speed-change rule."""
+    clear = getattr(rule, 'clear_duration', None)
+    conditions = getattr(rule, 'conditions', None)
+    if isinstance(conditions, str):
+        conditions = json.loads(conditions)
+    metric = (conditions or [{}])[0].get('metric') or getattr(rule, 'metric', None)
+    if metric == 'if_speed_changed':
+        return 0, 0, event_hold_seconds(clear)
+    window = int(rule.min_duration or 0) or _nh.DEFAULT_FLAP_WINDOW_S
+    return 0, (max(0, int(clear)) if clear is not None else 0), window
+
+
+_warned_missing_speed_changes = False
+
+
+async def _speed_changes(db: AsyncSession) -> dict:
+    """{(device_id, if_index): {speed_bps, previous_speed_bps, changed_at}} for
+    interfaces whose speed ever changed while up. Empty before migrate-205."""
+    global _warned_missing_speed_changes
+    try:
+        async with _savepoint(db):
+            rows = (await db.execute(text(
+                "SELECT device_id::text, if_index, up_speed_bps, previous_speed_bps, "
+                "EXTRACT(EPOCH FROM speed_changed_at) FROM device_interfaces "
+                "WHERE speed_changed_at IS NOT NULL"))).all()
+    except Exception as exc:
+        if "speed_changed_at" not in str(exc) and "up_speed_bps" not in str(exc):
+            raise
+        if not _warned_missing_speed_changes:
+            logger.warning("interface speed-change rules idle: run migrate-205-interface-quality-alerts.sql")
+            _warned_missing_speed_changes = True
+        return {}
+    return {(r[0], int(r[1])): {"speed_bps": int(r[2]) if r[2] else None,
+                                "previous_speed_bps": int(r[3]) if r[3] else None,
+                                "changed_at": float(r[4])} for r in rows}
+
+
+def _window_series(metric: str, history: dict, window: int, did: str, if_index,
+                   speed_changes: dict) -> dict:
+    """Put the rule metric's series into ``history`` (a copy) and return the
+    facts its sentence needs, with the incident metadata under ``meta``."""
+    seen = sorted(history.get(_nh.OPER_SEEN, []))
+    oper = int(seen[-1][1]) if seen else None
+    if metric == 'if_flaps':
+        series = _nh.flap_series(history.get(_nh.OPER_CHANGES, []), window)
+        history['if_flaps'] = series
+        count = int(series[-1][1]) if series else None
+        return {"kind": "flaps", "window_s": window, "count": count, "oper": oper,
+                "meta": {"flap_count": count, "flap_window_s": window}}
+    info = speed_changes.get((did, if_index)) or {}
+    changed_at = info.get("changed_at")
+    points = []
+    if changed_at is not None:
+        # The change itself is evidence: the poll that saw it may be stamped
+        # a moment before the interface row recorded it.
+        points.append((changed_at, 1.0))
+    for stamp, _ in seen:
+        points.append((stamp, 1.0 if changed_at is not None and changed_at <= stamp < changed_at + window
+                       else 0.0))
+    history['if_speed_changed'] = points
+    return {"kind": "speed", "window_s": window, "speed_bps": info.get("speed_bps"),
+            "previous_speed_bps": info.get("previous_speed_bps"), "changed_at": changed_at,
+            "meta": {"speed_bps": info.get("speed_bps"), "previous_speed_bps": info.get("previous_speed_bps"),
+                     "speed_changed_at": changed_at, "speed_window_s": window}}
+
+
+def link_speed_text(bps) -> str:
+    """1e9 -> "1 Gb/s", 1e8 -> "100 Mb/s", 2.5e9 -> "2.5 Gb/s"."""
+    try:
+        bps = float(bps)
+    except (TypeError, ValueError):
+        return "an unknown speed"
+    if bps <= 0:
+        return "an unknown speed"
+    for scale, unit in ((1e9, "Gb/s"), (1e6, "Mb/s"), (1e3, "kb/s"), (1.0, "b/s")):
+        if bps >= scale:
+            num = f"{bps / scale:.1f}".rstrip("0").rstrip(".")
+            return f"{num} {unit}"
+    return f"{bps:.0f} b/s"
+
+
+def window_sentence(ws: dict, *, iface: str | None, who: str, recovered: bool) -> dict:
+    """The sentence of a flapping or speed-change incident, in the shape of a
+    template state (``sentence``, ``metric_name``, ``value_label``)."""
+    subject = f"Interface {iface} on {who}" if iface else f"An interface on {who}"
+    span = ap.humanize_duration(ws["window_s"])
+    if ws["kind"] == "flaps":
+        # IF-MIB ifOperStatus: 1 up; 2 down, 6 notPresent, 7 lowerLayerDown.
+        now_state = {1: "it is up now", 2: "it is down now", 6: "it is down now",
+                     7: "it is down now"}.get(ws.get("oper"), "")
+        tail = f"; {now_state}" if now_state else ""
+        if recovered:
+            sentence = f"{subject} has not changed state for {span}{tail}"
+            label = f"No change in {span}"
+        else:
+            n = ws.get("count") or 0
+            sentence = f"{subject} changed state {n} time{'s' if n != 1 else ''} in {span}{tail}"
+            label = f"{n} change{'s' if n != 1 else ''} in {span}"
+        return {"sentence": sentence + ".", "metric_name": "Interface state changes",
+                "value_label": label, "component": iface}
+    new = link_speed_text(ws.get("speed_bps"))
+    old = link_speed_text(ws.get("previous_speed_bps"))
+    if recovered:
+        sentence = (f"{subject} has stayed at {new} for {span} with no further speed change"
+                    if ws.get("speed_bps") else f"{subject} has had no speed change for {span}")
+        label = new if ws.get("speed_bps") else "No change"
+    else:
+        sentence = f"{subject} now runs at {new} (was {old})"
+        label = f"{new} (was {old})"
+    return {"sentence": sentence + ".", "metric_name": "Interface speed", "value_label": label,
+            "component": iface}
+
+
+def rate_detail(metric: str, context: dict | None) -> str:
+    """"inbound 2.4% (2950 errors in 122000 packets), outbound 0% in the last 60 s"
+    for an error/discard rate reading; "" without its context."""
+    if metric not in _nh.RATE_DIRECTIONS or not context:
+        return ""
+    word = "errors" if metric == "if_error_rate_pct" else "discards"
+    parts = []
+    for side, name in (("in", "inbound"), ("out", "outbound")):
+        rate, pkts, bad = context.get(side), context.get(f"{side}_packets"), context.get(f"{side}_count")
+        if rate is not None:
+            shown = ap.format_reading(metric, rate, None, None).replace(" of packets", "")
+            parts.append(f"{name} {shown} ({bad:.0f} {word} in {pkts:.0f} packets)"
+                         if pkts is not None and bad is not None else f"{name} {shown}")
+        elif pkts is not None and bad is not None:
+            parts.append(f"{name} not judged ({pkts:.0f} packets)")
+        else:
+            parts.append(f"{name} unknown")
+    span = ap.compact_interval(context.get("interval_s"))
+    return ", ".join(parts) + (f" in the last {span}" if span else "")
+
+
 def _counter_context(history, metric, now):
-    """Interval and direction of a per-poll counter reading, when known."""
-    fn = getattr(_nh, 'counter_context', None)
+    """Interval and direction of a per-poll counter (or rate) reading, when known."""
+    fn = getattr(_nh, 'rate_context' if metric in _nh.RATE_DIRECTIONS else 'counter_context', None)
     try:
         return fn(history, metric, now) if fn else None
     except Exception:
@@ -1068,8 +1388,11 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                  breach, value, detail, extra, raised, resolved,
                  silences: set[tuple[str, str]] | None = None, *, ip_address: str = "",
                  value_context: dict | None = None, asset_type: str | None = None,
-                 branding=None):
-    """Raise (if breaching and not already open) or resolve one rule/device/iface."""
+                 branding=None, state: dict | None = None):
+    """Raise (if breaching and not already open) or resolve one rule/device/iface.
+
+    ``state`` (template state incidents) carries the sentence that names the
+    component, the template's metric name and the value label."""
     existing = await _active_alert(db, rule.id, device_id, if_index)
     if existing:
         await db.execute(text("UPDATE alerts SET metadata = COALESCE(metadata,'{}'::jsonb) "
@@ -1083,6 +1406,8 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                   value_context=value_context)
     if asset_type is not None or branding is not None:
         notify.update(asset_type=asset_type, branding=branding)
+    if state is not None:
+        notify.update(state=state, reading=state["value_label"], value=None)
     if breach:
         # An active snooze suppresses re-raising this exact condition; the
         # resolve branch below still runs so a snoozed condition that clears
@@ -1091,7 +1416,8 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
         if silences and (device_id, dedupe) in silences:
             return raised, resolved
         if existing is None:
-            msg = _message(rule, hostname, detail, iface_label, ip_address)
+            msg = (f"{rule.name}: {state['sentence']}" if state is not None
+                   else _message(rule, hostname, detail, iface_label, ip_address))
             alert_id = await _raise(db, rule, device_id, msg, value, if_index, extra)
             if alert_id is not None:
                 raised += 1

@@ -11,11 +11,11 @@ assert(!/^import /m.test(src), 'storm.ts imports nothing, so it runs without the
 const compiled = await transformWithEsbuild(src, 'storm.ts', { loader: 'ts', format: 'esm' })
 const S = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
 
-// Defaults match the server: off, more than 5 assets in 5 min, down + reboots, all assets.
+// Defaults match the server: off, more than 5 assets in 5 min, down, reboots, latency/loss and services, all assets.
 assert.deepEqual(S.stormPolicyFromApi({}), { ...S.STORM_DEFAULTS, enabled: false })
-assert.deepEqual(S.STORM_DEFAULTS.families, ['reachability', 'reboot'])
+assert.deepEqual(S.STORM_DEFAULTS.families, ['reachability', 'reboot', 'latency', 'service'])
 const server = fs.readFileSync('../server/app/services/alert_storm.py', 'utf8')
-assert.match(server, /"threshold": 5,\s*\n\s*"window_minutes": 5,\s*\n\s*"families": \["reachability", "reboot"\]/)
+assert.match(server, /"threshold": 5,\s*\n\s*"window_minutes": 5,\s*\n\s*"families": \["reachability", "reboot", "latency", "service"\]/)
 assert.match(server, /"update_minutes": 15/)
 for (const f of S.STORM_FAMILIES) assert(server.includes(`"${f.value}"`), `server knows family ${f.value}`)
 
@@ -33,7 +33,7 @@ assert.equal(S.validateStormPolicy({ ...S.STORM_DEFAULTS, enabled: false, famili
 // Sentences say plainly what happens.
 assert.equal(S.stormSentence(S.STORM_DEFAULTS), 'Off: every asset is notified on its own.')
 const on = { ...S.STORM_DEFAULTS, enabled: true, scope: 'site' }
-assert.equal(S.stormSentence(on), 'When more than 5 assets report devices down, reboots and restarts within 5 min (per site), each channel gets one combined notification instead of one per asset, then an update every 15 min and a closing summary.')
+assert.equal(S.stormSentence(on), 'When more than 5 assets report devices down, reboots and restarts, service checks failing, latency and packet loss within 5 min (per site), each channel gets one combined notification instead of one per asset, then an update every 15 min and a closing summary.')
 assert.equal(S.stormExample(on, 40), '5 individual notifications, then 1 combined notification listing all 40 assets (instead of 35 more)')
 assert.equal(S.stormExample(on, 4), '4 individual notifications')
 assert.equal(S.stormExample(S.STORM_DEFAULTS, 40), '40 individual notifications')
