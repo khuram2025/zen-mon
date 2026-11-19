@@ -122,40 +122,39 @@ def test_unit_rows_carry_memory_cpu_restarts_and_running_time():
 
 def test_a_failed_core_service_is_down_and_unset_accounting_is_unavailable():
     units = H.parse_systemctl_show(SHOW)
-    poller = H.service_row(_spec("poller"), units, None, uptime_s=1000.0)
+    poller = H.service_row(_spec("monitoring_engine"), units, None, uptime_s=1000.0)
     assert poller["state"] == "down" and poller["detail"] == "failed"
     assert poller["memory_bytes"] is None and poller["cpu_seconds"] is None and poller["uptime_s"] is None
 
 
 def test_the_postgresql_unit_is_found_by_pattern_never_by_a_version_number():
     units = H.parse_systemctl_show(SHOW)
-    ok = H.service_row(_spec("postgresql"), units, {"ok": True, "version": "16.4"}, 1000.0)
-    assert ok["state"] == "running" and ok["version"] == "16.4" and ok["memory_bytes"] == 736366592
+    ok = H.service_row(_spec("config_db"), units, {"ok": True}, 1000.0)
+    assert ok["state"] == "running" and ok["memory_bytes"] == 736366592
     # The unit is active but the database does not answer: that is down.
-    silent = H.service_row(_spec("postgresql"), units, {"ok": False}, 1000.0)
+    silent = H.service_row(_spec("config_db"), units, {"ok": False}, 1000.0)
     assert silent["state"] == "down" and silent["detail"] == "not answering"
 
 
 def test_optional_services_switched_off_or_absent_are_not_faults():
     units = H.parse_systemctl_show(SHOW)
-    assert H.service_row(_spec("netflow"), units, None, 1000.0)["state"] == "stopped"
-    assert H.service_row(_spec("syslog"), units, None, 1000.0)["state"] == "not_installed"
+    assert H.service_row(_spec("flow_collector"), units, None, 1000.0)["state"] == "stopped"
+    assert H.service_row(_spec("syslog_receiver"), units, None, 1000.0)["state"] == "not_installed"
     # A unit systemd did not list at all (pattern matched nothing).
-    assert H.service_row(_spec("nginx"), units, None, 1000.0)["state"] == "not_installed"
+    assert H.service_row(_spec("web_server"), units, None, 1000.0)["state"] == "not_installed"
 
 
 def test_without_systemd_services_are_unknown_and_probes_still_decide():
-    assert H.service_row(_spec("nginx"), None, None, None)["state"] == "unknown"
-    assert H.service_row(_spec("poller"), None, None, None)["state"] == "unknown"
+    assert H.service_row(_spec("web_server"), None, None, None)["state"] == "unknown"
+    assert H.service_row(_spec("monitoring_engine"), None, None, None)["state"] == "unknown"
     assert H.service_row(_spec("api"), None, None, None)["state"] == "running"
-    row = H.service_row(_spec("clickhouse"), None, {"ok": True, "version": "24.10", "uptime_s": 90,
-                                                    "memory_bytes": 5}, None)
+    row = H.service_row(_spec("metrics_db"), None, {"ok": True, "uptime_s": 90, "memory_bytes": 5}, None)
     assert (row["state"], row["uptime_s"], row["memory_bytes"]) == ("running", 90, 5)
-    assert H.service_row(_spec("redis"), None, {"ok": False}, None)["state"] == "down"
+    assert H.service_row(_spec("cache"), None, {"ok": False}, None)["state"] == "down"
 
 
 def test_findings_name_what_is_wrong_and_stay_quiet_when_healthy():
-    healthy = dict(services=[{"id": "api", "label": "Web application and API", "component": "API",
+    healthy = dict(services=[{"id": "api", "label": "Web application",
                               "core": True, "state": "running", "detail": None}],
                    memory={"used_pct": 40.0, "swap_used_pct": 0.0}, load=[0.5, 0.5, 0.5], cores=4,
                    ingestion={"monitoring": "ready", "uploads_paused": False},
@@ -166,22 +165,22 @@ def test_findings_name_what_is_wrong_and_stay_quiet_when_healthy():
                          "ingestion": {"monitoring": None, "uploads_paused": None},
                          "clock": {"ntp_synchronized": None}}) == []
     bad = H.findings(
-        services=[{"id": "poller", "label": "Monitoring engine", "component": "Poller", "core": True,
+        services=[{"id": "monitoring_engine", "label": "Monitoring engine", "core": True,
                    "state": "down", "detail": "failed"},
-                  {"id": "netflow", "label": "Flow collector", "component": "NetFlow collector",
+                  {"id": "flow_collector", "label": "Flow collector",
                    "core": False, "state": "down", "detail": "not running"},
-                  {"id": "syslog", "label": "Syslog receiver", "component": "Syslog receiver",
+                  {"id": "syslog_receiver", "label": "Syslog receiver",
                    "core": False, "state": "stopped", "detail": None}],
         memory={"used_pct": 93.0, "swap_used_pct": 60.0}, load=[9.0, 9.0, 9.0], cores=4,
         ingestion={"monitoring": "interrupted", "uploads_paused": True},
         clock={"ntp_synchronized": False}, cpu_15m=None, iowait_15m=40.0)
     codes = [f["code"] for f in bad]
-    assert codes[:2] == ["service_down:poller", "monitoring_interrupted"]
+    assert codes[:2] == ["service_down:monitoring_engine", "monitoring_interrupted"]
     assert [f["severity"] for f in bad[:2]] == ["critical", "critical"]
-    assert set(codes[2:]) == {"service_down:netflow", "uploads_paused", "memory_high", "swap_high",
+    assert set(codes[2:]) == {"service_down:flow_collector", "uploads_paused", "memory_high", "swap_high",
                               "load_high", "iowait_high", "clock_unsynchronized"}
-    assert "service_down:syslog" not in codes
-    assert "Monitoring engine (Poller) is failed." in bad[0]["message"]
+    assert "service_down:syslog_receiver" not in codes
+    assert bad[0]["message"] == "Monitoring engine is failed."
     # Sustained CPU replaces the load line instead of saying the same thing twice.
     both = H.findings(**{**healthy, "load": [9.0, 9.0, 9.0], "cpu_15m": 95.0})
     assert [f["code"] for f in both] == ["cpu_sustained"]
@@ -251,12 +250,11 @@ class _Store:
 
 
 async def _ok_pg():
-    return {"ok": True, "version": "16.4", "size_bytes": 123, "uptime_s": 50.0}
+    return {"ok": True, "size_bytes": 123, "uptime_s": 50.0}
 
 
 async def _ok_ch():
-    return {"ok": True, "version": "24.10", "uptime_s": 60.0, "size_bytes": 456, "diagnostic_bytes": 7,
-            "memory_bytes": 99}
+    return {"ok": True, "uptime_s": 60.0, "size_bytes": 456, "diagnostic_bytes": 7, "memory_bytes": 99}
 
 
 async def _down():
@@ -272,17 +270,40 @@ def test_status_document_reports_down_stores_without_leaking_errors(monkeypatch)
         probes={"postgresql": _ok_pg, "clickhouse": _ok_ch, "redis": _down},
         store=_Store(fail=True), units=H.parse_systemctl_show(SHOW)))
     by_id = {s["id"]: s for s in doc["services"]}
-    assert by_id["redis"]["state"] == "down" and by_id["postgresql"]["state"] == "running"
-    assert by_id["clickhouse"]["uptime_s"] == 60 and by_id["clickhouse"]["memory_bytes"] == 99
-    assert "syslog" not in by_id          # optional and not installed: no row
-    assert by_id["netflow"]["state"] == "stopped"
+    assert by_id["cache"]["state"] == "down" and by_id["config_db"]["state"] == "running"
+    assert by_id["metrics_db"]["uptime_s"] == 60 and by_id["metrics_db"]["memory_bytes"] == 99
+    assert "syslog_receiver" not in by_id          # optional and not installed: no row
+    assert by_id["flow_collector"]["state"] == "stopped"
     assert doc["state"] == "critical"
     assert "10.0.0.1" not in str(doc)     # driver errors stay in the log
     stores = {d["id"]: d["size_bytes"] for d in doc["data_stores"]}
-    assert stores == {"postgresql": 123, "clickhouse": 456, "clickhouse_diagnostic": 7, "redis": None}
+    assert stores == {"config_db": 123, "metrics_db": 456, "metrics_db_logs": 7, "cache": None}
     assert doc["cpu"]["usage_pct"] == 12.0 and doc["cpu"]["window_s"] == 1
     assert doc["cpu"]["average_15m_pct"] is None
     assert doc["software"]["version"] == "1.2.3"
+
+
+def test_the_response_names_services_by_what_they_do_never_by_their_software(monkeypatch):
+    """Which database engines and web server the appliance runs on is not part
+    of what the page (or its API) says: ids, labels and messages are generic."""
+    import json
+    import re
+
+    monkeypatch.setattr(H, "read_software", lambda: {"version": "1.2.3", "installed_at": None, "last_update": None})
+    monkeypatch.setattr(H, "read_clock", lambda: {"now": "x", "timezone": "UTC", "ntp_synchronized": True})
+    monkeypatch.setattr(H, "_measure_cpu_now", lambda window=0.5: None)
+    monkeypatch.setattr(H, "cpu_model", lambda: "Fixture CPU")
+    H._latest.update(at=0.0, cpu=None)
+    units = H.parse_systemctl_show(SHOW.replace("ActiveState=active", "ActiveState=failed"))
+    doc = asyncio.run(H.collect_status(
+        probes={"postgresql": _down, "clickhouse": _down, "redis": _down}, store=_Store(fail=True), units=units))
+    assert doc["state"] == "critical" and len(doc["findings"]) >= 4
+    text = json.dumps(doc)
+    assert not re.search(r"postgres|clickhouse|redis|nginx|uvicorn|ubuntu|\.service|zenplus-", text, re.I), text
+    assert {s["id"] for s in doc["services"]} >= {"api", "monitoring_engine", "config_db", "metrics_db", "cache", "web_server"}
+    assert all(set(s) == {"id", "label", "core", "state", "detail", "uptime_s", "memory_bytes", "cpu_seconds", "restarts"}
+               for s in doc["services"])
+    assert "os" not in doc["host"]
 
 
 def test_history_says_unavailable_when_the_store_is_away():

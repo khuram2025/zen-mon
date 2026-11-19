@@ -47,14 +47,16 @@ try {
   assert(render('overview').includes('Appliance storage'))
   console.log('All five rendered storage sections keep implementation detail out of the customer interface.')
 
-  // The default section is the appliance's own health. It names the components an engineer would ask about
-  // (PostgreSQL, ClickHouse, Redis, nginx) beside what they do, and nothing below that: no unit names, paths or errors.
+  // The default section is the appliance's own health. Services are named by what they do; which software is
+  // behind them (database engines, the web server), unit names, paths and errors are not shown, even when sent.
   const health = render('')
-  for (const text of ['Appliance health', 'Configuration database', 'PostgreSQL 16.4', 'Metrics database', 'Web server', 'Monitoring engine',
-    'Cache and live updates (Redis) is not answering.', 'Memory use is high (93%).', 'Additional services', 'Switched off', 'Could not be checked',
-    'Down (not answering)', '1.25.17', 'Ubuntu 24.04.1 LTS', 'Synchronisation could not be checked']) {
+  for (const text of ['Appliance health', 'Web application', 'Configuration database', 'Metrics database', 'Web server', 'Monitoring engine',
+    'Cache and live updates is not answering.', 'Memory use is high (93%).', 'Additional services', 'Switched off', 'Could not be checked',
+    'Down (not answering)', '1.25.17', 'Synchronisation could not be checked']) {
     assert(health.includes(text), `Health overview is missing: ${text}`)
   }
+  assert(!/ClickHouse|PostgreSQL|Postgres|Redis|nginx|uvicorn|systemd|16\.4|24\.10/i.test(health), 'The health overview names the software behind a service')
+  assert(!/data-service="(postgresql|clickhouse|redis|nginx)"/.test(health))
   // Only storage findings that need the operator are repeated here; an informational one stays on its own section.
   assert(!health.includes('Additional disk capacity detected'))
   assert(!/\.service|ubuntu-vg|system\.text_log|\/dev\/|\/data\/|Traceback|LVM/.test(health), 'Internal detail rendered in the health overview')
@@ -63,10 +65,10 @@ try {
   assert(tile('Storage').includes('—') && tile('Storage').includes('could not be read'), 'missing storage reading must not render as a number')
   assert(tile('Swap').includes('—') && !/>0(\.0)?%</.test(tile('Swap')), 'missing swap reading must not render as 0%')
   assert(tile('Memory').includes('93%') && tile('CPU').includes('4.2%'))
-  const poller = health.split('data-service="poller"')[1].split('</tr>')[0]
-  assert(!/\d/.test(poller.replace(/<[^>]+>/g, '').replace('Monitoring engine', '').replace('Poller', '')), 'an unchecked service shows no figures')
+  const engine = health.split('data-service="monitoring_engine"')[1].split('</tr>')[0]
+  assert(!/\d/.test(engine.replace(/<[^>]+>/g, '').replace('Monitoring engine', '')), 'an unchecked service shows no figures')
   assert(health.includes('Unavailable'), 'a data store that did not answer says Unavailable')
-  console.log('The health overview names components, shows missing readings as unavailable and keeps unit names, paths and errors out.')
+  console.log('The health overview names services by what they do, shows missing readings as unavailable and keeps software names, unit names, paths and errors out.')
 } finally { fs.rmSync(out, { force: true }) }
 // Optional isolated preview: synthetic fixtures, no appliance API or credentials.
 if (process.env.STORAGE_PREVIEW_DIR) {

@@ -2,7 +2,8 @@
  * Settings -> System status -> Overview: is this appliance healthy?
  *
  * CPU, memory, swap, load and uptime of the appliance itself, its services, its data stores and its software,
- * with the last 24 hours as a chart. Backend: GET /system/status and /system/status/history
+ * with the last 24 hours as a chart. Services are named by what they do ("Configuration database", "Web server"):
+ * which software is behind them is not shown. Backend: GET /system/status and /system/status/history
  * (server/app/services/appliance_health.py). Storage findings come from the storage status the other sections use.
  * A reading the appliance could not take is shown as "—", never as zero.
  */
@@ -245,8 +246,7 @@ function ServiceRows({ rows }: { rows: ServiceRow[] }) {
         return (
           <tr key={s.id} className="border-t border-border/40" data-service={s.id}>
             <th scope="row" className="py-2 pr-3 text-left font-normal">
-              <div className="font-medium text-text">{s.label}</div>
-              <div className="text-2xs text-muted">{s.component}{s.version ? ` ${s.version}` : ''}</div>
+              <span className="font-medium text-text">{s.label}</span>
             </th>
             <td className="py-2 pr-3">
               <span className={cn('inline-flex items-center gap-2 whitespace-nowrap', st.text)}><StatusDot status={st.dot} /> {serviceStateLabel(s)}</span>
@@ -323,7 +323,7 @@ function DataStores({ status, onNavigate }: { status: SystemStatus; onNavigate: 
       </CardHeader>
       <CardContent>
         {status.data_stores.map((d) => (
-          <Row key={d.id} label={d.label} hint={`${d.holds} · ${d.component}`}>
+          <Row key={d.id} label={d.label} hint={d.holds}>
             {d.size_bytes == null ? <span className="text-muted">Unavailable</span> : <>{fmtBytes(d.size_bytes)}<span className="text-muted"> {d.kind === 'memory' ? 'in memory' : 'on disk'}</span></>}
           </Row>
         ))}
@@ -356,7 +356,6 @@ function Software({ status }: { status: SystemStatus }) {
         <Row label="Last update" hint={last?.at ? when(last.at) : undefined}>
           {last ? <span className={last.status === 'success' ? '' : 'text-warning-fg'}>{last.version || UNAVAILABLE} {updateStatusLabel(last.status)}</span> : <span className="text-muted">No update recorded</span>}
         </Row>
-        <Row label="Operating system">{host.os || <span className="text-muted">Unavailable</span>}</Row>
         <Row label="Processor" hint={host.cpu_model || undefined}>{host.cores ? `${host.cores} core${host.cores === 1 ? '' : 's'}` : <span className="text-muted">Unavailable</span>}</Row>
         <Row label="Clock" hint={clock.timezone ? `Time zone ${clock.timezone}` : undefined}><span className={TONE_TEXT[ck.tone]}>{ck.text}</span></Row>
         <div className="pt-2"><Button asChild variant="outline" size="sm"><Link to="/settings/general?tab=updates">Updates</Link></Button></div>

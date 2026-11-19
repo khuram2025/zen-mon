@@ -46,8 +46,18 @@ Storage itself is described in `docs/storage-management.md`.
   diagnostic logs (active parts), Redis memory; whether monitoring results are
   being processed (the controller recovery state) and whether agent and
   application uploads are paused for low space.
-- **Software and system**: installed version and time, the last update and how
-  it ended, operating system, processor, clock synchronisation.
+- **Software and system**: installed ZenPlus version and time, the last update
+  and how it ended, processor, clock synchronisation.
+
+**Naming.** The page, the API response and the finding messages name a service
+only by what it does: Web application, Monitoring engine, Configuration
+database, Metrics database, Cache and live updates, Web server, Storage
+protection, Flow collector, Syslog receiver, Configuration backup workers.
+Which software is behind a name (the database engines, the web server, the
+operating system), versions and unit names are implementation detail and are
+not sent or shown; this document and the code are where they are written down.
+`scripts/test-storage-render.mjs` and `tests/test_appliance_health.py` fail if
+one of those names reaches the page or the response.
 
 A reading that cannot be taken is `null` and is shown as "—" or
 "Unavailable". It is never replaced by zero. Driver errors go to the log, not
@@ -63,7 +73,7 @@ page anyone (`appliance_health.findings`):
 
 | Finding | When |
 |---|---|
-| critical: a core service is down | API, poller, PostgreSQL, ClickHouse, Redis or nginx not running / not answering |
+| critical: a core service is down | web application, monitoring engine, either database, the cache or the web server not running / not answering |
 | critical: monitoring interrupted | results are not being processed |
 | critical / warning: memory | ≥ 97 % / ≥ 90 % in use |
 | warning: swap | ≥ 50 % of swap in use |

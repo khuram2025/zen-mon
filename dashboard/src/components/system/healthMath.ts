@@ -6,8 +6,8 @@ export type ServiceState = 'running' | 'down' | 'stopped' | 'starting' | 'not_in
 
 export type ServiceRow = {
   id: string
+  /** What the service does. The page names services only this way, never by the software behind them. */
   label: string
-  component: string
   core: boolean
   state: ServiceState
   detail: string | null
@@ -15,7 +15,6 @@ export type ServiceRow = {
   memory_bytes: number | null
   cpu_seconds: number | null
   restarts: number | null
-  version: string | null
 }
 
 export type Finding = { severity: 'critical' | 'warning'; code: string; message: string }
@@ -23,7 +22,6 @@ export type Finding = { severity: 'critical' | 'warning'; code: string; message:
 export type DataStore = {
   id: string
   label: string
-  component: string
   holds: string
   size_bytes: number | null
   kind: 'disk' | 'memory'
@@ -33,7 +31,7 @@ export type SystemStatus = {
   sampled_at: string
   state: 'ok' | 'warning' | 'critical'
   findings: Finding[]
-  host: { os: string | null; cpu_model: string | null; cores: number | null; uptime_s: number | null; boot_time: string | null }
+  host: { cpu_model: string | null; cores: number | null; uptime_s: number | null; boot_time: string | null }
   cpu: {
     usage_pct: number | null
     iowait_pct: number | null

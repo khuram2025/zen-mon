@@ -45,7 +45,7 @@ assert.equal(m.loadTone(null, 2), 'muted')
 assert.equal(m.loadTone([1, 1, 1], null), 'muted')
 
 // Services.
-const svc = (state, over = {}) => ({ id: 'x', label: 'X', component: 'x', core: true, state, detail: null, uptime_s: 1, memory_bytes: 1, cpu_seconds: 1, restarts: 0, version: null, ...over })
+const svc = (state, over = {}) => ({ id: 'x', label: 'X', core: true, state, detail: null, uptime_s: 1, memory_bytes: 1, cpu_seconds: 1, restarts: 0, ...over })
 assert.equal(m.serviceStateLabel(svc('down', { detail: 'not answering' })), 'Down (not answering)')
 assert.equal(m.serviceStateLabel(svc('running', { detail: 'ignored' })), 'Running')
 assert.equal(m.serviceStateLabel(svc('unknown')), 'Could not be checked')
@@ -111,4 +111,9 @@ const entry = catalog.pages.find((p) => p.key === '/settings/general?tab=storage
 assert(entry, 'the page catalogue keeps the tab under its address')
 assert.equal(entry.label, 'System status')
 assert.deepEqual(entry.gates.at(-1).any, ['system.admin'], 'the page still needs system.admin')
+// The overview names services by what they do. The software behind them is not written into the page's source.
+for (const file of ['src/components/system/HealthSection.tsx', 'src/components/system/healthMath.ts', 'src/components/system/HealthHistoryChart.tsx', 'src/components/SystemStatusTabContent.tsx']) {
+  const visible = read(file).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert(!/ClickHouse|PostgreSQL|Postgres|Redis|nginx/i.test(visible), `${file} names the software behind a service`)
+}
 console.log('System status tab: renamed everywhere, address and permission unchanged, old links resolve.')

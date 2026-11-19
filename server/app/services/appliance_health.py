@@ -199,43 +199,34 @@ def read_disk(paths: Iterable[str] = ("/data", "/")) -> Optional[dict]:
     return None
 
 
-def os_name() -> Optional[str]:
-    try:
-        for line in Path("/etc/os-release").read_text().splitlines():
-            if line.startswith("PRETTY_NAME="):
-                return line.split("=", 1)[1].strip().strip('"') or None
-    except OSError:
-        pass
-    return None
-
-
 # ── Services ─────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class ServiceSpec:
-    id: str
-    label: str          # what it does, in product words
-    component: str      # the software an engineer would name
+    id: str             # generic, shown in the API: never the name of the software
+    label: str          # what it does, in product words: the only name the page shows
     units: tuple[str, ...] = ()   # systemd unit names or patterns
     probe: Optional[str] = None   # a data store asked directly
     core: bool = True   # monitoring stops without it
 
 
+# The page and the API name services by what they do. Which software does it
+# (the database engines, the web server) is an implementation detail and is
+# not part of the response: ids, labels and messages stay generic.
 SERVICES: tuple[ServiceSpec, ...] = (
-    ServiceSpec("api", "Web application and API", "API", ("zenplus-api.service",)),
-    ServiceSpec("poller", "Monitoring engine", "Poller", ("zenplus-poller.service",)),
-    ServiceSpec("postgresql", "Configuration database", "PostgreSQL",
-                ("postgresql@*.service",), probe="postgresql"),
-    # ClickHouse runs in a container; it is asked directly, not through a unit.
-    ServiceSpec("clickhouse", "Metrics database", "ClickHouse", (), probe="clickhouse"),
-    ServiceSpec("redis", "Cache and live updates", "Redis", ("redis-server.service",), probe="redis"),
-    ServiceSpec("nginx", "Web server", "nginx", ("nginx.service",)),
-    ServiceSpec("storage_watchdog", "Storage protection", "Storage watchdog",
+    ServiceSpec("api", "Web application", ("zenplus-api.service",)),
+    ServiceSpec("monitoring_engine", "Monitoring engine", ("zenplus-poller.service",)),
+    ServiceSpec("config_db", "Configuration database", ("postgresql@*.service",), probe="postgresql"),
+    # Runs in a container; it is asked directly, not through a unit.
+    ServiceSpec("metrics_db", "Metrics database", (), probe="clickhouse"),
+    ServiceSpec("cache", "Cache and live updates", ("redis-server.service",), probe="redis"),
+    ServiceSpec("web_server", "Web server", ("nginx.service",)),
+    ServiceSpec("storage_protection", "Storage protection",
                 ("zenplus-storage-watchdog.service",), core=False),
-    ServiceSpec("netflow", "Flow collector", "NetFlow collector",
+    ServiceSpec("flow_collector", "Flow collector",
                 ("zenplus-netflow-collector.service",), core=False),
-    ServiceSpec("syslog", "Syslog receiver", "Syslog receiver", ("zenplus-syslog.service",), core=False),
-    ServiceSpec("ncm_worker", "Configuration backup workers", "NCM worker",
+    ServiceSpec("syslog_receiver", "Syslog receiver", ("zenplus-syslog.service",), core=False),
+    ServiceSpec("backup_workers", "Configuration backup workers",
                 ("zenplus-ncm-worker.service",), core=False),
 )
 
@@ -312,9 +303,9 @@ def service_row(spec: ServiceSpec, units: Optional[list[dict]], probe: Optional[
     """
     unit = _unit_for(spec, units) if units is not None and spec.units else None
     row: dict[str, Any] = {
-        "id": spec.id, "label": spec.label, "component": spec.component, "core": spec.core,
+        "id": spec.id, "label": spec.label, "core": spec.core,
         "state": "unknown", "detail": None, "uptime_s": None, "memory_bytes": None,
-        "cpu_seconds": None, "restarts": None, "version": None,
+        "cpu_seconds": None, "restarts": None,
     }
     unit_state: Optional[str] = None
     if unit is not None:
@@ -348,7 +339,6 @@ def service_row(spec: ServiceSpec, units: Optional[list[dict]], probe: Optional[
     if probe is not None:
         if probe.get("ok"):
             row["state"] = "running"
-            row["version"] = probe.get("version")
             if probe.get("uptime_s") is not None and row["uptime_s"] is None:
                 row["uptime_s"] = int(probe["uptime_s"])
             if probe.get("memory_bytes") is not None and row["memory_bytes"] is None:
@@ -369,10 +359,9 @@ async def probe_postgresql() -> dict:
 
     async with AsyncSessionLocal() as db:
         row = (await db.execute(text(
-            "SELECT current_setting('server_version'), pg_database_size(current_database()), "
+            "SELECT pg_database_size(current_database()), "
             "EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))"))).one()
-    return {"ok": True, "version": str(row[0]).split()[0], "size_bytes": int(row[1]),
-            "uptime_s": float(row[2])}
+    return {"ok": True, "size_bytes": int(row[0]), "uptime_s": float(row[1])}
 
 
 def _probe_clickhouse_sync() -> dict:
@@ -380,8 +369,8 @@ def _probe_clickhouse_sync() -> dict:
     from app.core.config import get_settings
 
     client = get_ch_client()
-    version, uptime = client.query("SELECT version(), uptime()").result_rows[0]
-    out: dict[str, Any] = {"ok": True, "version": str(version), "uptime_s": float(uptime)}
+    uptime = client.query("SELECT uptime()").result_rows[0][0]
+    out: dict[str, Any] = {"ok": True, "uptime_s": float(uptime)}
     try:
         rows = client.query(
             "SELECT database = 'system' AS diagnostic, sum(bytes_on_disk) FROM system.parts "
@@ -418,8 +407,7 @@ async def probe_redis() -> dict:
         info = await client.info()
     finally:
         await client.aclose()
-    return {"ok": True, "version": info.get("redis_version"),
-            "uptime_s": info.get("uptime_in_seconds"), "memory_bytes": info.get("used_memory")}
+    return {"ok": True, "uptime_s": info.get("uptime_in_seconds"), "memory_bytes": info.get("used_memory")}
 
 
 PROBES: dict[str, Callable[[], Awaitable[dict]]] = {
@@ -701,7 +689,7 @@ def findings(*, services: list[dict], memory: dict, load: Optional[list[float]],
         if s["state"] == "down":
             if s["core"]:
                 add("critical", f"service_down:{s['id']}",
-                    f"{s['label']} ({s['component']}) is {s['detail'] or 'not running'}.")
+                    f"{s['label']} is {s['detail'] or 'not running'}.")
             else:
                 add("warning", f"service_down:{s['id']}",
                     f"{s['label']} is {s['detail'] or 'not running'}.")
@@ -776,16 +764,16 @@ async def collect_status(*, probes: Optional[dict] = None, store: Optional[Redis
 
     pg, ch, rd = probed.get("postgresql", {}), probed.get("clickhouse", {}), probed.get("redis", {})
     data_stores = [
-        {"id": "postgresql", "label": "Configuration database", "component": "PostgreSQL",
+        {"id": "config_db", "label": "Configuration database",
          "holds": "Devices, users, settings, alert rules and inventory",
          "size_bytes": pg.get("size_bytes"), "kind": "disk"},
-        {"id": "clickhouse", "label": "Metrics database", "component": "ClickHouse",
+        {"id": "metrics_db", "label": "Metrics database",
          "holds": "Monitoring history, flows, traces and events",
          "size_bytes": ch.get("size_bytes"), "kind": "disk"},
-        {"id": "clickhouse_diagnostic", "label": "Metrics database logs", "component": "ClickHouse",
+        {"id": "metrics_db_logs", "label": "Metrics database logs",
          "holds": "The database's own diagnostic logs",
          "size_bytes": ch.get("diagnostic_bytes"), "kind": "disk"},
-        {"id": "redis", "label": "Cache and live updates", "component": "Redis",
+        {"id": "cache", "label": "Cache and live updates",
          "holds": "Sessions, live status and short-lived queues",
          "size_bytes": rd.get("memory_bytes"), "kind": "memory"},
     ]
@@ -799,7 +787,7 @@ async def collect_status(*, probes: Optional[dict] = None, store: Optional[Redis
         "sampled_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "state": state,
         "findings": found,
-        "host": {"os": os_name(), "cpu_model": cpu_model(), "cores": cores,
+        "host": {"cpu_model": cpu_model(), "cores": cores,
                  "uptime_s": int(uptime) if uptime is not None else None,
                  "boot_time": (datetime.fromtimestamp(now - uptime, timezone.utc).isoformat()
                                if uptime is not None else None)},

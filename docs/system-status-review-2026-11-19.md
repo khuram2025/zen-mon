@@ -97,7 +97,8 @@ cleared.
   development appliance; the findings marked L above. The new health collector
   was run on the development host against its real `/proc` and systemd (the
   databases were not asked): 16 cores, memory, load, storage 61 %, ten services
-  with memory, CPU time and restarts, PostgreSQL found as `postgresql@16-main`.
+  with memory, CPU time and restarts, the configuration database's unit found by
+  pattern.
 - **In tests only**: every fix above (fakes for ClickHouse, PostgreSQL, the
   filesystem and LVM), the System status API and its sampler, the rendered page
   in both themes with synthetic data. The page has not run on an appliance:
