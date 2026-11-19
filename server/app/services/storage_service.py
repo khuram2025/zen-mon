@@ -1,6 +1,6 @@
 """Storage management: usage overview, retention/purge, backup/restore.
 
-Backs the Settings -> Storage tab. Three concerns live here:
+Backs the storage sections of Settings -> System status. Three concerns live here:
 
 1. Usage + retention. ClickHouse tables are classified into categories
    (raw metrics, 5-minute rollups, hourly rollups, flows, APM, events) and
@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import tarfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -65,6 +65,11 @@ RETENTION_SETTINGS_KEY = "storage.retention"
 BACKUP_SCHEDULE_KEY = "storage.backup_schedule"
 
 STORAGE_SWEEP_ADVISORY_LOCK = 1515074390
+# Serialises "is a backup or restore running?" with starting one, across API workers.
+BACKUP_OPS_ADVISORY_LOCK = 1515074391
+# Set while a saved retention policy still has to be applied to the history
+# tables (the metrics database was down when it was saved).
+RETENTION_PENDING_KEY = "storage.retention_pending"
 
 SWEEP_INTERVAL_S = 300
 BACKUP_STALE_AFTER_H = 3
@@ -286,35 +291,66 @@ async def apply_retention(db: AsyncSession, settings: dict, actor: str) -> list[
 
 # ─── Purge (partition drops) ─────────────────────────────────────────────────
 
+def partition_newest(max_date: Any, max_time: Any) -> Optional[datetime]:
+    """End of the newest data a partition holds, or None when it is not known.
+
+    ``system.parts`` reports 1970 in ``max_time`` for a table whose partition
+    key has no DateTime column (a ``Date`` key, or no ``PARTITION BY`` at all)
+    and in ``max_date`` when it has no Date column. A partition whose newest
+    row cannot be dated is never "older than" anything.
+    """
+    newest: Optional[datetime] = None
+    if isinstance(max_time, datetime) and max_time.year > 2000:
+        newest = max_time.replace(tzinfo=None)
+    if isinstance(max_date, date) and not isinstance(max_date, datetime) and max_date.year > 2000:
+        # A Date key holds rows up to the end of that day.
+        day_end = datetime(max_date.year, max_date.month, max_date.day) + timedelta(days=1)
+        newest = day_end if newest is None or day_end > newest else newest
+    return newest
+
+
+def _purgeable(rows: list[tuple], older_than: datetime) -> list[dict]:
+    """Partitions whose *entire* content is older than the cutoff, oldest first."""
+    out = []
+    for table, partition_id, size, row_count, min_time, max_time, max_date in rows:
+        newest = partition_newest(max_date, max_time)
+        if newest is None or newest >= older_than:
+            continue
+        oldest = min_time if isinstance(min_time, datetime) and min_time.year > 2000 else None
+        out.append({
+            "table": table,
+            "partition_id": partition_id,
+            "size_bytes": int(size),
+            "size_human": human_size(int(size)),
+            "rows": int(row_count),
+            "oldest": oldest.isoformat() if oldest else None,
+            "newest": newest.isoformat(),
+        })
+    return sorted(out, key=lambda p: p["newest"])
+
+
 def _list_purgeable_partitions_sync(
     tables: list[str], older_than: datetime
 ) -> list[dict]:
-    """Partitions whose *entire* content is older than the cutoff."""
+    """Partitions whose *entire* content is older than the cutoff.
+
+    The age test is made here, not in SQL: ``HAVING max(max_time) < cutoff``
+    was true for every partition of a table without a DateTime partition key
+    (they all report 1970), so a purge of "older than N days" dropped the whole
+    table, today's data included.
+    """
     if not tables:
         return []
     client = get_ch_client()
     rows = client.query(
         "SELECT table, partition_id, sum(bytes_on_disk), sum(rows), "
-        "       min(min_time), max(max_time) "
+        "       min(min_time), max(max_time), max(max_date) "
         "FROM system.parts "
         "WHERE active AND database = %(db)s AND table IN %(tables)s "
-        "GROUP BY table, partition_id "
-        "HAVING max(max_time) < %(cutoff)s "
-        "ORDER BY max(max_time) ASC",
-        parameters={"db": CH_DATABASE, "tables": tables, "cutoff": older_than},
+        "GROUP BY table, partition_id",
+        parameters={"db": CH_DATABASE, "tables": tables},
     ).result_rows
-    return [
-        {
-            "table": r[0],
-            "partition_id": r[1],
-            "size_bytes": int(r[2]),
-            "size_human": human_size(int(r[2])),
-            "rows": int(r[3]),
-            "oldest": r[4].isoformat() if isinstance(r[4], datetime) else None,
-            "newest": r[5].isoformat() if isinstance(r[5], datetime) else None,
-        }
-        for r in rows
-    ]
+    return _purgeable(rows, older_than)
 
 
 def _drop_partition_sync(table: str, partition_id: str) -> None:
@@ -925,10 +961,17 @@ async def run_backup(backup_id: str, kind: str, include_clickhouse: bool, actor:
         logger.info("backup %s completed (%s)", backup_id, human_size(size))
     except Exception as e:
         logger.exception("backup %s failed", backup_id)
+        # A failed backup is not restorable; what it wrote before failing (the
+        # database dump comes first) would only take space until someone
+        # deleted the row by hand.
+        try:
+            await delete_backup_files(backup_id)
+        except Exception:
+            logger.exception("removing the files of failed backup %s failed", backup_id)
         async with AsyncSessionLocal() as db:
             await db.execute(
                 text(
-                    "UPDATE storage_backups SET status='failed', error=:e, "
+                    "UPDATE storage_backups SET status='failed', error=:e, size_bytes=0, "
                     "finished_at=NOW() WHERE id=:id"
                 ),
                 {"e": str(e)[:2000], "id": backup_id},
@@ -1315,8 +1358,11 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
                     # A PostgreSQL dump includes its own backup row while that
                     # backup is still running. Restoring it must not strand the
                     # row in 'running' and block every subsequent backup.
+                    # The restored row also carries the dump's own last_restore_at, so
+                    # the time is written again: "restart needed" compares it with
+                    # the moment the services started.
                     "UPDATE storage_backups SET status='completed', last_restore_status='completed', "
-                    "last_restore_error=NULL WHERE id=:id"
+                    "last_restore_error=NULL, last_restore_at=CURRENT_TIMESTAMP WHERE id=:id"
                 ),
                 {"id": backup_id},
             )
@@ -1357,6 +1403,62 @@ async def delete_backup_files(backup_id: str) -> None:
 
 # ─── Scheduled backups + sweeper loop ────────────────────────────────────────
 
+async def backup_operation_running(db: AsyncSession) -> Optional[str]:
+    """"backup" or "restore" while one is in progress, else None.
+
+    Takes the backup-operations lock for the rest of the transaction, so two
+    workers cannot both find nothing running and both start something. Callers
+    start their operation (insert / update the row) in the same transaction.
+    """
+    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": BACKUP_OPS_ADVISORY_LOCK})
+    row = (
+        await db.execute(
+            text(
+                "SELECT CASE WHEN bool_or(last_restore_status = 'running') THEN 'restore' "
+                "            WHEN bool_or(status = 'running') THEN 'backup' END "
+                "FROM storage_backups WHERE status = 'running' OR last_restore_status = 'running'"
+            )
+        )
+    ).first()
+    return row[0] if row and row[0] else None
+
+
+async def prune_scheduled_backups(db: AsyncSession, schedule: dict) -> int:
+    """Keep the newest ``keep_last`` completed scheduled backups.
+
+    Runs on every sweep, not when a backup is started: pruning at the start
+    kept N completed ones plus the new one (N + 1). Nothing is pruned while a
+    scheduled backup is still running, so a failing run never costs an old
+    good backup.
+    """
+    if not schedule.get("enabled"):
+        return 0
+    running = (
+        await db.execute(
+            text("SELECT 1 FROM storage_backups WHERE created_by='schedule' AND status='running' LIMIT 1")
+        )
+    ).first()
+    if running:
+        return 0
+    keep = max(1, int(schedule.get("keep_last", 5)))
+    old = (
+        await db.execute(
+            text(
+                "SELECT id FROM storage_backups WHERE created_by='schedule' "
+                "AND status='completed' AND COALESCE(last_restore_status, '') != 'running' "
+                "ORDER BY created_at DESC OFFSET :keep"
+            ),
+            {"keep": keep},
+        )
+    ).all()
+    for (old_id,) in old:
+        await delete_backup_files(str(old_id))
+        await db.execute(
+            text("DELETE FROM storage_backups WHERE id=:id"), {"id": old_id}
+        )
+    return len(old)
+
+
 async def _maybe_run_scheduled_backup(db: AsyncSession, schedule: dict) -> Optional[str]:
     if not schedule.get("enabled"):
         return None
@@ -1365,17 +1467,22 @@ async def _maybe_run_scheduled_backup(db: AsyncSession, schedule: dict) -> Optio
         return None
     if schedule.get("frequency") == "weekly" and now.weekday() != int(schedule.get("weekday", 6)):
         return None
-    # Already ran in this window?
+    # One attempt per window. A failed run counts: retrying it on every sweep
+    # of the hour started up to twelve backups that failed the same way.
     row = (
         await db.execute(
             text(
                 "SELECT 1 FROM storage_backups WHERE created_by='schedule' "
-                "AND created_at > :since AND status != 'failed' LIMIT 1"
+                "AND created_at > :since LIMIT 1"
             ),
             {"since": now - timedelta(hours=23)},
         )
     ).first()
     if row:
+        return None
+    # A manual backup or a restore is in progress: wait for the next sweep
+    # (still inside the hour) instead of dumping the database under it.
+    if await backup_operation_running(db):
         return None
 
     backup_id = str(uuid.uuid4())
@@ -1391,26 +1498,23 @@ async def _maybe_run_scheduled_backup(db: AsyncSession, schedule: dict) -> Optio
     asyncio.create_task(
         run_backup(backup_id, "full" if include_ch else "config", include_ch, "schedule")
     )
-
-    # Prune old scheduled backups beyond keep_last.
-    keep = max(1, int(schedule.get("keep_last", 5)))
-    old = (
-        await db.execute(
-            text(
-                "SELECT id FROM storage_backups WHERE created_by='schedule' "
-                "AND status='completed' ORDER BY created_at DESC OFFSET :keep"
-            ),
-            {"keep": keep},
-        )
-    ).all()
-    for (old_id,) in old:
-        await delete_backup_files(str(old_id))
-        await db.execute(
-            text("DELETE FROM storage_backups WHERE id=:id"), {"id": old_id}
-        )
-    if old:
-        await db.commit()
     return backup_id
+
+
+async def apply_pending_retention(db: AsyncSession) -> Optional[list[dict]]:
+    """Apply a retention policy that was saved while the metrics database was
+    down. Returns the changes when it could be applied, None when nothing is
+    pending or the database is still away."""
+    if not await _get_setting(db, RETENTION_PENDING_KEY):
+        return None
+    settings = await get_retention_settings(db)
+    try:
+        changes = await apply_retention(db, settings, actor="system")
+    except Exception:
+        logger.info("pending retention not applied yet: the metrics database does not answer")
+        return None
+    await db.execute(text("DELETE FROM system_settings WHERE key = :k"), {"k": RETENTION_PENDING_KEY})
+    return changes
 
 
 async def storage_sweep_tick(db: AsyncSession) -> None:
@@ -1432,6 +1536,16 @@ async def storage_sweep_tick(db: AsyncSession) -> None:
         ),
         {"stale": datetime.now(timezone.utc) - timedelta(hours=BACKUP_STALE_AFTER_H)},
     )
+    # The same for restores: a restore whose worker died stayed "running"
+    # for ever, which kept Restore disabled and blocked new backups.
+    await db.execute(
+        text(
+            "UPDATE storage_backups SET last_restore_status='failed', "
+            "last_restore_error='restore interrupted (service restart)' "
+            "WHERE last_restore_status='running' AND (last_restore_at IS NULL OR last_restore_at < :stale)"
+        ),
+        {"stale": datetime.now(timezone.utc) - timedelta(hours=BACKUP_STALE_AFTER_H)},
+    )
 
     settings = await get_retention_settings(db)
     write_watchdog_policy(settings)
@@ -1446,7 +1560,13 @@ async def storage_sweep_tick(db: AsyncSession) -> None:
         logger.exception("importing the storage watchdog audit trail failed")
 
     try:
+        await apply_pending_retention(db)
+    except Exception:
+        logger.exception("applying the pending retention policy failed")
+
+    try:
         schedule = await get_backup_schedule(db)
+        await prune_scheduled_backups(db, schedule)
         await _maybe_run_scheduled_backup(db, schedule)
     except Exception:
         logger.exception("scheduled backup check failed")

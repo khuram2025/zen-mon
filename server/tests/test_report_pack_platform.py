@@ -703,7 +703,7 @@ def test_storage_utilization_volume_categories_and_events(monkeypatch):
     # 78.4% is within 10 points of the 85% purge threshold: a warning to act on.
     assert [(f["severity"], f["text"]) for f in sec["findings"]] == [
         ("warning", "The data volume is 78.4% full (automatic purge at 85%)")]
-    assert sec["findings"][0]["path"] == "/settings/general?tab=storage"
+    assert sec["findings"][0]["path"] == "/settings/general?tab=storage&section=retention"
     assert kpi(sec, "Purges in period")["value"] == "2"
     assert kpi(sec, "Space freed")["value"] == "1.0 GB"
     assert kpi(sec, "Automatic purge")["value"] == "At 85%"
@@ -774,7 +774,7 @@ def test_backup_status_overdue_option_and_never():
     assert kpi(never, "Schedule")["value"] == "Off"
     # Only the ZenPlus catalogue is read: say so, never "no backup has been taken".
     note = never["notes"][0]
-    assert note.startswith("No backup is recorded in the ZenPlus backup catalogue (Settings → Storage → "
+    assert note.startswith("No backup is recorded in the ZenPlus backup catalogue (Settings → System status → "
                            "Backups) as of ")
     assert note.endswith("Pre-upgrade snapshots and external backups are not listed in the catalogue.")
     assert not any("has been taken" in n for n in never["notes"])

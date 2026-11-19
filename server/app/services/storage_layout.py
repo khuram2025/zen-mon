@@ -1,4 +1,4 @@
-"""Disk and volume layout for Settings -> Storage -> Disks & Volumes.
+"""Disk and volume layout for Settings -> System status -> Disks & capacity.
 
 Facts come from the root-owned volume helper
 (/usr/local/sbin/zenplus-volume-helper, see scripts/zenplus-volume-helper);

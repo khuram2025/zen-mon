@@ -1055,7 +1055,7 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 120,
         })
 
-    # Storage management (Settings -> Storage): install the root-owned helper
+    # Storage management (Settings -> System status): install the root-owned helper
     # scripts, sudoers grant, backup dirs, and ClickHouse backups-disk config.
     # Idempotent — safe on every OTA, and required on appliances installed
     # before the Storage tab existed.

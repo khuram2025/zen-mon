@@ -613,7 +613,7 @@ def test_retention_endpoint(api, repair):
     assert body["raw_days"] == 30 and body["rollup_days"] == 90 and body["interface_days"] == 400
     assert body["exporter_minutes_days"] == 400 and body["earliest_raw"] == "2026-09-01T00:00:00.000Z"
     assert body["known"] is True
-    # Nothing configured in Settings -> Storage: every table keeps its install TTL.
+    # Nothing configured in Settings -> System status: every table keeps its install TTL.
     assert body["configured"] == {"raw_days": None, "rollup_days": None, "qos_days": None,
                                   "interface_days": None, "exporter_minutes_days": None}
     assert body["sampling_repair"] == {**NO_REPAIR, "affected": False}

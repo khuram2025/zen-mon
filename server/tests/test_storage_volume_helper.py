@@ -432,3 +432,46 @@ def test_pool_disk_carrying_root_lv_extents_is_not_a_system_disk(helper):
     devices = copy.deepcopy(BASE["lsblk"])
     devices[1]["children"] = [{"name": "ubuntu--vg-ubuntu--lv", "type": "lvm", "mountpoint": "/"}]
     assert helper.system_disks(devices) == {"sda"}
+
+
+# ─── Review 2026-11-19 ───────────────────────────────────────────────────────
+
+def test_the_operating_system_disk_is_never_evacuated_or_removed(helper, monkeypatch):
+    """The page says the system disk cannot be removed; a request naming its PV
+    must be refused by the helper too, not only hidden by the page."""
+    # sda carries /boot and the PV sda3; sdb is a second pool disk with room for everything.
+    state = _two_disk_pool(0, 0)
+    state["pvs"][1].update(pv_size=str(200 * GIB), pv_free=str(200 * GIB), pv_used="0")
+    fake = install(helper, monkeypatch, state=state)
+    with pytest.raises(helper.Rejected) as exc:
+        helper.verb_evacuate(["/dev/sda3"])
+    assert exc.value.code == "system_disk"
+    assert fake.mutations() == []
+
+    # Even emptied (by other means), its PV stays in the pool.
+    state["pvs"][0].update(pv_used="0", pv_free=str(98 * GIB))
+    fake = install(helper, monkeypatch, state=state)
+    with pytest.raises(helper.Rejected) as exc:
+        helper.verb_remove_disk(["/dev/sda3"])
+    assert exc.value.code == "system_disk"
+    assert fake.mutations() == []
+    # A pool disk that is not the system disk is unaffected.
+    assert helper.pv_system_disk("/dev/sdb") is None and helper.pv_system_disk("/dev/sda3") == "sda"
+
+
+def test_extend_refuses_an_ungrowable_filesystem_before_touching_the_volume(helper, monkeypatch):
+    fake = install(helper, monkeypatch, state=_with_free(10 * GIB, "btrfs"))
+    with pytest.raises(helper.Rejected) as exc:
+        helper.verb_extend(["/data", "all"])
+    assert exc.value.code == "unsupported"
+    assert fake.mutations() == []
+
+
+def test_extend_says_what_changed_when_the_filesystem_does_not_grow(helper, monkeypatch):
+    fake = install(helper, monkeypatch, state=_with_free(10 * GIB),
+                   fail={"resize2fs": (1, "", "resize2fs: Device or resource busy")})
+    with pytest.raises(helper.Failed) as exc:
+        helper.verb_extend(["/data", "all"])
+    message = str(exc.value)
+    assert "was extended by" in message and "filesystem was not grown" in message
+    assert fake.ran("lvextend")

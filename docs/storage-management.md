@@ -1,4 +1,8 @@
-# Storage management (Settings → Storage)
+# Storage management (Settings → System status)
+
+The storage sections of the System status tab (the tab that was called Storage; see
+`docs/system-status.md` for the page and `docs/system-status-review-2026-11-19.md` for the
+review that led to the rules marked 2026-11-19 below).
 
 ## Layout model
 
@@ -186,3 +190,29 @@ The UI stops disk-topology polling on retention, backup and activity tabs, and
 shares recent overview measurements across tab navigation. Mutation invalidation
 still refreshes affected data. Rendered fixture tests cover all five tabs with
 internal names and errors deliberately present in backend-shaped data.
+
+
+## Rules added by the 2026-11-19 review
+
+- **Manual purge** lists a partition only when its newest data can be dated (`max_time`, or
+  `max_date` for a Date key) and is older than the cutoff. A table without a dated
+  partition key (one partition `all`) is never dropped by partition; row-precise mode
+  still deletes from it.
+- **Upload pause**: starts at critical free space; ends when free space is above the
+  effective minimum and usage is 2 points under the critical percentage. The cleanup
+  state is not part of it.
+- **Refused removals**: a DROP ClickHouse refuses is skipped for 30 minutes
+  (`FAILED_ACTION_COOLDOWN_S`) so later candidates run, and is reported as the tick's error.
+- **No reading**: when no filesystem can be measured the tick records an error; it is not
+  "healthy".
+- **Volume helper**: `evacuate` and `remove-disk` refuse a PV on the operating-system disk
+  (`system_disk`); `extend` refuses a filesystem it cannot grow before touching the volume
+  (`unsupported`) and, when the filesystem does not grow after `lvextend`, says that the
+  volume was extended.
+- **Backups**: one backup or restore at a time (advisory lock `BACKUP_OPS_ADVISORY_LOCK`);
+  a failed backup's files are removed; a scheduled backup is attempted once per window;
+  "keep last N" is applied on every sweep to completed scheduled backups; a restore left
+  "running" by a restart is failed after 3 hours; an upload never overwrites a backup the
+  appliance holds; downloads are audited and are importable again (`download_tar_args`).
+- **Retention**: the policy is saved before history is asked; when the metrics database
+  is down, `storage.retention_pending` is set and the sweep applies the TTLs later.

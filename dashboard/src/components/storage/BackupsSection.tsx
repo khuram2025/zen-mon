@@ -21,7 +21,7 @@ import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import type { Backup, BackupSchedule } from './types'
-import { bytes, storageError } from './storageMath'
+import { bytes, scheduleInstant, storageError } from './storageMath'
 import { STORAGE_KEY, useOverview } from './useStorage'
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -53,6 +53,9 @@ export function BackupsSection() {
   const [deleteTarget, setDeleteTarget] = useState<Backup | null>(null)
   const [restoreComponents, setRestoreComponents] = useState<string[]>(['postgres', 'config'])
   const [restartOpen, setRestartOpen] = useState(false)
+  const [downloading, setDownloading] = useState<string[]>([])
+  // null = idle; a number is the upload percentage (0 until the browser reports progress).
+  const [importPct, setImportPct] = useState<number | null>(null)
 
   const effectiveSchedule = schedule ?? overview?.backup_schedule ?? null
   const scheduleValid = !effectiveSchedule || (
@@ -116,6 +119,8 @@ export function BackupsSection() {
   })
 
   async function download(b: Backup) {
+    if (downloading.includes(b.id)) return
+    setDownloading((ids) => [...ids, b.id])
     try {
       toast.info('Preparing download…', b.kind === 'full' ? 'Full backups can be large' : undefined)
       // No timeout: a full backup takes longer than the 30 s default to arrive.
@@ -128,25 +133,33 @@ export function BackupsSection() {
       URL.revokeObjectURL(url)
     } catch (e) {
       toast.error('Download failed', storageError(e))
+    } finally {
+      setDownloading((ids) => ids.filter((id) => id !== b.id))
     }
   }
 
   async function upload(file: File) {
+    if (importPct !== null) return
     const fd = new FormData()
     fd.append('file', file)
+    setImportPct(0)
     try {
       await api.post('/system/storage/backups/upload', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 0,   // as large as the backup it restores
+        onUploadProgress: (p) => { if (p.total) setImportPct(Math.min(100, Math.floor((p.loaded / p.total) * 100))) },
       })
       toast.success('Backup imported')
       invalidate()
     } catch (e) {
       toast.error('Import failed', storageError(e))
+    } finally {
+      setImportPct(null)
     }
   }
 
-  const anyRestoreDone = backups?.some((b) => b.last_restore_status === 'completed')
+  const restartNeeded = backups?.some((b) => b.restore_needs_restart === true)
+  const backupRunning = backups?.some((b) => b.status === 'running') ?? false
 
   return (
     <Card>
@@ -171,14 +184,16 @@ export function BackupsSection() {
             <Switch checked={includeCh} onCheckedChange={setIncludeCh} />
             Include metrics data
           </label>
-          <Button onClick={() => create.mutate()} disabled={create.isPending}>
+          <Button onClick={() => create.mutate()} disabled={create.isPending || backupRunning}
+            title={backupRunning ? 'A backup is already running' : undefined}>
             {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
             Create backup
           </Button>
           <input ref={fileInputRef} type="file" accept=".tar.gz,.tgz,application/gzip" className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = '' }} />
-          <Button variant="outline" type="button" onClick={() => fileInputRef.current?.click()}>
-            <Upload className="h-4 w-4" /> Import
+          <Button variant="outline" type="button" onClick={() => fileInputRef.current?.click()} disabled={importPct !== null}>
+            {importPct !== null ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            {importPct === null ? 'Import' : importPct >= 100 ? 'Importing…' : `Uploading… ${importPct}%`}
           </Button>
         </div>
 
@@ -189,7 +204,7 @@ export function BackupsSection() {
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Clock className="h-4 w-4 text-info" /> Scheduled backups
               </div>
-              <Switch checked={effectiveSchedule.enabled}
+              <Switch checked={effectiveSchedule.enabled} aria-label="Scheduled backups"
                 onCheckedChange={(v) => setSchedule({ ...effectiveSchedule, enabled: v })} />
             </div>
             {effectiveSchedule.enabled && (
@@ -228,7 +243,7 @@ export function BackupsSection() {
                       value={effectiveSchedule.hour_utc}
                       onChange={(e) => setSchedule({ ...effectiveSchedule, hour_utc: Number(e.target.value) })} />
                     <span className="text-muted">:00 UTC{Number.isInteger(effectiveSchedule.hour_utc) &&
-                      ` (${regionalDate(new Date(Date.UTC(2000, 0, 1, effectiveSchedule.hour_utc)), 'time', [], { hour: '2-digit', minute: '2-digit' })} local)`}</span>
+                      ` (${regionalDate(scheduleInstant(effectiveSchedule.hour_utc), 'time', [], { hour: '2-digit', minute: '2-digit' })} local)`}</span>
                   </div>
                 </label>
                 <label className="text-xs text-text2">
@@ -303,9 +318,10 @@ export function BackupsSection() {
                   </Td>
                   <Td>
                     <div className="flex justify-end gap-1">
-                      <Button variant="ghost" size="icon" title="Download" disabled={b.status !== 'completed'}
+                      <Button variant="ghost" size="icon" title={downloading.includes(b.id) ? 'Preparing download…' : 'Download'}
+                        disabled={b.status !== 'completed' || downloading.includes(b.id)}
                         onClick={() => download(b)}>
-                        <Download className="h-4 w-4" />
+                        {downloading.includes(b.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                       </Button>
                       <Button variant="ghost" size="icon" title="Restore" disabled={b.status !== 'completed' || b.last_restore_status === 'running'}
                         onClick={() => {
@@ -314,7 +330,8 @@ export function BackupsSection() {
                         }}>
                         <RotateCcw className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" title="Delete" disabled={b.status === 'running'}
+                      <Button variant="ghost" size="icon" title={b.last_restore_status === 'running' ? 'Restore in progress' : 'Delete'}
+                        disabled={b.status === 'running' || b.last_restore_status === 'running'}
                         onClick={() => setDeleteTarget(b)}>
                         <Trash2 className="h-4 w-4 text-danger" />
                       </Button>
@@ -326,7 +343,7 @@ export function BackupsSection() {
           </Table>
         )}
 
-        {anyRestoreDone && (
+        {restartNeeded && (
           <div className="flex items-center justify-between rounded-lg border border-info/30 bg-info/10 px-3 py-2">
             <p className="text-xs text-info">
               A restore has completed. Restart the application services so every component
@@ -361,7 +378,7 @@ export function BackupsSection() {
                 <label key={c.id} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
-                    className="h-4 w-4 accent-[var(--primary,#3b82f6)]"
+                    className="h-4 w-4 accent-primary"
                     checked={restoreComponents.includes(c.id)}
                     onChange={(e) =>
                       setRestoreComponents(e.target.checked
@@ -388,7 +405,7 @@ export function BackupsSection() {
           open={deleteTarget !== null}
           onOpenChange={(o) => !o && setDeleteTarget(null)}
           title="Delete backup?"
-          description={`The backup from ${deleteTarget ? regionalDate(new Date(deleteTarget.created_at), 'datetime') : ''} (${deleteTarget ? bytes(deleteTarget.size_bytes) : ''}) will be permanently removed.`}
+          description={`The backup from ${deleteTarget ? regionalDate(new Date(deleteTarget.created_at), 'datetime') : ''}${deleteTarget?.status === 'completed' ? ` (${bytes(deleteTarget.size_bytes)})` : ''} will be permanently removed.`}
           confirmText="Delete"
           destructive
           loading={remove.isPending}

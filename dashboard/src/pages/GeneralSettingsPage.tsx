@@ -2,7 +2,7 @@ import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useEffect, useState } from 'react'
 import { Navigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, Download, HardDrive, Info, KeyRound, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
+import { Activity, Building2, Download, Info, KeyRound, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, ServerCog, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import {
@@ -26,7 +26,8 @@ import { UpdatesTabContent } from '@/components/UpdatesTabContent'
 import { LicensesTabContent } from '@/components/LicensesTabContent'
 import { SensorsCard } from '@/components/SensorsCard'
 import { SupportTabContent } from '@/components/SupportTabContent'
-import { StorageTabContent } from '@/components/StorageTabContent'
+import { SystemStatusTabContent } from '@/components/SystemStatusTabContent'
+import { SYSTEM_STATUS_TAB, SYSTEM_STATUS_TAB_ALIASES } from '@/components/system/sections'
 import { SecurityTabContent } from '@/components/SecurityTabContent'
 import { SshTerminalCard } from '@/components/settings/SshTerminalCard'
 import { CompanySettings } from '@/components/settings/CompanySettings'
@@ -47,7 +48,8 @@ const TABS = [
   { value: 'users', label: 'Users & Access', icon: Users, permission: ACCESS_TAB_PERMISSIONS },
   { value: 'licenses', label: 'Licenses', icon: KeyRound, permission: 'system.admin' },
   { value: 'updates', label: 'Updates', icon: Download, permission: 'system.admin' },
-  { value: 'storage', label: 'Storage', icon: HardDrive, permission: 'system.admin' },
+  // The appliance's own health and its storage. The address stays `storage` (role page lists, links in sent reports).
+  { value: 'storage', label: 'System status', icon: ServerCog, permission: 'system.admin' },
   { value: 'security', label: 'Security & TLS', icon: ShieldCheck, permission: 'system.admin' },
   { value: 'sensors', label: 'Sensors', icon: Plug, permission: 'settings.manage' },
   { value: 'mibs', label: 'MIB Library', icon: Upload, permission: 'settings.manage' },
@@ -85,6 +87,13 @@ export function GeneralSettingsPage() {
 
   // Monitoring Templates moved to Network → Device Templates (1.25.10).
   if (searchParams.get('tab') === 'templates') return <Navigate to="/device-templates" replace />
+  // "System status" under another spelling (?tab=system-status, typed by hand) opens it at its address, so the
+  // sidebar entry and the breadcrumb match. `?tab=storage`, the tab's old name, is that address and needs nothing.
+  if (SYSTEM_STATUS_TAB_ALIASES.includes(searchParams.get('tab') || '')) {
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', SYSTEM_STATUS_TAB)
+    return <Navigate to={`/settings/general?${next.toString()}`} replace />
+  }
 
   return (
     <div className="space-y-5">
@@ -93,7 +102,7 @@ export function GeneralSettingsPage() {
           <Settings className="h-5 w-5 text-primary" /> General Settings
         </h1>
         <p className="text-xs text-muted">
-          Company information, email, appearance, users &amp; access control, licenses, updates, sensors, MIBs, and your profile
+          Company information, email, appearance, users &amp; access control, licenses, updates, system status, sensors, MIBs, and your profile
         </p>
       </div>
 
@@ -130,7 +139,7 @@ export function GeneralSettingsPage() {
           <UpdatesTabContent />
         </TabsContent>
         <TabsContent value="storage">
-          <StorageTabContent />
+          <SystemStatusTabContent />
         </TabsContent>
         <TabsContent value="security">
           <SecurityTabContent />

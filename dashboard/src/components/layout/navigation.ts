@@ -22,6 +22,7 @@ import {
   GitBranch,
   Globe2,
   HardDrive,
+  ServerCog,
   HeartPulse,
   History,
   Inbox,
@@ -380,7 +381,8 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('security', 'Security & TLS', ShieldCheck, 'system.admin'),
           settingsTab('licenses', 'Licenses', KeyRound, 'system.admin'),
           settingsTab('updates', 'Updates', Download, 'system.admin'),
-          settingsTab('storage', 'Storage', HardDrive, 'system.admin'),
+          // The appliance's own health and its storage; the address keeps the tab's old name.
+          settingsTab('storage', 'System status', ServerCog, 'system.admin'),
           settingsTab('sensors', 'Sensors', Plug, 'settings.manage'),
           settingsTab('mibs', 'MIB Library', Upload, 'settings.manage'),
           settingsTab('support', 'Support', LifeBuoy, 'system.admin'),

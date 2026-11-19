@@ -3028,7 +3028,7 @@ function RetentionCard() {
     <Card>
       <CardHeader className="pb-3">
         <button type="button" className="flex w-full items-center justify-between gap-2 text-left" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-          <SectionTitle icon={Database} hint="How long each level of detail is kept. Changed in Settings → Storage.">
+          <SectionTitle icon={Database} hint="How long each level of detail is kept. Changed in Settings → System status → Retention & cleanup.">
             Data retention
           </SectionTitle>
           <ChevronDown className={cn('h-4 w-4 shrink-0 text-text2 transition-transform', open && 'rotate-180')} aria-hidden />

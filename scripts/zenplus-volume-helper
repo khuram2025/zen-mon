@@ -270,6 +270,21 @@ def system_disks(devices):
     }
 
 
+def pv_system_disk(pv_path, devices=None):
+    """Name of the system disk a physical volume sits on, or None.
+
+    The page says such a disk "cannot be removed"; the helper has to refuse it
+    too, because a request can name any PV of the data volume group.
+    """
+    devices = lsblk() if devices is None else devices
+    system = system_disks(devices)
+    name = os.path.basename(pv_path)
+    for dev in devices:
+        if dev.get("name") in system and any(node.get("name") == name for node in _walk([dev])):
+            return dev.get("name")
+    return None
+
+
 def validate_disk(disk):
     if not isinstance(disk, str) or not DISK_RE.match(disk):
         raise Rejected(f"{disk!r} is not a whole-disk device path", "invalid_device")
@@ -409,6 +424,9 @@ def verb_add_disk(args):
             "wiped": wipe}
 
 
+GROWABLE_FILESYSTEMS = ("ext2", "ext3", "ext4", "xfs")
+
+
 def _grow_filesystem(lv, mount_row):
     fstype = mount_row.get("fstype") or ""
     if fstype in ("ext2", "ext3", "ext4"):
@@ -441,9 +459,21 @@ def verb_extend(args):
         raise Rejected("size must be 'all' or a byte count")
     if extents <= 0:
         raise Rejected("there is no unallocated space in the volume group to add", "no_space")
+    # Checked before the volume is touched: a filesystem that cannot be grown
+    # here used to be found out only after lvextend, which left the volume
+    # larger than its filesystem and the space unusable.
+    fstype = mount_row.get("fstype") or ""
+    if fstype not in GROWABLE_FILESYSTEMS:
+        raise Rejected(f"{fstype or 'this'} filesystems cannot be grown online here", "unsupported")
     before = _int(lv.get("lv_size"))
     run(["lvextend", "-l", f"+{extents}", f"{vg['vg_name']}/{lv['lv_name']}"], timeout=600)
-    fstype = _grow_filesystem(lv, mount_row)
+    try:
+        fstype = _grow_filesystem(lv, mount_row)
+    except (Failed, OSError, subprocess.SubprocessError) as exc:
+        # Say what did change: the caller must not report "nothing changed".
+        raise Failed(f"the volume was extended by {extents * extent} bytes but its filesystem was "
+                     f"not grown, so the space is not usable yet ({exc}). Contact support to "
+                     "finish growing the filesystem.") from exc
     after = next((r for r in lvs() if r.get("lv_path") == lv.get("lv_path")), {})
     return {"mount": mount_row.get("target"), "vg": vg["vg_name"], "lv": lv["lv_name"],
             "fstype": fstype, "added_bytes": extents * extent,
@@ -491,6 +521,9 @@ def verb_evacuate(args):
     no_pvmove()
     pv_rows = pvs()
     row, vg = data_pv(pv_path, pv_rows)
+    if pv_system_disk(pv_path):
+        raise Rejected(f"{pv_path} is on the disk that holds the operating system; "
+                       "that disk cannot be removed", "system_disk")
     used = _int(row.get("pv_used"))
     if used <= 0:
         raise Rejected(f"{pv_path} holds no data; it can be removed directly", "empty")
@@ -521,6 +554,9 @@ def verb_remove_disk(args):
     row, vg = data_pv(pv_path)
     if _int(vg.get("pv_count")) <= 1:
         raise Rejected("the last disk of a volume group cannot be removed", "last_pv")
+    if pv_system_disk(pv_path):
+        raise Rejected(f"{pv_path} is on the disk that holds the operating system; "
+                       "that disk cannot be removed", "system_disk")
     if _int(row.get("pv_used")) > 0:
         raise Rejected(f"{pv_path} still holds data; move its data off first", "not_empty")
     run(["vgreduce", vg["vg_name"], pv_path], timeout=120)

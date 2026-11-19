@@ -15,7 +15,7 @@ import {
 import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
-import { bytes, storageError } from './storageMath'
+import { CLEANUP_TIMEOUT_MS, autoPurgeError, autoPurgePayload, bytes, purgeOutcome, storageError } from './storageMath'
 import type { AutoPurge, Overview } from './types'
 import { STORAGE_KEY, useOverview } from './useStorage'
 
@@ -47,16 +47,6 @@ function retentionError(raw: string, min: number): string | null {
   return null
 }
 
-function autoPurgeError(a: AutoPurge): string | null {
-  if (!a.enabled) return null
-  if (!(a.threshold_pct >= 50 && a.threshold_pct <= 98)) return 'Threshold must be 50–98%'
-  if (!(a.target_pct >= 40 && a.target_pct <= 95)) return 'Target must be 40–95%'
-  if (a.target_pct >= a.threshold_pct) return 'Target must be below the threshold'
-  if (!(a.min_keep_days >= 1 && a.min_keep_days <= 365)) return 'Minimum keep must be 1–365 days'
-  if (!(a.min_free_gib >= 0.5 && a.min_free_gib <= 1024)) return 'Minimum free space must be 0.5–1024 GiB'
-  return null
-}
-
 function RetentionCard({ overview }: { overview: Overview }) {
   const qc = useQueryClient()
   const [days, setDays] = useState<Record<string, string>>({})
@@ -68,6 +58,8 @@ function RetentionCard({ overview }: { overview: Overview }) {
     .filter(Boolean)
   const autoError = autoPurgeError(effectiveAuto)
   const dirty = Object.keys(days).length > 0 || auto !== null
+  const unmeasured = !!overview.clickhouse_error
+  const unavailable = <span className="text-muted">Unavailable</span>
 
   const save = useMutation({
     mutationFn: async () => {
@@ -79,12 +71,14 @@ function RetentionCard({ overview }: { overview: Overview }) {
       return (await api.put('/system/storage/retention', {
         categories,
         table_overrides: overview.table_overrides || {},
-        auto_purge: effectiveAuto,
+        auto_purge: autoPurgePayload(effectiveAuto, overview.auto_purge),
       })).data
     },
     onSuccess: (data: any) => {
       const failed = (data.errors || []).length
       if (failed) toast.error('Some retention changes could not be applied', 'See the Activity log')
+      // Saved, but the history store did not answer: the appliance applies it by itself when it is back.
+      else if (data.pending) toast.warning('Retention policy saved', 'History retention will be applied when monitoring history is available again.')
       else toast.success('Retention policy saved', 'Old history will expire automatically')
       setDays({})
       setAuto(null)
@@ -108,6 +102,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
+        {unmeasured && <p role="status" className="text-xs text-warning">History sizes could not be measured. Refresh to retry.</p>}
         <Table>
           <THead>
             <Tr>
@@ -131,10 +126,10 @@ function RetentionCard({ overview }: { overview: Overview }) {
                       </div>
                       <div className="text-xs text-muted">{c.description}</div>
                     </Td>
-                    <Td className="text-right tabular-nums">{bytes(c.size_bytes)}</Td>
-                    <Td className="text-right tabular-nums text-text2">{c.daily_bytes ? bytes(c.daily_bytes) : '—'}</Td>
+                    <Td className="text-right tabular-nums">{unmeasured ? unavailable : bytes(c.size_bytes)}</Td>
+                    <Td className="text-right tabular-nums text-text2">{unmeasured ? unavailable : c.daily_bytes ? bytes(c.daily_bytes) : '—'}</Td>
                     <Td className="text-right tabular-nums text-text2">
-                      {c.unbounded
+                      {unmeasured ? unavailable : c.unbounded
                         ? <span className="text-warning" title="Some history has no retention limit">unbounded</span>
                         : c.projected_bytes ? bytes(c.projected_bytes) : '—'}
                     </Td>
@@ -190,7 +185,9 @@ function RetentionCard({ overview }: { overview: Overview }) {
                 <label key={field} className="text-xs text-text2">
                   {label}
                   <div className="mt-1 flex items-center gap-2">
-                    <Input type="number" min={min} max={max} className="h-8 w-20 text-right tabular-nums"
+                    <Input type="number" min={min} max={max} step={field === 'min_free_gib' ? 'any' : 1}
+                      className={cn('h-8 w-20 text-right tabular-nums', autoError?.field === field && 'border-danger')}
+                      aria-invalid={autoError?.field === field}
                       value={Number.isNaN(effectiveAuto[field]) ? '' : effectiveAuto[field]}
                       onChange={(e) => setAutoField(field, e.target.value)} />
                     <span className="text-muted">{unit}</span>
@@ -199,7 +196,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
               ))}
             </div>
           )}
-          {autoError && <div className="mt-2 text-xs text-danger">{autoError}</div>}
+          {autoError && <div role="alert" className="mt-2 text-xs text-danger">{autoError.message}</div>}
         </div>
 
         <div className="flex items-center justify-end gap-3">
@@ -229,7 +226,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
 
   const request = (dryRun: boolean) => api.post('/system/storage/purge', {
     category, older_than_days: Number(olderThan), dry_run: dryRun,
-  })
+  }, { timeout: CLEANUP_TIMEOUT_MS })
 
   const preview = useMutation({
     mutationFn: async () => (await request(true)).data,
@@ -242,8 +239,8 @@ function PurgeCard({ overview }: { overview: Overview }) {
     onSuccess: (data: any) => {
       setConfirmOpen(false)
       setPlan(null)
-      toast.success('Purge scheduled',
-        `${bytes(data.scheduled_bytes ?? data.freed_bytes)} scheduled; capacity may take about 10 minutes to return`)
+      const outcome = purgeOutcome(data)
+      toast[outcome.kind](outcome.title, outcome.detail)
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
     onError: (e: any) => { setConfirmOpen(false); toast.error('Purge failed', storageError(e)) },
@@ -270,7 +267,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
                 <SelectTrigger className="h-9"><SelectValue placeholder="Select category…" /></SelectTrigger>
                 <SelectContent>
                   {overview.categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>{c.label} ({bytes(c.size_bytes)})</SelectItem>
+                    <SelectItem key={c.id} value={c.id}>{c.label} ({overview.clickhouse_error ? 'Unavailable' : bytes(c.size_bytes)})</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -331,11 +328,13 @@ function PurgeCard({ overview }: { overview: Overview }) {
 function OsCleanupCard({ overview }: { overview: Overview }) {
   const qc = useQueryClient()
   const [journalMb, setJournalMb] = useState('500')
-  const journalValid = Number(journalMb) >= 50 && Number(journalMb) <= 5000
+  const [confirm, setConfirm] = useState<'vacuum_journal' | 'apt_clean' | null>(null)
+  const journalValid = Number.isInteger(Number(journalMb)) && Number(journalMb) >= 50 && Number(journalMb) <= 5000
 
   const cleanup = useMutation({
     mutationFn: async (actions: string[]) =>
-      (await api.post('/system/storage/os-cleanup', { actions, journal_max_mb: Number(journalMb) })).data,
+      (await api.post('/system/storage/os-cleanup', { actions, journal_max_mb: Number(journalMb) }, { timeout: CLEANUP_TIMEOUT_MS })).data,
+    onSettled: () => setConfirm(null),
     onSuccess: (data: any) => {
       if (data.errors?.length) toast.error('Cleanup finished with errors', 'Some items could not be cleared. Refresh and contact support if this continues.')
       else toast.success('Appliance cleanup complete', `Freed ${bytes(data.freed_bytes)} on the system disk`)
@@ -367,20 +366,40 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
               <span className="text-muted">MB</span>
             </div>
           </label>
-          <Button variant="outline" disabled={cleanup.isPending || !journalValid} onClick={() => cleanup.mutate(['vacuum_journal'])}>
+          <Button variant="outline" disabled={cleanup.isPending || !journalValid} onClick={() => setConfirm('vacuum_journal')}>
             {cleanup.isPending ? <Loader2 className="animate-spin" /> : <Eraser />}
             Clear older service logs
           </Button>
-          <Button variant="outline" disabled={cleanup.isPending || overview.apt_cache_bytes == null || overview.apt_cache_bytes <= 0} onClick={() => cleanup.mutate(['apt_clean'])}>
+          <Button variant="outline" disabled={cleanup.isPending || overview.apt_cache_bytes == null || overview.apt_cache_bytes <= 0} onClick={() => setConfirm('apt_clean')}>
             {cleanup.isPending ? <Loader2 className="animate-spin" /> : <Trash2 />}
             Clear update cache ({overview.apt_cache_bytes == null ? 'unavailable' : bytes(overview.apt_cache_bytes)})
           </Button>
         </div>
         {!journalValid && (
           <div className="mt-2 flex items-center gap-1.5 text-xs text-danger">
-            <AlertTriangle className="h-3.5 w-3.5" /> Log size must be 50–5000 MB
+            <AlertTriangle className="h-3.5 w-3.5" /> Log size must be a whole number, 50–5000 MB
           </div>
         )}
+        <ConfirmDialog
+          open={confirm === 'vacuum_journal'}
+          onOpenChange={(o) => !o && setConfirm(null)}
+          title="Clear older service logs?"
+          description={`Service logs are reduced to ${journalMb} MB, oldest entries first. Removed entries cannot be recovered.`}
+          confirmText="Clear logs"
+          destructive
+          loading={cleanup.isPending}
+          onConfirm={() => cleanup.mutate(['vacuum_journal'])}
+        />
+        <ConfirmDialog
+          open={confirm === 'apt_clean'}
+          onOpenChange={(o) => !o && setConfirm(null)}
+          title="Clear the update cache?"
+          description="Downloaded update files are removed. Files a later update needs are downloaded again."
+          confirmText="Clear cache"
+          destructive
+          loading={cleanup.isPending}
+          onConfirm={() => cleanup.mutate(['apt_clean'])}
+        />
       </CardContent>
     </Card>
   )

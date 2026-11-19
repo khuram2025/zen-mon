@@ -52,7 +52,7 @@ export interface NfResult<T> {
 }
 
 /** `GET /netflow/retention`. */
-/** Retention configured in Settings → Storage per flow table (null: install-time TTL applies). */
+/** Retention configured in Settings → System status (Retention & cleanup) per flow table (null: install-time TTL applies). */
 export interface NfRetentionConfigured {
   raw_days: number | null
   rollup_days: number | null

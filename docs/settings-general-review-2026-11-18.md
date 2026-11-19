@@ -117,14 +117,16 @@ server; add "follow the system theme".
 
 ## Storage
 
+The tab is now **System status** (`docs/system-status.md`); a full review of it followed on 2026-11-19.
+
 | Finding | State |
 |---|---|
 | Disk actions (add, claim, grow) timed out in the browser after 30 s while the server kept working for up to 30 minutes | **Fixed** |
 | Backup download and import timed out after 30 s | **Fixed** (browser side) |
 | nginx's `/api/` location sets no body-size limit on the installer path, so a backup upload over 1 MB is refused (413) | **Open**: needs an installer / helper change and a streamed, ticketed download instead of an in-memory blob |
 | Clearing a retention field did not restore anything, while the page said "blank uses the built-in retention" | **Wording fixed**; restoring the shipped per-table TTLs is **Open** (they differ per table, so one number per category could shorten history) |
-| A retention save fails entirely while ClickHouse is down | **Open**: save the policy first, report TTL errors separately |
-| "Keep last N" scheduled backups keeps N + 1 | **Open** |
+| A retention save fails entirely while ClickHouse is down | **Fixed** on 2026-11-19 (`docs/system-status-review-2026-11-19.md`): the policy is saved first and the TTLs are applied when the database answers |
+| "Keep last N" scheduled backups keeps N + 1 | **Fixed** on 2026-11-19 |
 
 ## Security & TLS
 

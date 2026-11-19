@@ -11,6 +11,7 @@ from app.core.gzip_request import GzipRequestMiddleware
 from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_runs, report_schedules, discovery, discovery_v2, discovery_rules, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, ncm_compliance, host_alert_rules, link_utilization, udt, netpath, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
+from app.api.v1 import system_status as system_status_api
 from app.api.v1 import security_settings as security_api
 from app.api.v1.probe_trust import router as probe_trust_router
 from app.api.v1.ssh_terminal import router as ssh_terminal_router
@@ -156,6 +157,7 @@ def create_app() -> FastAPI:
     app.include_router(subscription.router, prefix="/api/v1")
     app.include_router(system_updates.router, prefix="/api/v1")
     app.include_router(storage_api.router, prefix="/api/v1")
+    app.include_router(system_status_api.router, prefix="/api/v1")
     app.include_router(security_api.router, prefix="/api/v1")
     app.include_router(probe_trust_router, prefix="/api/v1")
     app.include_router(ssh_terminal_router, prefix="/api/v1")
@@ -295,6 +297,10 @@ def create_app() -> FastAPI:
         # Advisory-locked, so safe with multiple Uvicorn workers.
         from app.services.storage_service import storage_sweeper_loop
         app.state.storage_sweeper = asyncio.create_task(storage_sweeper_loop())
+        # System status: one CPU / memory / load sample a minute, kept 24 h in
+        # Redis. Every worker measures; the one that claims the minute writes.
+        from app.services.appliance_health import sampler_loop as appliance_health_sampler_loop
+        app.state.appliance_health_sampler = asyncio.create_task(appliance_health_sampler_loop())
         # Agent packages: reconcile the DB against the on-disk artifact store so
         # a release that shipped a new MSI is downloadable without a manual
         # publish step.
@@ -358,7 +364,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
+        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "appliance_health_sampler", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
