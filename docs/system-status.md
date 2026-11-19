@@ -97,7 +97,12 @@ no new service, no ClickHouse table.
   24 h) are returned in 5-minute steps with the mean and the busiest minute of
   each step.
 - A step nothing was sampled in has `null` readings: the chart breaks the line
-  there instead of joining it across an outage.
+  there instead of joining it across an outage. A reading with nothing sampled
+  directly before and after it is drawn as a dot, because a line needs two
+  neighbouring points (`isolatedReadings`).
+- The time axis always spans the whole selected range and ends at the newest
+  step (`chartWindow`): 24 h is 24 hours wide however little was collected, so
+  the time before the first sample is visibly empty.
 - Without Redis the page still shows current values and says that history is
   unavailable. After the update that adds the page, history starts empty and
   says how much of the range has been collected.

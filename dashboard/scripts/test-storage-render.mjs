@@ -14,10 +14,12 @@ export const useStorageStatus = () => ({ data: status, isLoading: false, refetch
 export const useStorageEvents = () => ({ data: events, isLoading: false });
 export const useStorageAction = () => ({ mutate: () => {}, mutateAsync: async () => ({}), isPending: false });`
 const api = `import { backups } from ${JSON.stringify(fixture)}; export const api = { get: async () => ({ data: backups }), post: async () => { throw new Error('Fixture: operations disabled') }, put: async () => { throw new Error('Fixture: operations disabled') }, delete: async () => { throw new Error('Fixture: operations disabled') } };`
-const fakeSystemHooks = `import { systemStatus, systemHistory } from ${JSON.stringify(fixture)};
+const fakeSystemHooks = `import { systemStatus, systemHistory, systemHistoryFirst } from ${JSON.stringify(fixture)};
+// The preview shows the first minutes of history with ?history=first.
+const history = () => typeof location !== 'undefined' && new URLSearchParams(location.search).get('history') === 'first' ? systemHistoryFirst : systemHistory;
 export const SYSTEM_STATUS_KEY = ['system','status'];
 export const useSystemStatus = () => ({ data: systemStatus, isLoading: false, isError: false, isFetching: false, refetch: () => {} });
-export const useSystemHistory = () => ({ data: systemHistory, isLoading: false, isError: false, refetch: () => {} });`
+export const useSystemHistory = () => ({ data: history(), isLoading: false, isError: false, refetch: () => {} });`
 const plugins = [{ name: 'storage-fixtures', setup(b) {
   b.onResolve({ filter: /(?:^|\/)useSystemStatus$/ }, () => ({ path: 'system-hooks', namespace: 'fixture' }))
   b.onResolve({ filter: /(?:^|\/)useStorage$/ }, () => ({ path: 'hooks', namespace: 'fixture' }))
