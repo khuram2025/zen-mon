@@ -221,7 +221,7 @@ function HistoryCard({ history, loading, failed, hours, onHours }: {
         )}
         {history?.available && points.length > 0 && (
           <>
-            <Suspense fallback={<div className="h-60" />}><HealthHistoryChart points={points} hours={hours} /></Suspense>
+            <Suspense fallback={<div className="h-60" />}><HealthHistoryChart points={points} hours={hours} bucketS={history.bucket_s} /></Suspense>
             <dl className="grid gap-x-6 gap-y-1 text-xs text-text2 sm:grid-cols-2">
               <div className="flex justify-between gap-3"><dt>CPU average / busiest minute</dt><dd className="tabular-nums">{cpu ? `${pct(cpu.mean)} / ${pct(cpu.peak)}` : UNAVAILABLE}</dd></div>
               <div className="flex justify-between gap-3"><dt>Memory average / highest</dt><dd className="tabular-nums">{mem ? `${pct(mem.mean)} / ${pct(mem.peak)}` : UNAVAILABLE}</dd></div>

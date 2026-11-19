@@ -65,6 +65,24 @@ assert.equal(m.seriesStats([points[1]], 'cpu', 'cpu_max'), null)
 assert.deepEqual(m.historyCoverage({ points, bucket_s: 300, hours: 24 }), { covered_s: 600, complete: false })
 assert.equal(m.historyCoverage({ points: Array.from({ length: 288 }, () => points[0]), bucket_s: 300, hours: 24 }).complete, true)
 
+// A reading with no sampled neighbour gets a dot (a line needs two points), so the first minutes of
+// history and a single sample between two outages are visible. Readings that join a line get none.
+const pt = (t, cpu) => ({ t, cpu, cpu_max: cpu, iowait: null, mem: cpu, mem_max: cpu, swap: null, load: null, disk: null })
+assert.deepEqual(m.isolatedReadings([pt(300, 12)], 'cpu'), [[300000, 12]])                       // the very first step after an update
+assert.deepEqual(m.isolatedReadings(points, 'cpu'), [[100000, 10], [700000, 30]])               // each side of a gap
+assert.deepEqual(m.isolatedReadings([pt(0, 5), pt(300, 6)], 'cpu'), [])                          // two neighbours draw a line
+assert.deepEqual(m.isolatedReadings([pt(0, 5), pt(300, 6), pt(600, null), pt(900, 0)], 'cpu'), [[900000, 0]])  // a real zero is a reading
+assert.deepEqual(m.isolatedReadings([pt(0, null), pt(300, null)], 'cpu'), [])                    // nothing sampled, nothing drawn
+assert.deepEqual(m.isolatedReadings([pt(300, 12)], 'iowait'), [])                                // per reading, not per step
+assert.deepEqual(m.isolatedReadings([], 'cpu'), [])
+
+// The chart always spans the selected range and ends at the newest step: 24 h is 24 hours wide however
+// little was collected, and the time before the first sample stays visibly empty.
+assert.deepEqual(m.chartWindow([pt(86400, 1)], 24, 300), [300000, 86700000])
+assert.deepEqual(m.chartWindow([pt(7200, 1), pt(7260, 2)], 1, 60), [3720000, 7320000])
+assert.equal(m.chartWindow([], 24, 300), null)
+assert.equal(m.chartWindow([pt(86400, 1)], 0, 300), null)
+
 // Storage change over the window, in words.
 assert.equal(m.storageChange(null), null)
 assert.equal(m.storageChange({ bytes: 2.4 * GIB, hours: 23.5 }), 'Storage use grew by 2.4 GiB over the last 24 hours.')

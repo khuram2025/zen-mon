@@ -27,5 +27,9 @@ export const systemStatus = {
   internal_note: raw + ' zenplus-api.service postgresql@16-main.service',
 }
 const t0 = Math.floor(Date.now() / 1000 / 300) * 300 - 3000
+// Steps 5 and 7 were not sampled, which leaves step 6 without a neighbour: the chart marks it with a dot.
 export const systemHistory = { available: true, bucket_s: 300, hours: 24, since: new Date(t0 * 1000).toISOString(), samples: 30, disk_change: { bytes: 2.4 * G, hours: 23.5 },
-  points: Array.from({ length: 11 }, (_, i) => i === 5 ? { t: t0 + i * 300, cpu: null, cpu_max: null, iowait: null, mem: null, mem_max: null, swap: null, load: null, disk: null } : { t: t0 + i * 300, cpu: 4 + i, cpu_max: 20 + i, iowait: 1, mem: 60 + i, mem_max: 62 + i, swap: 0, load: 0.5, disk: 61 }) }
+  points: Array.from({ length: 11 }, (_, i) => i === 5 || i === 7 ? { t: t0 + i * 300, cpu: null, cpu_max: null, iowait: null, mem: null, mem_max: null, swap: null, load: null, disk: null } : { t: t0 + i * 300, cpu: 4 + i, cpu_max: 20 + i, iowait: 1, mem: 60 + i, mem_max: 62 + i, swap: 0, load: 0.5, disk: 61 }) }
+// The first minutes after the update that adds the page: one 5-minute step in a 24-hour range (preview: ?history=first).
+export const systemHistoryFirst = { available: true, bucket_s: 300, hours: 24, since: new Date((t0 + 3000) * 1000).toISOString(), samples: 4, disk_change: null,
+  points: [{ t: t0 + 3000, cpu: 23.9, cpu_max: 31.2, iowait: 0.4, mem: 58.1, mem_max: 58.4, swap: 0, load: 0.9, disk: 64 }] }

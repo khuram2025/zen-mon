@@ -177,6 +177,31 @@ export function chartSeries(points: HistoryPoint[], key: keyof HistoryPoint): [n
   return points.map((p) => [p.t * 1000, isNum(p[key]) ? (p[key] as number) : null])
 }
 
+/**
+ * Readings with nothing sampled directly before and after them, as [epoch ms, value].
+ * A line needs two neighbouring points, so a lone reading (the first minutes of history, one sample
+ * between two outages) would draw nothing; the chart marks these with a dot.
+ */
+export function isolatedReadings(points: HistoryPoint[], key: keyof HistoryPoint): [number, number][] {
+  const has = (i: number) => i >= 0 && i < points.length && isNum(points[i][key])
+  const out: [number, number][] = []
+  points.forEach((p, i) => {
+    if (has(i) && !has(i - 1) && !has(i + 1)) out.push([p.t * 1000, p[key] as number])
+  })
+  return out
+}
+
+/**
+ * The time range the chart shows, in epoch ms: the whole selected range ending at the newest step,
+ * so "24 h" is always 24 hours wide and time before the first sample stays visibly empty.
+ */
+export function chartWindow(points: HistoryPoint[], hours: number, bucketS: number): [number, number] | null {
+  const times = points.map((p) => p.t).filter(isNum)
+  if (!times.length || !isNum(hours) || hours <= 0) return null
+  const end = (Math.max(...times) + (isNum(bucketS) && bucketS > 0 ? bucketS : 0)) * 1000
+  return [end - hours * 3600 * 1000, end]
+}
+
 /** Highest and mean of a reading over the points that have it; null when none do. */
 export function seriesStats(points: HistoryPoint[], key: keyof HistoryPoint, peakKey?: keyof HistoryPoint): { mean: number; peak: number } | null {
   const values = points.map((p) => p[key]).filter(isNum)
