@@ -136,13 +136,14 @@ def test_a_new_directory_account_is_provisioned_on_the_mapped_role(db, monkeypat
 
 def test_ldap_listed_accounts_use_the_role_assigned_in_users(db, monkeypatch):
     from fastapi import HTTPException
-    from app.api.v1 import auth, auth_settings
+    from app.api.v1 import auth, auth_settings, users
 
     original = db.scalar("SELECT value FROM system_settings WHERE key = 'auth.ldap'")
     restricted = {**original, "auto_provision": False, "group_mappings": [], "default_role": ""}
     db.execute("UPDATE system_settings SET value = $1::jsonb WHERE key = 'auth.ldap'", restricted)
     name = f"listed{uuid.uuid4().hex[:8]}"
-    data = {"username": name, "email": f"{name}@example.test", "auth_source": "ldap", "role": "operator"}
+    data = {"username": name, "auth_source": "ldap", "role": "operator"}
+    monkeypatch.setattr(users, "ldap_lookup_user", lambda *_: None)
     try:
         with admin(db) as c:
             assert c.post("/api/v1/users", json={**data, "auth_source": "local"}).status_code == 422
@@ -176,6 +177,36 @@ def test_ldap_listed_accounts_use_the_role_assigned_in_users(db, monkeypatch):
             assert denied.value.status_code == 403 and "disabled" in denied.value.detail
     finally:
         db.execute("UPDATE system_settings SET value = $1::jsonb WHERE key = 'auth.ldap'", original)
+
+
+def test_ldap_profile_is_filled_on_create_and_can_lose_its_email(db, monkeypatch):
+    from app.api.v1 import users
+
+    name = f"adprofile{uuid.uuid4().hex[:8]}"
+    email = f"{name}@example.test"
+    monkeypatch.setattr(users, "ldap_lookup_user", lambda *_: {
+        "full_name": "Directory Name", "email": email.upper(),
+    })
+    with admin(db) as c:
+        data = {"username": name, "auth_source": "ldap", "role": "viewer"}
+        response = c.post("/api/v1/users", json=data)
+        assert response.status_code == 201, response.text
+        created = response.json()
+        assert created["full_name"] == "Directory Name" and created["email"] == email
+
+        monkeypatch.setattr(users, "ldap_lookup_user", lambda *_: {"full_name": "Another Account", "email": email})
+        response = c.post("/api/v1/users", json={**data, "username": f"{name}-other"})
+        assert response.status_code == 201, response.text
+        assert response.json()["full_name"] == "Another Account" and response.json()["email"] is None
+
+        token = sign_in(db, monkeypatch, name, [GROUP_VIEW], full_name="Updated Name", email=None)
+        assert token.user.role == "viewer" and token.user.email is None
+        assert row(db, created["id"])["email"] is None
+        assert row(db, created["id"])["full_name"] == "Updated Name"
+
+        response = c.post("/api/v1/users", json={**data, "auth_source": "local", "username": f"{name}-local",
+                                                "password": "L3mon-River-!Swan"})
+        assert response.status_code == 422 and "email address is required" in response.json()["detail"]
 
 
 # ── the directory still decides who gets in ──────────────────────────────────

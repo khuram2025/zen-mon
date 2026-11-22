@@ -22,7 +22,7 @@ function pagesOf(role: Role | null | undefined): Set<string> | null {
   return role?.page_access?.pages ? new Set(role.page_access.pages) : null
 }
 
-type Member = { id: string; username: string; full_name: string | null; email: string; is_active: boolean; auth_source: string; scope_tags: string[]; last_login: string | null; mfa_enabled: boolean }
+type Member = { id: string; username: string; full_name: string | null; email: string | null; is_active: boolean; auth_source: string; scope_tags: string[]; last_login: string | null; mfa_enabled: boolean }
 /** A revision's changes other than permissions (those are the +/− lines): rename, scope, page limit, description.
  *  Without these a revision that changed only the scope or the page list showed as an empty entry. */
 const CHANGE_LABEL: Record<string, string> = {
@@ -142,7 +142,7 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
                       <li key={u.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
                         <div className="min-w-0">
                           <div className="truncate font-medium">{u.full_name || u.username}</div>
-                          <div className="truncate text-xs text-muted">{u.username} · {u.email}</div>
+                          <div className="truncate text-xs text-muted">{[u.username, u.email].filter(Boolean).join(' · ')}</div>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 text-xs">
                           <Badge variant={u.is_active ? 'success' : 'outline'}>{u.is_active ? 'Active' : 'Disabled'}</Badge>

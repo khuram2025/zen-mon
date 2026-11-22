@@ -45,6 +45,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   const [newSource, setNewSource] = useState<'local' | 'ldap'>('local')
   const source = isEdit ? user?.auth_source || 'local' : newSource
   const isExternal = source !== 'local'
+  const profileFromAd = source === 'ldap'
   const me = useAuth((s) => s.user)
   const isSelf = isEdit && me?.id === user?.id
   const qc = useQueryClient()
@@ -128,15 +129,16 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   }
 
   const pwCheck = usePasswordCheck(password, password2, { username: username.trim() || user?.username, email })
-  const emailError = !email.trim() ? 'Email is required' : !EMAIL_RE.test(email.trim()) ? 'Enter a valid email address' : undefined
+  const emailError = profileFromAd ? undefined
+    : !email.trim() ? 'Email is required' : !EMAIL_RE.test(email.trim()) ? 'Enter a valid email address' : undefined
   const usernameError = isEdit ? undefined : username.trim().length < 3 ? 'Username must be at least 3 characters' : username.trim().length > 100 ? 'Username can be at most 100 characters' : undefined
   const scopeError = scopeMode === 'tags' && scopeTags.length === 0 ? 'Choose at least one tag, or switch to “All resources”' : undefined
   const valid = !emailError && !usernameError && !scopeError && (isEdit || isExternal || pwCheck.ok)
 
   const effectiveScope = scopeMode === 'all' ? [] : scopeTags
   const dirty = isEdit
-    ? email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
-      || (fullName.trim() || null) !== (user?.full_name || null)
+    ? (!profileFromAd && (email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
+      || (fullName.trim() || null) !== (user?.full_name || null)))
       || roleChanged || sourceChanged
       || isActive !== (user?.is_active ?? true)
       || JSON.stringify([...effectiveScope].sort()) !== JSON.stringify([...(user?.scope_tags || [])].sort())
@@ -147,8 +149,10 @@ export function UserFormDialog({ open, onOpenChange, user }: {
       if (isEdit) {
         // Only what changed: unchanged access fields would needlessly revoke sessions.
         const payload: Record<string, unknown> = {}
-        if (email.trim().toLowerCase() !== (user!.email || '').toLowerCase()) payload.email = email.trim()
-        if ((fullName.trim() || null) !== (user!.full_name || null)) payload.full_name = fullName.trim() || null
+        if (!profileFromAd) {
+          if (email.trim().toLowerCase() !== (user!.email || '').toLowerCase()) payload.email = email.trim()
+          if ((fullName.trim() || null) !== (user!.full_name || null)) payload.full_name = fullName.trim() || null
+        }
         if (roleChanged) payload.role = role
         if (sourceChanged) payload.role_source = roleSource
         if (isActive !== (user!.is_active ?? true)) payload.is_active = isActive
@@ -157,9 +161,9 @@ export function UserFormDialog({ open, onOpenChange, user }: {
         return (await api.put(`/users/${user!.id}`, payload)).data
       }
       return (await api.post('/users', {
-        username: username.trim(), email: email.trim(), full_name: fullName.trim() || null,
+        username: username.trim(),
         auth_source: newSource, role, scope_tags: effectiveScope,
-        ...(isExternal ? {} : { password, must_change_password: mustChange }),
+        ...(isExternal ? {} : { email: email.trim(), full_name: fullName.trim() || null, password, must_change_password: mustChange }),
       })).data
     },
     onSuccess: (r: any) => {
@@ -197,7 +201,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
             <DialogDescription>
               {isExternal
                 ? (isEdit ? `This account signs in through ${SOURCE_LABEL[source]}. Review its role and access below.`
-                  : 'Enter the directory username and assign a ZenPlus role. The user signs in with their directory password.')
+                  : 'Enter the AD sign-in username and assign a role. ZenPlus reads the name and email from Active Directory. Email stays blank when AD has no address.')
                 : isEdit
                   ? 'Local account with a password stored on this appliance.'
                   : 'Choose a sign-in source and assign a ZenPlus role.'}
@@ -222,13 +226,17 @@ export function UserFormDialog({ open, onOpenChange, user }: {
               <FormField label="Username" required hint={isEdit ? 'Usernames cannot be changed.' : '3–100 characters. Used to sign in; unique ignoring case.'} error={(submitted || username) ? (errors.username || usernameError) : errors.username}>
                 <Input value={username} onChange={(e) => { setUsername(e.target.value); setErrors({}) }} disabled={isEdit} placeholder="jsmith" autoComplete="off" autoFocus={!isEdit} aria-invalid={!!(errors.username || usernameError)} />
               </FormField>
-              <FormField label="Full name" hint={isExternal && source !== 'radius' ? 'Updated from the directory at each sign-in when it supplies a name.' : undefined}>
-                <Input value={fullName} maxLength={255} onChange={(e) => setFullName(e.target.value)} placeholder="John Smith" />
-              </FormField>
+              {(!profileFromAd || isEdit) && (
+                <FormField label="Full name" hint={profileFromAd ? 'Synced from Active Directory.' : isExternal && source !== 'radius' ? 'Updated from the directory at sign-in.' : undefined}>
+                  <Input value={fullName} maxLength={255} onChange={(e) => setFullName(e.target.value)} readOnly={profileFromAd} placeholder={profileFromAd ? undefined : 'John Smith'} />
+                </FormField>
+              )}
             </div>
-            <FormField label="Email" required hint={isExternal && source !== 'radius' ? 'Updated from the directory at each sign-in when it supplies an address.' : undefined} error={(submitted || email) ? (errors.email || emailError) : errors.email}>
-              <Input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setErrors({}) }} placeholder="user@example.com" autoComplete="off" aria-invalid={!!(errors.email || emailError)} />
-            </FormField>
+            {(!profileFromAd || isEdit) && (
+              <FormField label="Email" required={!profileFromAd} hint={profileFromAd ? 'Synced from Active Directory when an address is available.' : isExternal && source !== 'radius' ? 'Updated from the directory at sign-in.' : undefined} error={(submitted || email) ? (errors.email || emailError) : errors.email}>
+                <Input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setErrors({}) }} readOnly={profileFromAd} placeholder={profileFromAd ? undefined : 'user@example.com'} autoComplete="off" aria-invalid={!!(errors.email || emailError)} />
+              </FormField>
+            )}
 
             {!isEdit && !isExternal && (
               <>

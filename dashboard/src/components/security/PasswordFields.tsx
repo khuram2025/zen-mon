@@ -6,14 +6,14 @@ import { passwordProblems, usePasswordPolicy } from '@/hooks/usePasswordPolicy'
 
 /** New-password + confirmation with the live policy checklist. Callers receive
  *  validity through `usePasswordCheck` so Save can stay disabled until it holds. */
-export function usePasswordCheck(pw: string, confirm: string, ctx: { username?: string; email?: string } = {}) {
+export function usePasswordCheck(pw: string, confirm: string, ctx: { username?: string; email?: string | null } = {}) {
   const policy = usePasswordPolicy()
   const problems = passwordProblems(pw, policy, ctx)
   const mismatch = confirm.length > 0 && pw !== confirm
   return { policy, problems, mismatch, ok: pw.length > 0 && problems.length === 0 && pw === confirm }
 }
 
-export function PasswordRequirements({ pw, ctx, className }: { pw: string; ctx?: { username?: string; email?: string }; className?: string }) {
+export function PasswordRequirements({ pw, ctx, className }: { pw: string; ctx?: { username?: string; email?: string | null }; className?: string }) {
   const policy = usePasswordPolicy()
   const problems = passwordProblems(pw, policy, ctx)
   const lengthOk = pw.length >= policy.min_length
@@ -38,7 +38,7 @@ export function NewPasswordFields({ password, onPassword, confirm, onConfirm, ct
   onPassword: (v: string) => void
   confirm: string
   onConfirm: (v: string) => void
-  ctx?: { username?: string; email?: string }
+  ctx?: { username?: string; email?: string | null }
   autoFocus?: boolean
   label?: string
   requireConfirm?: boolean

@@ -19,6 +19,9 @@ LDAP / Active Directory defaults to **Only allow listed accounts** for new
 provider configurations. In this mode, add the directory sign-in name under
 **Settings → Users & Access → Users → New user**, select **LDAP / Active
 Directory**, and assign a role. The user signs in with their directory password.
+ZenPlus reads the configured name and email attributes when the account is
+added and refreshes them after the user authenticates. An account can sign in
+without an email address. If AD has no usable address, ZenPlus leaves it blank.
 ZenPlus requires an active LDAP account in Users, and a role set there by an
 administrator is sufficient after the directory verifies the password. Accounts
 set to follow the directory continue to require a matching role mapping.
@@ -81,9 +84,9 @@ Nobody changes who decides their own role.
 
 * **Visibility scope** and **Active / Disabled** are set by hand and are never
   touched by sign-in.
-* **Full name and email** are refreshed from the directory at each sign-in when
-  it supplies them (LDAP, OIDC); the Edit dialog says so. RADIUS supplies
-  neither, so hand edits stay.
+* **Full name and email** for LDAP come from the configured directory attributes
+  when the account is added and when it signs in. OIDC updates fields supplied by
+  the provider at sign-in. RADIUS keeps manually entered profile fields.
 * **Password, forced password change, MFA** are the directory's: the actions
   are hidden and the API refuses them.
 * **Username**: sign-in matches ignoring case and the database enforces
