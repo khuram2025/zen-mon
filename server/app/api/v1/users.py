@@ -539,7 +539,7 @@ async def _contact_payload(db: AsyncSession, user_id) -> dict:
     return {"user_id": str(row.id), "timezone": row.timezone, "account_email": row.email,
             "methods": methods,
             # The account email is used while no enabled email method exists.
-            "implicit_email": not any(m["kind"] == "email" and m["enabled"] for m in methods)}
+            "implicit_email": bool(row.email) and not any(m["kind"] == "email" and m["enabled"] for m in methods)}
 
 
 async def _save_contacts(db: AsyncSession, actor: User, user_id, body: ContactMethodsBody) -> dict:
@@ -674,8 +674,8 @@ async def create_user(
         cfg = merge_config(LDAP_DEFAULTS, await _get_system_setting(db, LDAP_SETTINGS_KEY))
         if cfg["enabled"]:
             try:
-                directory_info = await asyncio.to_thread(ldap_lookup_user, cfg, data.username)
-            except ExternalAuthError:
+                directory_info = await asyncio.wait_for(asyncio.to_thread(ldap_lookup_user, cfg, data.username), timeout=8)
+            except (ExternalAuthError, TimeoutError):
                 logger.warning("LDAP profile lookup failed when adding %r", data.username)
 
     user = User(
