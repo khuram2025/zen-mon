@@ -174,7 +174,7 @@ async def _external_login(
 
         if existing is None:
             user = User(
-                username=username,
+                username=verified_name if source == "ldap" and named_role else username,
                 email=None if source == "ldap" else f"{username}@{source}.external",
                 password_hash=EXTERNAL_PASSWORD_HASH,
                 role=role,

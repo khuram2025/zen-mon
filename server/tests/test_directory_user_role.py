@@ -404,7 +404,8 @@ def test_username_rule_is_an_admission_list_even_after_first_login(db, monkeypat
         with pytest.raises(HTTPException):
             login(db, name)
         info["ad_username"] = name
-        assert login(db, name.upper()).user.role == "operator"
+        admitted = login(db, name.upper()).user
+        assert (admitted.username, admitted.role) == (name, "operator")
         cfg["group_mappings"] = []
         db.execute(sql, cfg)
         with pytest.raises(HTTPException):

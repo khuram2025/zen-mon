@@ -629,7 +629,7 @@ export function UpdatesTabContent() {
           <div className="flex items-center justify-between rounded-lg bg-surface2 p-4">
             <div>
               <p className="text-sm font-medium">Automatic Updates</p>
-              <p className="text-xs text-muted">Apply updates as soon as they are available</p>
+              <p className="text-xs text-muted">Install required versions in order during the maintenance window</p>
             </div>
             <Switch
               checked={config.auto_update}
