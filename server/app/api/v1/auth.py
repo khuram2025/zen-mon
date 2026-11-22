@@ -135,10 +135,11 @@ async def _external_login(
                 if info is None:
                     continue
                 verified_name = info.get("ad_username", "")
+                if verified_name.lower() != username.lower():
+                    verified_name = ""
                 named_role, _ = ldap_username_rule(cfg, verified_name)
                 needs_rule = existing is None or existing.ldap_username_rule_required
-                if not cfg.get("auto_provision") and needs_rule and (
-                        not named_role or verified_name.lower() != username.lower()):
+                if not cfg.get("auto_provision") and needs_rule and not named_role:
                     continue
                 role, _ = explain_ldap_role(cfg, info["groups"], verified_name)
             else:

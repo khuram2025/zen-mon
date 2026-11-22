@@ -705,9 +705,11 @@ async def test_ldap(
             return {"success": False, "message": "User not found or invalid credentials", "steps": steps}
         steps.append({"name": "credentials", "ok": True})
         verified_name = info.get("ad_username", "")
+        if verified_name.lower() != data.username.strip().lower():
+            verified_name = ""
         role, matched = explain_ldap_role(cfg, info["groups"], verified_name)
         roles = await _existing_roles(db)
-        named = bool(ldap_username_rule(cfg, verified_name)[0]) and verified_name.lower() == data.username.strip().lower()
+        named = bool(ldap_username_rule(cfg, verified_name)[0])
         admission = await _admission(db, "ldap", cfg, data.username, role, roles, named_account=named)
         if not admission["uses_listed_role"]:
             steps.append({"name": "mapping", "ok": role is not None})

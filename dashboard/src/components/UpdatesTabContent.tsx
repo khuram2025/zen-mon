@@ -187,6 +187,12 @@ export function UpdatesTabContent() {
     onError: (e: any) => toast.error('Check failed', apiErrorMessage(e)),
   })
 
+  const refreshPlan = checkNow.mutate
+  useEffect(() => {
+    if (status?.auto_update && !status.updater_running && !status.active_update &&
+        plan && plan.from_version !== status.current_version) refreshPlan()
+  }, [status?.auto_update, status?.updater_running, status?.active_update, status?.current_version, plan, refreshPlan])
+
   const installNow = useMutation({
     mutationFn: async () => (await api.post('/system/install-update', {
       plan_id: plan?.plan_id, target_version: targetVersion,

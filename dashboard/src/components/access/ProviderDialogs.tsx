@@ -125,7 +125,7 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
   return (
     <div className="overflow-hidden rounded-md border border-border">
       <table className="w-full text-sm">
-        <caption className="sr-only">Role mapping rules, evaluated top to bottom; the first match wins</caption>
+        <caption className="sr-only">{withUsername ? 'AD usernames take priority, followed by group rules in order' : 'Role mapping rules, evaluated top to bottom; the first match wins'}</caption>
         <thead className="bg-surface2/50 text-xs uppercase tracking-wider text-muted">
           <tr>
             <th scope="col" className="w-10 px-2 py-2 text-center font-medium">#</th>
