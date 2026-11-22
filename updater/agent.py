@@ -600,7 +600,7 @@ def main(config_path: str | None = None, check_only: bool = False,
         if not release:
             return 0
 
-        if check_only or not automatic_install_allowed(cfg.update):
+        if check_only or not automatic_install_allowed(load_config(config_path).update):
             print(
                 f"Update available: {get_current_version()} → {release['version']}"
             )

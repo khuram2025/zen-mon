@@ -387,3 +387,27 @@ def test_oidc_sign_in_keeps_a_hand_set_role_and_records_the_mapped_one(db):
     assert row(db, uid)["directory_role"] == "viewer" and row(db, uid)["role_manual"] is True
     assert asyncio.run(go(plain_sub)) == "viewer"
     assert row(db, plain)["role"] == "viewer"
+
+def test_username_rule_is_an_admission_list_even_after_first_login(db, monkeypatch):
+    from fastapi import HTTPException
+    from app.api.v1 import auth
+
+    original = db.scalar("SELECT value FROM system_settings WHERE key = 'auth.ldap'")
+    name = f"mapped{uuid.uuid4().hex[:8]}"
+    cfg = {**original, "auto_provision": False, "default_role": "viewer",
+           "group_mappings": [{"group": name, "kind": "username", "role": "operator"}]}
+    sql = "UPDATE system_settings SET value = $1::jsonb WHERE key = 'auth.ldap'"
+    try:
+        db.execute(sql, cfg)
+        info = {"dn": f"CN={name}", "groups": [], "email": None, "full_name": name, "ad_username": "different"}
+        monkeypatch.setattr(auth, "ldap_authenticate", lambda *_: info)
+        with pytest.raises(HTTPException):
+            login(db, name)
+        info["ad_username"] = name
+        assert login(db, name.upper()).user.role == "operator"
+        cfg["group_mappings"] = []
+        db.execute(sql, cfg)
+        with pytest.raises(HTTPException):
+            login(db, name.upper())
+    finally:
+        db.execute(sql, original)

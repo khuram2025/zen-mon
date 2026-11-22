@@ -161,15 +161,19 @@ def get_zenplus_update(appliance):
         target = max(eligible, key=lambda r: version_key(r.version))
         path = plan_upgrade(appliance.current_version, target, catalog)
     except UpgradePathError as exc:
+        appliance.upgrade_hold = str(exc)
         logger.warning("ZenPlus upgrade path blocked for appliance %s: %s", appliance.id, exc)
         return None
     for release in path:
         if not rollout_allows(appliance, release, rollouts[release.version]):
+            appliance.upgrade_hold = f"Required release v{release.version} is outside this appliance’s active rollout."
             logger.warning("ZenPlus upgrade blocked: prerequisite %s is not eligible", release.version)
             return None
         history = UpdateHistory.objects.filter(appliance=appliance, release=release)
         if history.filter(status="success").exists():
+            appliance.upgrade_hold = f"Update history records v{release.version} as installed. Check the appliance version."
             return None  # inconsistent installed marker requires investigation
         if history.filter(status__in=["failed", "rolled_back"]).count() >= 3:
+            appliance.upgrade_hold = f"Installation of v{release.version} is on hold after three failed attempts."
             return None  # never route around a failed prerequisite
     return path[0] if path else None

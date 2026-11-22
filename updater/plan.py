@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
+from .schedule import automatic_install_allowed
 from .version_policy import validate_transition, version_key
 
 MAX_STEPS = 32
@@ -53,12 +54,14 @@ def get_plan(cfg, *, current=None, client_factory=None):
     version_key(current)
     cursor = current
     steps = []
+    hold = ''
     with (client_factory or _api_client)(cfg) as client:
         for _ in range(MAX_STEPS + 1):
             response = client.get('/api/v1/updates/check', params={'current_version': cursor, 'arch': get_arch()})
             response.raise_for_status()
             data = response.json()
             if data.get('available') is False and data.get('release') is None:
+                hold = str(data.get('hold') or '')[:500]
                 break
             release = data.get('release')
             if data.get('available') is not True or not isinstance(release, dict):
@@ -73,7 +76,7 @@ def get_plan(cfg, *, current=None, client_factory=None):
     identities = [release_identity(step) for step in steps]
     digest = hashlib.sha256(json.dumps({'from_version': current, 'steps': identities}, sort_keys=True).encode()).hexdigest()
     return {'from_version': current, 'checked_at': datetime.now(timezone.utc).isoformat(),
-            'plan_id': digest, 'steps': steps}
+            'plan_id': digest, 'steps': steps, 'hold': hold}
 
 
 def selected_path(plan, target):
@@ -91,18 +94,3 @@ def validate_remaining(steps, current):
         validate_transition(step, current)
         current = step['version']
     return steps
-
-
-def automatic_install_allowed(config, now=None):
-    """Scheduled runs check only unless enabled and inside the local-time window."""
-    if not config.auto_update:
-        return False
-    start, end = config.maintenance_window_start, config.maintenance_window_end
-    if not start and not end:
-        return True
-    if not all(re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', value or '') for value in (start, end)):
-        return False
-    clock = (now or datetime.now().astimezone()).strftime('%H:%M')
-    if start == end:
-        return True
-    return start <= clock < end if start < end else clock >= start or clock < end

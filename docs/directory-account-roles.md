@@ -91,3 +91,14 @@ Nobody changes who decides their own role.
   are hidden and the API refuses them.
 * **Username**: sign-in matches ignoring case and the database enforces
   uniqueness ignoring case, so `JSmith` is the account `jsmith`, not a second one.
+
+### Username rules in LDAP listed-accounts mode
+
+Choose **AD username** in Role mapping, enter the AD account name (for example
+`a.test`), and select a role. AD must verify the password and return that
+sAMAccountName. Username comparison ignores case. An exact username rule is
+evaluated before group rules. A user first admitted by a username rule must
+continue matching one in listed-accounts mode, including after the first login
+creates their profile. Removing the rule denies subsequent sign-ins. Existing
+group entries retain their group semantics. An account explicitly assigned in
+Users keeps its assigned role.

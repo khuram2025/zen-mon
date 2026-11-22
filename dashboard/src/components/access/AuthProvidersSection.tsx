@@ -115,7 +115,7 @@ export function AuthProvidersSection() {
                       </Tr>
                       <ProviderRow
                         icon={Server} title="LDAP / Active Directory" subtitle="Service-account search, then bind as the user"
-                        cfg={ldap} configured={ldapConfigured(ldap)} unit="group" mappings={ldap.group_mappings.filter((m) => m.group && m.role).length}
+                        cfg={ldap} configured={ldapConfigured(ldap)} unit="directory" mappings={ldap.group_mappings.filter((m) => m.group && m.role).length}
                         roleLabel={roleLabel} busy={false}
                         serverText={ldap.server ? `${ldap.server}:${ldap.port}` : ''}
                         serverSub={ldap.server ? `${ldap.use_ssl ? 'LDAPS' : ldap.use_starttls ? 'StartTLS' : 'No encryption'}${ldap.base_dn ? ` · ${ldap.base_dn}` : ''}` : ''}

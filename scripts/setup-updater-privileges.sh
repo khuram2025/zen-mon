@@ -57,11 +57,14 @@ install -o root -g root -m 0755 "${SCRIPT_DIR}/zenplus-updater-install-helper" /
 install -o root -g root -m 0644 "${ZENPLUS_DIR}/updater/systemd/zenplus-updater-install@.service" /etc/systemd/system/zenplus-updater-install@.service
 systemctl daemon-reload
 
+bash "${SCRIPT_DIR}/setup-updater-window.sh"
+
 # ── 2. Sudoers ──────────────────────────────────────────────────────────────
 # Each line corresponds to an exact subprocess.run() call in
 # server/app/api/v1/system_updates.py; do not broaden them.
 if [ -x "${OVA_BROKER}" ]; then
     install -o root -g root -m 0755 "${ZENPLUS_DIR}/appliance/vmware/privileged.py" "${OVA_BROKER}"
+    install -o root -g root -m 0755 "${ZENPLUS_DIR}/appliance/vmware/updater-timer.py" /usr/local/sbin/zentryc-updater-timer
     log "Typed privilege broker present; leaving its sudoers policy unchanged"
 elif ! command -v visudo >/dev/null 2>&1; then
     warn "visudo not found (sudo not installed?); updater sudo grants not written"

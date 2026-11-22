@@ -49,7 +49,8 @@ from app.services.external_auth import (
     RADIUS_SETTINGS_KEY,
     ExternalAuthError,
     ldap_authenticate,
-    map_ldap_role,
+    explain_ldap_role,
+    ldap_username_rule,
     map_radius_role,
     merge_config,
     radius_authenticate,
@@ -124,7 +125,8 @@ async def _external_login(
         sources = [(existing.auth_source, cfg)]
     else:
         sources = [(s, c) for s, c in (("ldap", ldap_cfg), ("radius", radius_cfg))
-                   if c["enabled"] and c.get("auto_provision")]
+                   if c["enabled"] and (c.get("auto_provision") or
+                       (s == "ldap" and ldap_username_rule(c, username)[0]))]
 
     for source, cfg in sources:
         try:
@@ -132,7 +134,13 @@ async def _external_login(
                 info = await asyncio.to_thread(ldap_authenticate, cfg, username, password)
                 if info is None:
                     continue
-                role = map_ldap_role(cfg, info["groups"])
+                verified_name = info.get("ad_username", "")
+                named_role, _ = ldap_username_rule(cfg, verified_name)
+                needs_rule = existing is None or existing.ldap_username_rule_required
+                if not cfg.get("auto_provision") and needs_rule and (
+                        not named_role or verified_name.lower() != username.lower()):
+                    continue
+                role, _ = explain_ldap_role(cfg, info["groups"], verified_name)
             else:
                 info = await asyncio.to_thread(radius_authenticate, cfg, username, password)
                 if info is None:
@@ -172,6 +180,7 @@ async def _external_login(
                 is_active=True,
                 auth_source=source,
                 directory_role=role,
+                ldap_username_rule_required=(source == "ldap" and bool(named_role)),
             )
             db.add(user)
             await db.flush()
