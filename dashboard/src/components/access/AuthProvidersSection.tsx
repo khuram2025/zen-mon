@@ -88,7 +88,7 @@ export function AuthProvidersSection() {
                 </div>
                 <p className="text-xs text-muted">
                   {externalEnabled
-                    ? 'Unknown usernames are checked against the enabled external sources in this order and given the mapped role. Sessions of directory users last at most an hour, after which the directory is consulted again.'
+                    ? 'Listed users sign in through their assigned source. New accounts can be created at sign-in through sources with automatic account creation enabled.'
                     : 'Only local accounts can sign in. Configure and enable a source below to allow directory users.'}
                 </p>
               </div>
@@ -230,7 +230,7 @@ function ProviderRow({ icon, title, subtitle, cfg, configured, unit, mappings, r
               <span className="text-muted"> · default </span>
               {defaultRole ? <span className="font-medium">{defaultRole}</span> : <span className="text-warning">deny</span>}
             </div>
-            <div className="text-xs text-muted">{cfg.auto_provision ? 'Accounts created on first sign-in' : 'Existing accounts only'}</div>
+            <div className="text-xs text-muted">{cfg.auto_provision ? 'Accounts created on first sign-in' : 'Listed accounts only'}</div>
           </div>
         )}
       </Td>

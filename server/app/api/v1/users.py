@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from uuid import UUID
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
@@ -28,6 +28,7 @@ from app.models.role import Role
 from app.models.user import User
 from app.services import role_source, session_service, tag_service
 from app.services.audit_service import write_audit_log
+from app.services.external_auth import EXTERNAL_PASSWORD_HASH
 
 router = APIRouter(prefix="/users", tags=["User Management"])
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ def _clean_timezone(value: Optional[str]) -> Optional[str]:
 class UserCreate(BaseModel):
     username: str = Field(..., max_length=100)
     email: str = Field(..., max_length=255)
-    password: str = Field(..., min_length=password_policy.MIN_LENGTH, max_length=password_policy.MAX_LENGTH)
+    password: Optional[str] = Field(None, min_length=password_policy.MIN_LENGTH, max_length=password_policy.MAX_LENGTH)
     full_name: Optional[str] = Field(None, max_length=255)
     role: str = Field(default="viewer")
     is_active: bool = True
@@ -153,6 +154,7 @@ class UserCreate(BaseModel):
     # Require a new password at first sign-in (recommended whenever an
     # administrator chooses the initial password).
     must_change_password: bool = False
+    auth_source: Literal["local", "ldap"] = "local"
 
     @field_validator("username")
     @classmethod
@@ -637,7 +639,7 @@ async def create_user(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("users.manage")),
 ):
-    """Create a new local user. The actor can only assign a role whose access
+    """Create a local or LDAP user. The actor can only assign a role whose access
     is within their own (a delegated user manager cannot create administrators)."""
     role = await _role_by_name(db, data.role)
     valid_roles = await _valid_role_names(db)
@@ -646,10 +648,18 @@ async def create_user(
     if role is not None:
         await delegation.assert_can_assign_role(db, current_user, role)
 
-    problems = password_policy.problems(data.password, username=data.username, email=data.email,
-                                        full_name=data.full_name)
-    if problems:
-        raise HTTPException(status_code=422, detail=problems[0])
+    is_local = data.auth_source == "local"
+    password_hash = EXTERNAL_PASSWORD_HASH
+    if is_local:
+        if data.password is None:
+            raise HTTPException(status_code=422, detail="A password is required for a local account")
+        problems = password_policy.problems(data.password, username=data.username, email=data.email,
+                                            full_name=data.full_name)
+        if problems:
+            raise HTTPException(status_code=422, detail=problems[0])
+        password_hash = hash_password(data.password)
+    elif data.password is not None or data.must_change_password:
+        raise HTTPException(status_code=422, detail="LDAP accounts use their directory password")
 
     await _assert_unique_identity(db, username=data.username, email=data.email)
     role_scope = list(role.scope_tags or []) if role is not None else []
@@ -660,14 +670,15 @@ async def create_user(
     user = User(
         username=data.username,
         email=data.email,
-        password_hash=hash_password(data.password),
+        password_hash=password_hash,
         full_name=data.full_name,
         role=data.role,
         is_active=data.is_active,
-        auth_source="local",
+        auth_source=data.auth_source,
+        role_manual=not is_local,
         scope_tags=scope_tags,
         must_change_password=data.must_change_password,
-        password_changed_at=datetime.now(timezone.utc),
+        password_changed_at=datetime.now(timezone.utc) if is_local else None,
     )
     db.add(user)
     try:
@@ -682,6 +693,7 @@ async def create_user(
         resource_type="user",
         resource_id=str(user.id),
         metadata={"username": user.username, "role": user.role, "is_active": user.is_active,
+                  "auth_source": user.auth_source,
                   "scope_tags": user.scope_tags, "must_change_password": user.must_change_password},
     )
     await _commit_or_conflict(db)

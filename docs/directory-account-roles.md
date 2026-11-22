@@ -15,6 +15,20 @@ mapping rule.
 
 ## The rule
 
+LDAP / Active Directory defaults to **Only allow listed accounts** for new
+provider configurations. In this mode, add the directory sign-in name under
+**Settings → Users & Access → Users → New user**, select **LDAP / Active
+Directory**, and assign a role. The user signs in with their directory password.
+ZenPlus requires an active LDAP account in Users, and a role set there by an
+administrator is sufficient after the directory verifies the password. Accounts
+set to follow the directory continue to require a matching role mapping.
+
+For established LDAP configurations with automatic creation enabled, turn on
+**Only allow listed accounts** under the provider’s Role mapping tab to require
+an existing account. Review any accounts previously created on first sign-in.
+
+For accounts that still require a provider role mapping:
+
 > The directory decides **whether** a directory account may sign in.
 > The role mapping decides **which role** it holds, unless an administrator set
 > one by hand. A hand-set role stays until an administrator hands the account

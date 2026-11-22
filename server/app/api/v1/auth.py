@@ -107,10 +107,7 @@ async def _role_exists(db: AsyncSession, role_name: str) -> bool:
 async def _external_login(
     db: AsyncSession, username: str, password: str, existing: Optional[User]
 ) -> Optional[User]:
-    """Authenticate against LDAP/RADIUS and provision or refresh the
-    matching local user row. Returns None on bad credentials; raises 403
-    for policy denials (provider disabled, no role mapped, provisioning
-    off, mapped role missing)."""
+    """Authenticate a listed LDAP/RADIUS account or use an enabled provisioning provider."""
     from app.api.v1.settings import _get_system_setting
 
     ldap_cfg = merge_config(LDAP_DEFAULTS, await _get_system_setting(db, LDAP_SETTINGS_KEY))
@@ -126,7 +123,8 @@ async def _external_login(
             )
         sources = [(existing.auth_source, cfg)]
     else:
-        sources = [(s, c) for s, c in (("ldap", ldap_cfg), ("radius", radius_cfg)) if c["enabled"]]
+        sources = [(s, c) for s, c in (("ldap", ldap_cfg), ("radius", radius_cfg))
+                   if c["enabled"] and c.get("auto_provision")]
 
     for source, cfg in sources:
         email: Optional[str] = None
@@ -147,7 +145,9 @@ async def _external_login(
             logger.warning("%s authentication error for %r", source, username, exc_info=True)
             continue
 
-        if role is None:
+        keeps_own_role = existing is not None and bool(existing.role_manual)
+        uses_listed_role = role_source.uses_listed_role(source, cfg, keeps_own_role)
+        if role is None and not uses_listed_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"{source.upper()} sign-in succeeded, but no ZenPlus role is mapped for this account",
@@ -156,7 +156,8 @@ async def _external_login(
         # provision or refresh an account onto a role that does not exist. An
         # account whose role an administrator set by hand does not take the
         # mapped role, so a stale mapping does not lock it out.
-        keeps_own_role = existing is not None and bool(existing.role_manual)
+        if uses_listed_role and not await _role_exists(db, existing.role):
+            raise HTTPException(status_code=403, detail="The assigned ZenPlus role no longer exists")
         if not keeps_own_role and not await _role_exists(db, role):
             logger.error("%s mapping for %r points at missing role %r", source, username, role)
             raise HTTPException(
@@ -166,11 +167,6 @@ async def _external_login(
             )
 
         if existing is None:
-            if not cfg.get("auto_provision"):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Automatic account creation is disabled for {source.upper()} users",
-                )
             candidate = email or f"{username}@{source}.external"
             if not await _email_available(db, candidate, own_id=None):
                 candidate = f"{username}@{source}.external"
@@ -336,10 +332,7 @@ async def _login_impl(data: LoginRequest, db: AsyncSession, request: Optional[Re
             )
 
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is disabled",
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
     method = user.auth_source if user.auth_source != "local" else "password"
     if user.auth_source == "local" and user.mfa_enabled:

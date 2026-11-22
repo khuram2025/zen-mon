@@ -30,7 +30,7 @@ from app.core.crypto import encrypt_text
 from app.core.permissions import ACCESS_CONTROL_PERMISSIONS, effective_permissions
 from app.core.security import require_admin_user
 from app.models.user import User
-from app.services import auth_policy, session_service
+from app.services import auth_policy, role_source, session_service
 from app.services.audit_service import write_audit_log
 from app.services import oidc_service
 from app.services.external_auth import (
@@ -94,7 +94,7 @@ class LdapConfigIn(_ProviderIn):
     group_attr: str = "memberOf"
     group_mappings: list[RoleMapping] = []
     default_role: str = ""
-    auto_provision: bool = True
+    auto_provision: bool = False
 
 
 class RadiusConfigIn(_ProviderIn):
@@ -624,6 +624,7 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
     # recorded, not applied, so a mapping that points at a missing role does not
     # block that account (app.services.role_source).
     keeps_own_role = bool(existing is not None and existing[0] == provider and existing[2])
+    uses_listed_role = role_source.uses_listed_role(provider, cfg, keeps_own_role)
     if existing is not None:
         if existing[0] != provider:
             reasons.append({"code": "source_collision",
@@ -634,7 +635,10 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
     elif not cfg.get("auto_provision"):
         reasons.append({"code": "provisioning_disabled",
                         "message": "Automatic account creation is off and no ZenPlus account exists for this user"})
-    if role is None:
+    if uses_listed_role:
+        if existing[3] not in roles:
+            reasons.append({"code": "role_missing", "message": "The role assigned in Users does not exist"})
+    elif role is None:
         reasons.append({"code": "no_role_mapped",
                         "message": "No role mapping matches this user and there is no default role"})
     elif role not in roles and not keeps_own_role:
@@ -642,6 +646,7 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
     return {"would_sign_in": not reasons, "admission_reasons": reasons,
             "existing_account": existing is not None,
             "account_role_manual": keeps_own_role,
+            "uses_listed_role": uses_listed_role,
             "account_role": existing[3] if keeps_own_role else None,
             "mapped_role_privileged": bool(role and _privileged(roles.get(role, set())))}
 
@@ -692,9 +697,10 @@ async def test_ldap(
             return {"success": False, "message": "User not found or invalid credentials", "steps": steps}
         steps.append({"name": "credentials", "ok": True})
         role, matched = explain_ldap_role(cfg, info["groups"])
-        steps.append({"name": "mapping", "ok": role is not None})
         roles = await _existing_roles(db)
         admission = await _admission(db, "ldap", cfg, data.username, role, roles)
+        if not admission["uses_listed_role"]:
+            steps.append({"name": "mapping", "ok": role is not None})
         steps.append({"name": "admission", "ok": admission["would_sign_in"]})
         await _remember_test(db, "ldap", current_user, True, "User authentication OK", cfg.get("server", ""))
         return {
