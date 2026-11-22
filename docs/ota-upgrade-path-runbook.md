@@ -184,3 +184,10 @@ On the portal run `manage.py check_required_bridges` daily. It verifies the
 signed production route from 1.24.29 (or ZENPLUS_OTA_OLDEST_SUPPORTED) and
 reports the release requiring attention seven days before its manifest expires.
 Publish and validate a supported replacement while the original route is valid.
+
+The 1.25.24 scheduler coordinates scheduled OTA runs with Ubuntu package
+maintenance. An active apt service defers the installation. An apt service
+queued during OTA waits until the updater finishes. The updater's apt client
+also waits briefly for the dpkg lock, and needrestart leaves the running
+update transaction to finish. Use the verified **1.25.24 or newer** scheduler
+for a legacy appliance.
