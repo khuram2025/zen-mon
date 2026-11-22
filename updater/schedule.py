@@ -50,11 +50,25 @@ def reconcile_calendar():
     subprocess.run(['/bin/systemctl', 'try-restart', 'zenplus-updater.timer'], check=True)
 
 
+def package_services_idle():
+    # A package job already running when the window opens owns this window.
+    # Check service state before starting any application changes.
+    for unit in ('apt-daily.service', 'apt-daily-upgrade.service'):
+        state = subprocess.check_output(['/bin/systemctl', 'show', unit, '-p', 'ActiveState', '--value'], text=True).strip()
+        if state not in ('inactive', 'failed'):
+            print(f'Automatic installation deferred while {unit} is {state}', flush=True)
+            return False
+    return True
+
+
 def scheduled_run():
     # This root-owned entry point survives a legacy bridge replacing /opt/zenplus.
     sys.path.insert(0, '/opt/zenplus')
     from updater import agent
     from importlib.util import find_spec
+    if not package_services_idle():
+        # Still perform the ordinary enrollment check-in, without starting an install.
+        return agent.main(check_only=True)
     if find_spec('updater.plan') is not None:
         return agent.main()
     cfg = agent.load_config()
