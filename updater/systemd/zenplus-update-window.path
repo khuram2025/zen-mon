@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch the appliance maintenance window
+
+[Path]
+PathChanged=/opt/zenplus/updater/config/agent.conf
+
+[Install]
+WantedBy=multi-user.target

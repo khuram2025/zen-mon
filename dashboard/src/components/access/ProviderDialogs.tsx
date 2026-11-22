@@ -23,7 +23,7 @@ import { KeyRound, Copy } from 'lucide-react'
 
 // Backend: server/app/api/v1/auth_settings.py (/api/v1/system/auth/*)
 
-export type Mapping = { group?: string; value?: string; attribute?: string; role: string }
+export type Mapping = { kind?: 'group' | 'username'; group?: string; value?: string; attribute?: string; role: string }
 
 type Meta = { revision?: number; updated_at?: string; updated_by?: string }
 
@@ -102,13 +102,14 @@ type RowProblem = { row: number; message: string }
 
 /** First-match-wins rule list with explicit ordering, labelled controls and
  *  inline validation; incomplete rows are reported instead of silently dropped. */
-function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder, roles, withAttribute, problems }: {
+function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder, roles, withAttribute, withUsername, problems }: {
   mappings: Mapping[]
   setMappings: (m: Mapping[]) => void
   keyField: 'group' | 'value'
   keyLabel: string
   keyPlaceholder: string
   roles: Role[]
+  withUsername?: boolean
   withAttribute?: boolean
   problems: RowProblem[]
 }) {
@@ -124,7 +125,7 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
   return (
     <div className="overflow-hidden rounded-md border border-border">
       <table className="w-full text-sm">
-        <caption className="sr-only">Role mapping rules, evaluated top to bottom; the first match wins</caption>
+        <caption className="sr-only">{withUsername ? 'AD usernames take priority, followed by group rules in order' : 'Role mapping rules, evaluated top to bottom; the first match wins'}</caption>
         <thead className="bg-surface2/50 text-xs uppercase tracking-wider text-muted">
           <tr>
             <th scope="col" className="w-10 px-2 py-2 text-center font-medium">#</th>
@@ -145,11 +146,19 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
               <tr key={i} className={cn('border-t border-border align-top', problem && 'bg-danger/[0.04]')}>
                 <td className="px-2 py-2.5 text-center text-xs text-muted">{i + 1}</td>
                 <td className="p-1.5">
+                  {withUsername && (
+                    <select aria-label={`Rule ${i + 1} match type`} value={m.kind || 'group'}
+                      className="mb-1 rounded border border-border bg-surface px-2 py-1 text-xs"
+                      onChange={e => patch(i, { kind: e.target.value as 'group' | 'username' })}>
+                      <option value="username">AD username</option>
+                      <option value="group">Directory group</option>
+                    </select>
+                  )}
                   <Input
                     className="font-mono text-xs"
                     aria-label={`Rule ${i + 1} ${keyLabel.toLowerCase()}`}
                     aria-invalid={!!problem}
-                    placeholder={keyPlaceholder}
+                    placeholder={m.kind === 'username' ? 'a.test' : keyPlaceholder}
                     value={(m as any)[keyField] || ''}
                     onChange={(e) => patch(i, { [keyField]: e.target.value } as Partial<Mapping>)}
                   />
@@ -184,7 +193,7 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
       </table>
       <div className="border-t border-border bg-surface2/30 px-2 py-1.5">
         {/* A new rule has no role: granting access is always a deliberate choice. */}
-        <Button type="button" variant="ghost" size="sm" onClick={() => setMappings([...mappings, { [keyField]: '', role: '' } as Mapping])}>
+        <Button type="button" variant="ghost" size="sm" onClick={() => setMappings([...mappings, { [keyField]: '', role: '', ...(withUsername ? { kind: 'username' } : {}) } as Mapping])}>
           <Plus className="h-3.5 w-3.5" /> Add rule
         </Button>
       </div>
@@ -200,7 +209,7 @@ function validateMappings(mappings: Mapping[], keyField: 'group' | 'value', noun
     if (!key && !m.role) return
     if (!key) { out.push({ row: i + 1, message: `Enter the ${noun} to match` }); return }
     if (!m.role) { out.push({ row: i + 1, message: 'Choose the role to grant' }); return }
-    const id = `${key.toLowerCase()}|${withAttribute ? (m.attribute || '').toLowerCase() : ''}`
+    const id = `${m.kind || 'group'}|${key.toLowerCase()}|${withAttribute ? (m.attribute || '').toLowerCase() : ''}`
     if (seen.has(id)) out.push({ row: i + 1, message: `Duplicates rule ${seen.get(id)}; this rule can never match` })
     else seen.set(id, i + 1)
   })
@@ -542,13 +551,13 @@ export function LdapDialog({ open, onOpenChange, initial, roles, rolesFailed, in
               </TabsContent>
 
               <TabsContent value="mapping" className="mt-3 space-y-3">
-                <ToggleRow title="Only allow listed accounts" description="Add each Active Directory username in Users and select its role. Accounts set to follow the directory still use the mapping below." checked={!form.auto_provision} onChange={(v) => f({ auto_provision: !v })} />
+                <ToggleRow title="Only allow listed accounts" description="Allow accounts assigned in Users and exact AD usernames listed below. Every sign-in requires valid directory credentials." checked={!form.auto_provision} onChange={(v) => f({ auto_provision: !v })} />
                 {rolesFailed && <p role="alert" className="text-xs text-danger">The role list could not be loaded, so role mapping cannot be edited safely right now. Close this dialog and retry.</p>}
                 <p className="text-xs text-muted">
-                  Rules are evaluated <strong>top to bottom</strong> against the user's group memberships; the <strong>first match wins</strong>. Use the arrows to reorder.
+                  An exact AD username takes priority. Group rules then match direct memberships from top to bottom.
                   A group can be given as a full DN (unambiguous) or just its CN, which can match groups with that name in any container.
                 </p>
-                <MappingRows mappings={form.group_mappings} setMappings={(m) => f({ group_mappings: m })} keyField="group" keyLabel="Directory group" keyPlaceholder="CN=NetAdmins,OU=Groups,DC=corp,DC=local" roles={roles} problems={problems} />
+                <MappingRows mappings={form.group_mappings} setMappings={(m) => f({ group_mappings: m })} keyField="group" withUsername keyLabel="Username or group" keyPlaceholder="CN=NetAdmins,OU=Groups,DC=corp,DC=local" roles={roles} problems={problems} />
                 <FormField label="Fallback for role mapping" hint="Deny requires a matching rule for accounts that follow the directory.">
                   <RoleSelect value={form.default_role} onChange={(v) => f({ default_role: v })} roles={roles} allowNone label="Role when no rule matches" />
                 </FormField>

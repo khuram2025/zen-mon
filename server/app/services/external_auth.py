@@ -122,9 +122,22 @@ def _ldap_cn(dn: str) -> str:
         return (head.split("=", 1)[1] if "=" in head else head).strip().lower()
 
 
-def explain_ldap_role(cfg: dict, groups: list[str]) -> tuple[Optional[str], Optional[dict]]:
+def ldap_username_rule(cfg: dict, username: str):
+    """Only exact AD account names can admit a user in listed-accounts mode."""
+    if username:
+        for index, rule in enumerate(cfg.get("group_mappings") or []):
+            if (rule.get("kind") == "username" and rule.get("role")
+                    and rule.get("group", "").strip().lower() == username.lower()):
+                return rule["role"], {"kind": "mapping", "index": index, "match": rule["group"]}
+    return None, None
+
+
+def explain_ldap_role(cfg: dict, groups: list[str], username: str = "") -> tuple[Optional[str], Optional[dict]]:
     """(role, matched rule). The rule is {'kind': 'mapping', 'index': i, 'match': text}
     for a mapping row, {'kind': 'default'} for the fallback, or None when nothing matched."""
+    role, matched = ldap_username_rule(cfg, username)
+    if matched:
+        return role, matched
     lowered = [g.lower() for g in groups]
     cns = {_ldap_cn(g) for g in groups}
     for i, mapping in enumerate(cfg.get("group_mappings") or []):
@@ -132,7 +145,7 @@ def explain_ldap_role(cfg: dict, groups: list[str]) -> tuple[Optional[str], Opti
         role = mapping.get("role")
         if not wanted or not role:
             continue
-        if wanted in lowered or wanted in cns:
+        if mapping.get("kind", "group") == "group" and (wanted in lowered or wanted in cns):
             return role, {"kind": "mapping", "index": i, "match": mapping.get("group")}
     if cfg.get("default_role"):
         return cfg["default_role"], {"kind": "default"}
@@ -198,6 +211,9 @@ def ldap_lookup_user(cfg: dict, username: str) -> Optional[dict]:
                 "{username}", escape_filter_chars(username)
             )
             attrs = [a for a in (cfg.get("email_attr"), cfg.get("name_attr"), cfg.get("group_attr")) if a]
+            if any(m.get("kind") == "username" for m in cfg.get("group_mappings") or []):
+                if "sAMAccountName" not in attrs:
+                    attrs.append("sAMAccountName")
             search_conn.search(cfg["base_dn"], flt, search_scope=ldap3.SUBTREE, attributes=attrs)
             if len(search_conn.entries) != 1:
                 return None
@@ -214,6 +230,7 @@ def ldap_lookup_user(cfg: dict, username: str) -> Optional[dict]:
             name_vals = _attr_values(cfg.get("name_attr") or "displayName")
             return {
                 "dn": entry.entry_dn,
+                "ad_username": next(iter(_attr_values("sAMAccountName")), ""),
                 "email": email_vals[0] if email_vals else None,
                 "full_name": name_vals[0] if name_vals else None,
                 "groups": _attr_values(cfg.get("group_attr") or "memberOf"),

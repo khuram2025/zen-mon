@@ -162,3 +162,25 @@ of both the builder policy and portal guard.
 integrations/zentryc_ota contains the deployed ZenPlus-only selector, artifact promotion guard, regression tests and hash-guarded installer. The website runs a separate Django deployment; these modules are versioned here for reproducibility and must also be deployed there. The installer preserves prior files and refuses changed baselines. ZenAI/ZenShield offer selection stays independent. Run staged Django tests against a disposable database, including the existing ZenShield contract tests, before deployment. Restart/reload the actual Django workers after installing code; a file copy alone is not deployment.
 
 If a bridge is paused, unpublished, missing, expired or repeatedly failing, leave the chain blocked. Repair or publish a reviewed replacement and restore its rollout before offering dependents. Never fake migration-ledger entries or a successful installed-version marker to force advancement.
+
+## Scheduled updates from 1.25.23
+
+The update timer also fires at the opening of a configured appliance-local
+window. The settings watcher recalculates that calendar when the window
+changes and preserves a stopped timer. A scheduled run checks the installed
+version, signed prerequisite and health at every hop, then evaluates the
+window again before starting the next hop. The Updates page reserves Review
+installation for manual mode.
+
+Older updaters predating 1.24.46 lack the window gate. For unattended legacy
+catch-up across windows, first verify the entire signed 1.25.23 package with
+the appliance's trusted verifier and extract it to a root-owned temporary
+directory. As root run `bash code/scripts/setup-updater-window.sh` from the
+verified extraction. This installs the scheduler independently of application
+code so a legacy checkpoint cannot overwrite it. Confirm the intended timer
+state before returning the appliance to service.
+
+On the portal run `manage.py check_required_bridges` daily. It verifies the
+signed production route from 1.24.29 (or ZENPLUS_OTA_OLDEST_SUPPORTED) and
+reports the release requiring attention seven days before its manifest expires.
+Publish and validate a supported replacement while the original route is valid.

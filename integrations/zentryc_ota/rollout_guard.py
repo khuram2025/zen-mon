@@ -15,7 +15,7 @@ CATALOG_BRIDGE_ENTRY = "1.24.35"
 FIRST_CATALOG_DEPENDENT = "1.24.38"
 
 
-def validate_rollout_path(release, data):
+def validate_rollout_path(release, data, *, installed=None, valid_for_days=0):
     from django.conf import settings
     from ota.models import Release
 
@@ -35,6 +35,8 @@ def validate_rollout_path(release, data):
         # this scope; full-chain mode continues to verify those too.
         if not getattr(settings, "ZENPLUS_OTA_VALIDATE_FULL_CHAIN", False):
             start = CATALOG_BRIDGE_ENTRY
+    if installed is not None:
+        start = min((start, installed), key=version_key)
     path = plan_upgrade(start, release, catalog)
     if requires_catalog and not any(step.version == CATALOG_BRIDGE for step in path):
         raise ValueError(f"Required path bypasses catalog bridge {CATALOG_BRIDGE}")
@@ -58,6 +60,9 @@ def validate_rollout_path(release, data):
             released = released.replace(tzinfo=timezone.utc)
         if not datetime.now(timezone.utc) - timedelta(days=30) <= released <= datetime.now(timezone.utc) + timedelta(days=1):
             raise ValueError(f"Prerequisite {step.version} is outside the default manifest age window; publish a supported replacement path")
+        if valid_for_days and released + timedelta(days=30) <= datetime.now(timezone.utc) + timedelta(days=valid_for_days):
+            expiry = (released + timedelta(days=30)).date()
+            raise ValueError(f"Signed release {step.version} expires on {expiry}. Publish a supported replacement path.")
         if step.pk == release.pk:
             continue
         policy = step.rollout_policies.order_by("-created_at").first()

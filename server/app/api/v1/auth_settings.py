@@ -42,6 +42,7 @@ from app.services.external_auth import (
     RADIUS_SETTINGS_KEY,
     ExternalAuthError,
     explain_ldap_role,
+    ldap_username_rule,
     explain_radius_role,
     ldap_authenticate,
     ldap_test_bind,
@@ -63,6 +64,7 @@ _META_FIELDS = ("revision", "updated_at", "updated_by")
 
 
 class RoleMapping(BaseModel):
+    kind: Optional[Literal["group", "username"]] = None
     group: Optional[str] = Field(None, max_length=1024)   # LDAP group DN or CN
     value: Optional[str] = Field(None, max_length=1024)   # RADIUS reply value
     attribute: Optional[str] = Field(None, max_length=32)  # RADIUS attribute the value must come from
@@ -242,12 +244,18 @@ async def _validate_mappings(db: AsyncSession, spec: dict, mappings: list[dict],
         if attr and attr not in RADIUS_ATTRIBUTES:
             problems.append(f"Rule {i}: unknown RADIUS attribute '{attr}'")
             continue
-        key = (match.lower(), (attr or "").lower())
+        kind = m.get("kind") or "group"
+        if kind == "username" and spec["key"] != LDAP_SETTINGS_KEY:
+            problems.append(f"Rule {i}: username rules require Active Directory")
+            continue
+        key = (kind, match.lower(), (attr or "").lower())
         if key in seen:
             problems.append(f"Rule {i} duplicates rule {seen[key]} ('{match}'); the later rule can never match")
             continue
         seen[key] = i
         row = {match_key: match, "role": role}
+        if kind == "username":
+            row["kind"] = kind
         if spec["list"] == "class_mappings":
             row["attribute"] = attr or ""
         cleaned.append(row)
@@ -608,7 +616,7 @@ async def set_provider_enabled(
 # ── tests ─────────────────────────────────────────────────────────────────────
 
 async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, role: Optional[str],
-                     roles: dict[str, set[str]]) -> dict:
+                     roles: dict[str, set[str]], *, named_account: bool = False) -> dict:
     """Would ZenPlus admit this directory user? A read-only evaluation of the same
     policy the sign-in path applies; it never provisions or updates anything."""
     label = _PROVIDERS[provider]["label"]
@@ -617,7 +625,7 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
         reasons.append({"code": "provider_disabled",
                         "message": f"{label} is not enabled, so its users cannot sign in yet"})
     existing = (await db.execute(text(
-        "SELECT auth_source, is_active, role_manual, role FROM users WHERE lower(username) = lower(:u) "
+        "SELECT auth_source, is_active, role_manual, role, ldap_username_rule_required FROM users WHERE lower(username) = lower(:u) "
         "ORDER BY (username = :u) DESC LIMIT 1"),   # as sign-in resolves it (auth._find_user)
         {"u": username.strip()})).first()
     # A role an administrator set by hand is kept at sign-in: the mapped role is
@@ -632,9 +640,9 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
                                        f"takes precedence; this {label} user cannot sign in as it"})
         elif not existing[1]:
             reasons.append({"code": "account_disabled", "message": "The ZenPlus account for this user is disabled"})
-    elif not cfg.get("auto_provision"):
+    if not cfg.get("auto_provision") and (existing is None or (provider == "ldap" and existing[4])) and not named_account:
         reasons.append({"code": "provisioning_disabled",
-                        "message": "Automatic account creation is off and no ZenPlus account exists for this user"})
+                        "message": "Listed accounts mode requires an assigned account or a matching AD username rule"})
     if uses_listed_role:
         if existing[3] not in roles:
             reasons.append({"code": "role_missing", "message": "The role assigned in Users does not exist"})
@@ -696,9 +704,13 @@ async def test_ldap(
             steps.append({"name": "credentials", "ok": False, "message": "User not found or invalid credentials"})
             return {"success": False, "message": "User not found or invalid credentials", "steps": steps}
         steps.append({"name": "credentials", "ok": True})
-        role, matched = explain_ldap_role(cfg, info["groups"])
+        verified_name = info.get("ad_username", "")
+        if verified_name.lower() != data.username.strip().lower():
+            verified_name = ""
+        role, matched = explain_ldap_role(cfg, info["groups"], verified_name)
         roles = await _existing_roles(db)
-        admission = await _admission(db, "ldap", cfg, data.username, role, roles)
+        named = bool(ldap_username_rule(cfg, verified_name)[0])
+        admission = await _admission(db, "ldap", cfg, data.username, role, roles, named_account=named)
         if not admission["uses_listed_role"]:
             steps.append({"name": "mapping", "ok": role is not None})
         steps.append({"name": "admission", "ok": admission["would_sign_in"]})
