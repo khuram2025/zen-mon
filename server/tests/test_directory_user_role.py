@@ -64,12 +64,17 @@ def admin(db):
 def sign_in(db, monkeypatch, username, groups, *, full_name="Dir Name", email=None):
     """One LDAP sign-in through the real login path; only the directory answer is faked."""
     from app.api.v1 import auth
-    from app.schemas.auth import LoginRequest
 
     def fake_ldap(cfg, user, password):
         return {"dn": f"CN={user},DC=example,DC=test", "groups": list(groups), "email": email, "full_name": full_name}
 
     monkeypatch.setattr(auth, "ldap_authenticate", fake_ldap)
+    return login(db, username)
+
+
+def login(db, username):
+    from app.api.v1 import auth
+    from app.schemas.auth import LoginRequest
 
     async def go():
         async with sessions(db) as factory:
@@ -127,6 +132,50 @@ def test_a_new_directory_account_is_provisioned_on_the_mapped_role(db, monkeypat
     assert row(db, uid)["role"] == "operator" and row(db, uid)["directory_role"] == "operator"
     with admin(db) as c:
         assert c.get(f"/api/v1/users/{uid}").json()["role_source"] == "directory"
+
+
+def test_ldap_listed_accounts_use_the_role_assigned_in_users(db, monkeypatch):
+    from fastapi import HTTPException
+    from app.api.v1 import auth, auth_settings
+
+    original = db.scalar("SELECT value FROM system_settings WHERE key = 'auth.ldap'")
+    restricted = {**original, "auto_provision": False, "group_mappings": [], "default_role": ""}
+    db.execute("UPDATE system_settings SET value = $1::jsonb WHERE key = 'auth.ldap'", restricted)
+    name = f"listed{uuid.uuid4().hex[:8]}"
+    data = {"username": name, "email": f"{name}@example.test", "auth_source": "ldap", "role": "operator"}
+    try:
+        with admin(db) as c:
+            assert c.post("/api/v1/users", json={**data, "auth_source": "local"}).status_code == 422
+            assert c.post("/api/v1/users", json={**data, "password": "unused-local-password"}).status_code == 422
+            r = c.post("/api/v1/users", json=data)
+            assert r.status_code == 201, r.text
+            account = r.json()
+            assert (account["auth_source"], account["role_source"], account["role"]) == ("ldap", "manual", "operator")
+
+            directory_answer = {"dn": f"CN={name},DC=example,DC=test", "groups": [], "email": None, "full_name": None}
+            monkeypatch.setattr(auth_settings, "ldap_authenticate", lambda *_: directory_answer)
+            result = c.post("/api/v1/system/auth/ldap/test", json={"username": name, "password": "directory-password"})
+            assert result.status_code == 200, result.text
+            assert result.json()["would_sign_in"] and result.json()["account_role"] == "operator"
+
+            assert sign_in(db, monkeypatch, name.upper(), []).user.role == "operator"
+            assert row(db, account["id"])["directory_role"] is None
+
+            def directory_must_not_be_called(*_):
+                pytest.fail("unlisted names must never reach LDAP in listed-accounts mode")
+
+            monkeypatch.setattr(auth, "ldap_authenticate", directory_must_not_be_called)
+            with pytest.raises(HTTPException) as denied:
+                login(db, f"unlisted-{name}")
+            assert denied.value.status_code == 401
+            assert db.scalar("SELECT count(*) FROM users WHERE username = $1", f"unlisted-{name}") == 0
+
+            assert c.put(f"/api/v1/users/{account['id']}", json={"is_active": False}).status_code == 200
+            with pytest.raises(HTTPException) as denied:
+                sign_in(db, monkeypatch, name, [])
+            assert denied.value.status_code == 403 and "disabled" in denied.value.detail
+    finally:
+        db.execute("UPDATE system_settings SET value = $1::jsonb WHERE key = 'auth.ldap'", original)
 
 
 # ── the directory still decides who gets in ──────────────────────────────────

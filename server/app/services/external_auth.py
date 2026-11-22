@@ -54,7 +54,7 @@ LDAP_DEFAULTS: dict = {
     "group_attr": "memberOf",
     "group_mappings": [],   # [{"group": "CN=NetAdmins,...", "role": "admin"}]
     "default_role": "",
-    "auto_provision": True,
+    "auto_provision": False,
     # Server-managed metadata (not part of the editable form).
     "revision": 0,
     "updated_at": "",
