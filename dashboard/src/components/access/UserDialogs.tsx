@@ -130,7 +130,7 @@ export function UserDetailDialog({ user, onClose, canManage }: { user: User | nu
       <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>{user?.full_name || user?.username}</DialogTitle>
-          <DialogDescription>{user?.username} · {user?.email} · created {when(user?.created_at)}</DialogDescription>
+          <DialogDescription>{[user?.username, user?.email, `created ${when(user?.created_at)}`].filter(Boolean).join(' · ')}</DialogDescription>
         </DialogHeader>
         <Tabs defaultValue="access">
           <TabsList className="bg-surface2/50 p-1">

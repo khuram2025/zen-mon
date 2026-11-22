@@ -39,7 +39,7 @@ from app.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
-from app.services import auth_policy, oidc_service, role_source, session_service
+from app.services import auth_policy, oidc_service, role_source, session_service, user_profile
 from app.services.audit_service import write_audit_log
 from app.services.external_auth import (
     EXTERNAL_PASSWORD_HASH,
@@ -127,15 +127,12 @@ async def _external_login(
                    if c["enabled"] and c.get("auto_provision")]
 
     for source, cfg in sources:
-        email: Optional[str] = None
-        full_name: Optional[str] = None
         try:
             if source == "ldap":
                 info = await asyncio.to_thread(ldap_authenticate, cfg, username, password)
                 if info is None:
                     continue
                 role = map_ldap_role(cfg, info["groups"])
-                email, full_name = info["email"], info["full_name"]
             else:
                 info = await asyncio.to_thread(radius_authenticate, cfg, username, password)
                 if info is None:
@@ -167,14 +164,10 @@ async def _external_login(
             )
 
         if existing is None:
-            candidate = email or f"{username}@{source}.external"
-            if not await _email_available(db, candidate, own_id=None):
-                candidate = f"{username}@{source}.external"
             user = User(
                 username=username,
-                email=candidate,
+                email=None if source == "ldap" else f"{username}@{source}.external",
                 password_hash=EXTERNAL_PASSWORD_HASH,
-                full_name=full_name,
                 role=role,
                 is_active=True,
                 auth_source=source,
@@ -190,10 +183,8 @@ async def _external_login(
             previous = role_source.apply_directory_role(user, role)
             if previous is not None:
                 logger.info("%s user %r role refreshed %r -> %r", source, username, previous, role)
-            if full_name:
-                user.full_name = full_name
-            if email and email != user.email and await _email_available(db, email, own_id=user.id):
-                user.email = email
+        if source == "ldap":
+            await user_profile.sync_ldap_profile(db, user, info)
         return user
 
     return None

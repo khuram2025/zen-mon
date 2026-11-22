@@ -1,4 +1,5 @@
 from app.core.crypto import decrypt_config
+import asyncio
 import csv
 import io
 import logging
@@ -26,9 +27,11 @@ from app.core.permissions import (
 from app.core.security import get_current_user, hash_password, require_permission
 from app.models.role import Role
 from app.models.user import User
-from app.services import role_source, session_service, tag_service
+from app.services import role_source, session_service, tag_service, user_profile
 from app.services.audit_service import write_audit_log
-from app.services.external_auth import EXTERNAL_PASSWORD_HASH
+from app.services.external_auth import (
+    EXTERNAL_PASSWORD_HASH, LDAP_DEFAULTS, LDAP_SETTINGS_KEY, ExternalAuthError, ldap_lookup_user, merge_config,
+)
 
 router = APIRouter(prefix="/users", tags=["User Management"])
 logger = logging.getLogger(__name__)
@@ -38,6 +41,8 @@ async def _send_account_notice(db: AsyncSession, user: User, *, subject: str,
                                title: str, message: str, changed_by: str) -> None:
     """Best-effort security notice to the affected user. Never raises: account
     changes must succeed even when no SMTP gateway is configured."""
+    if not user.email:
+        return
     try:
         row = (await db.execute(text(
             "SELECT config FROM notification_gateways "
@@ -109,7 +114,6 @@ async def _role_permissions(db: AsyncSession, name: str) -> list[str]:
 
 # ── Identity validation ───────────────────────────────────────────────────────
 
-_EMAIL_RE = re.compile(r"^[^@\s<>()\[\],;:\\\"]+@[^@\s<>()\[\],;:\\\"]+\.[^@\s<>()\[\],;:\\\"]{2,}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -121,13 +125,6 @@ def _clean_username(value: str) -> str:
         raise ValueError("Username must be 3-100 characters")
     if _CONTROL_RE.search(v):
         raise ValueError("Username must not contain control characters")
-    return v
-
-
-def _clean_email(value: str) -> str:
-    v = (value or "").strip().lower()
-    if len(v) > 255 or not _EMAIL_RE.match(v):
-        raise ValueError("Enter a valid email address")
     return v
 
 
@@ -143,7 +140,7 @@ def _clean_timezone(value: Optional[str]) -> Optional[str]:
 
 class UserCreate(BaseModel):
     username: str = Field(..., max_length=100)
-    email: str = Field(..., max_length=255)
+    email: Optional[str] = Field(None, max_length=255)
     password: Optional[str] = Field(None, min_length=password_policy.MIN_LENGTH, max_length=password_policy.MAX_LENGTH)
     full_name: Optional[str] = Field(None, max_length=255)
     role: str = Field(default="viewer")
@@ -163,8 +160,8 @@ class UserCreate(BaseModel):
 
     @field_validator("email")
     @classmethod
-    def _v_email(cls, v: str) -> str:
-        return _clean_email(v)
+    def _v_email(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else user_profile.clean_email(v)
 
     @field_validator("full_name")
     @classmethod
@@ -192,7 +189,7 @@ class UserUpdate(BaseModel):
     @field_validator("email")
     @classmethod
     def _v_email(cls, v: Optional[str]) -> Optional[str]:
-        return None if v is None else _clean_email(v)
+        return None if v is None else user_profile.clean_email(v)
 
     @field_validator("timezone")
     @classmethod
@@ -214,7 +211,7 @@ class ChangePasswordRequest(BaseModel):
 class UserOut(BaseModel):
     id: UUID
     username: str
-    email: str
+    email: Optional[str]
     full_name: Optional[str]
     role: str
     is_active: bool
@@ -435,7 +432,7 @@ async def access_review_export(
 
         def cell(v: str) -> str:   # neutralize spreadsheet formula injection
             return ("'" + v) if v and v[0] in "=+-@\t\r" else v
-        w.writerow([cell(u.username), cell(u.full_name or ""), cell(u.email),
+        w.writerow([cell(u.username), cell(u.full_name or ""), cell(u.email or ""),
                     "active" if u.is_active else "disabled",
                     "yes" if (u.locked_until and u.locked_until > now) else "no", u.auth_source, u.role,
                     len(perms), " ".join(risky), cell(scope), "yes" if u.mfa_enabled else "no",
@@ -651,6 +648,8 @@ async def create_user(
     is_local = data.auth_source == "local"
     password_hash = EXTERNAL_PASSWORD_HASH
     if is_local:
+        if data.email is None:
+            raise HTTPException(status_code=422, detail="An email address is required for a local account")
         if data.password is None:
             raise HTTPException(status_code=422, detail="A password is required for a local account")
         problems = password_policy.problems(data.password, username=data.username, email=data.email,
@@ -661,17 +660,29 @@ async def create_user(
     elif data.password is not None or data.must_change_password:
         raise HTTPException(status_code=422, detail="LDAP accounts use their directory password")
 
-    await _assert_unique_identity(db, username=data.username, email=data.email)
+    email = data.email if is_local else None
+    await _assert_unique_identity(db, username=data.username, email=email)
     role_scope = list(role.scope_tags or []) if role is not None else []
     scope_tags = await delegation.validate_assigned_scope(
         db, current_user, await tag_service.canonicalize_tags(db, data.scope_tags), role_scope=role_scope)
     await delegation.assert_effective_scope_within(db, current_user, scope_tags, role_scope)
 
+    directory_info = None
+    if not is_local:
+        from app.api.v1.settings import _get_system_setting
+
+        cfg = merge_config(LDAP_DEFAULTS, await _get_system_setting(db, LDAP_SETTINGS_KEY))
+        if cfg["enabled"]:
+            try:
+                directory_info = await asyncio.to_thread(ldap_lookup_user, cfg, data.username)
+            except ExternalAuthError:
+                logger.warning("LDAP profile lookup failed when adding %r", data.username)
+
     user = User(
         username=data.username,
-        email=data.email,
+        email=email,
         password_hash=password_hash,
-        full_name=data.full_name,
+        full_name=data.full_name if is_local else None,
         role=data.role,
         is_active=data.is_active,
         auth_source=data.auth_source,
@@ -686,6 +697,8 @@ async def create_user(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="That username or email address is already in use")
+    if directory_info is not None:
+        await user_profile.sync_ldap_profile(db, user, directory_info)
     await write_audit_log(
         db,
         actor=current_user,

@@ -30,7 +30,7 @@ class TokenResponse(BaseModel):
 class UserResponse(BaseModel):
     id: UUID
     username: str
-    email: str
+    email: Optional[str]
     full_name: Optional[str]
     role: str
     auth_source: str = "local"

@@ -7,7 +7,7 @@ import type { PageSet } from '@/components/layout/navAccess'
 export type User = {
   id: string
   username: string
-  email: string
+  email: string | null
   full_name?: string
   role: string
   auth_source?: 'local' | 'ldap' | 'radius' | 'oidc'

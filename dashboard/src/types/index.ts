@@ -102,7 +102,7 @@ export interface PaginatedResponse<T> {
 export interface User {
   id: string
   username: string
-  email: string
+  email: string | null
   full_name: string | null
   role: string
   is_active?: boolean
