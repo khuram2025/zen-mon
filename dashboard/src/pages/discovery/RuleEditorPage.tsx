@@ -50,6 +50,7 @@ import type {
   RuleDraft,
   RuleMode,
   RuleEngineSettings,
+  RuleSchedule,
   RuleTrigger,
   RuleVersion,
 } from './types'
@@ -64,6 +65,11 @@ import {
   defaultInterfacePattern,
   moveItem,
   scheduleText,
+  defaultSchedule,
+  describeSchedule,
+  scheduleProblems,
+  HOURLY_STEPS,
+  WEEKDAY_SHORT,
   ENFORCEMENT_HELP,
   ENFORCEMENT_LABEL,
   MODE_HELP,
@@ -122,6 +128,7 @@ import {
   useRuleCatalog,
   useRuleLookups,
   useWithDeviceNames,
+  TimeZoneList,
 } from './ruleUi'
 
 const TRIGGERS: RuleTrigger[] = ['discovery', 'created', 'changed', 'scheduled']
@@ -146,6 +153,7 @@ function draftOf(rule: DiscoveryRule): RuleDraft {
     enforcement: rule.enforcement === 'enforce' ? 'enforce' : 'set_once',
     on_unmatch: rule.on_unmatch === 'revert' ? 'revert' : 'keep',
     max_changes_per_run: rule.max_changes_per_run ?? null,
+    schedule: rule.schedule ?? null,
   }
 }
 
@@ -387,12 +395,12 @@ export function RuleEditorPage() {
               </div>
             )}
             {draft.triggers.includes('scheduled') && (
-              <div className="text-xs text-muted">
-                Runs over every device and server the rule looks at, at the times set under Rules → Settings:{' '}
-                {settings?.schedule_enabled
-                  ? `${scheduleText(settings)}.`
-                  : 'the schedule is off, so the rule runs only with “Run scheduled rules now”.'}
-              </div>
+              <ScheduleEditor
+                schedule={draft.schedule ?? null}
+                sharedText={settings?.schedule_enabled ? `${scheduleText(settings)}` : null}
+                nextRun={rule?.schedule && JSON.stringify(rule.schedule) === JSON.stringify(draft.schedule) ? rule.next_run_at : null}
+                onChange={(schedule) => update({ schedule })}
+              />
             )}
             {(draft.triggers.includes('changed') || draft.triggers.includes('scheduled')) && draft.mode === 'active' && (
               <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-fg">
@@ -1022,8 +1030,16 @@ function ActionsEditor({
 }) {
   const withChildren = draft.asset_kinds.includes('child')
   const available = pickableActions(catalog, draft.asset_kinds, draft.actions.map((a) => a.key))
-  const ordered = [...draft.actions].sort((a, b) => (a.key === 'decision' ? -1 : b.key === 'decision' ? 1 : 0))
+  // Custom field actions (one per field) share one card; every other action has its own, keyed by action key.
+  const customs = draft.actions.filter((a) => a.key === 'custom_field')
+  const ordered = draft.actions
+    .filter((a, i) => a.key !== 'custom_field' || draft.actions.findIndex((x) => x.key === 'custom_field') === i)
+    .sort((a, b) => (a.key === 'decision' ? -1 : b.key === 'decision' ? 1 : 0))
   const set = (key: string, next: RuleAction) => onChange(draft.actions.map((a) => (a.key === key ? next : a)))
+  const setCustoms = (next: RuleAction[]) => {
+    const rest = draft.actions.filter((a) => a.key !== 'custom_field')
+    onChange([...rest, ...next])
+  }
   const issues = actionProblems(draft, catalog)
 
   return (
@@ -1070,7 +1086,9 @@ function ActionsEditor({
                   <X className="h-4 w-4" />
                 </Button>
               </div>
-              {spec ? (
+              {spec && a.key === 'custom_field' ? (
+                <CustomFieldsEditor actions={customs} catalog={catalog} kinds={draft.asset_kinds} onChange={setCustoms} />
+              ) : spec ? (
                 <ActionValue action={a} spec={spec} catalog={catalog} options={options} lookups={lookups} onChange={(next) => set(a.key, next)} />
               ) : (
                 <div className="text-xs text-muted">{summarizeAction(a)}</div>
@@ -1243,12 +1261,233 @@ function ActionValue({
   }
 }
 
+/**
+ * When a rule with the scheduled trigger runs: the shared engine schedule (Rules → Settings), or its own: once, every
+ * N hours, on chosen weekdays, or monthly, at a local time in a time zone.
+ */
+function ScheduleEditor({
+  schedule,
+  sharedText,
+  nextRun,
+  onChange,
+}: {
+  schedule: RuleSchedule | null
+  sharedText: string | null
+  nextRun?: string | null
+  onChange: (s: RuleSchedule | null) => void
+}) {
+  const kind = schedule?.kind ?? 'shared'
+  const problems = scheduleProblems(schedule)
+  const KINDS: { key: RuleSchedule['kind'] | 'shared'; label: string }[] = [
+    { key: 'shared', label: 'Shared schedule' },
+    { key: 'once', label: 'Once' },
+    { key: 'hourly', label: 'Every few hours' },
+    { key: 'weekly', label: 'Daily / weekly' },
+    { key: 'monthly', label: 'Monthly' },
+  ]
+  return (
+    <div className="space-y-2 rounded-md border border-border p-3">
+      <div className="text-xs font-medium">Runs at</div>
+      <div className="flex flex-wrap gap-2">
+        {KINDS.map((k) => (
+          <ToggleChip
+            key={k.key}
+            active={kind === k.key}
+            onClick={() => onChange(k.key === 'shared' ? null : kind === k.key ? schedule : defaultSchedule(k.key, schedule?.timezone))}
+          >
+            {k.label}
+          </ToggleChip>
+        ))}
+      </div>
+      {!schedule ? (
+        <div className="text-xs text-muted">
+          Runs over every device and server the rule looks at, at the times set under Rules → Settings:{' '}
+          {sharedText ? `${sharedText}.` : 'the shared schedule is off, so the rule runs only with “Run scheduled rules now”.'}
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-end gap-3">
+          {schedule.kind === 'once' && (
+            <FormField label="Date and time">
+              <Input type="datetime-local" className="h-9" value={schedule.at} onChange={(e) => onChange({ ...schedule, at: e.target.value.slice(0, 16) })} />
+            </FormField>
+          )}
+          {schedule.kind === 'hourly' && (
+            <FormField label="Every">
+              <Select value={String(schedule.every_hours)} onValueChange={(v) => onChange({ ...schedule, every_hours: Number(v) })}>
+                <SelectTrigger className="h-9 w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {HOURLY_STEPS.map((h) => (
+                    <SelectItem key={h} value={String(h)}>{h === 1 ? '1 hour' : `${h} hours`}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FormField>
+          )}
+          {schedule.kind === 'weekly' && (
+            <FormField label="Days">
+              <div className="flex flex-wrap gap-1">
+                {WEEKDAY_SHORT.map((d, i) => (
+                  <ToggleChip
+                    key={d}
+                    active={schedule.days.includes(i)}
+                    onClick={() => onChange({ ...schedule, days: schedule.days.includes(i) ? schedule.days.filter((x) => x !== i) : [...schedule.days, i].sort() })}
+                  >
+                    {d}
+                  </ToggleChip>
+                ))}
+              </div>
+            </FormField>
+          )}
+          {schedule.kind === 'monthly' && (
+            <FormField label="Day of the month">
+              <Input type="number" min={1} max={28} className="h-9 w-24" value={schedule.day} onChange={(e) => onChange({ ...schedule, day: Math.trunc(Number(e.target.value)) })} />
+            </FormField>
+          )}
+          {schedule.kind !== 'once' && (
+            <FormField label={schedule.kind === 'hourly' ? 'Starting at' : 'At'}>
+              <Input type="time" className="h-9 w-32" value={schedule.time} onChange={(e) => onChange({ ...schedule, time: e.target.value })} />
+            </FormField>
+          )}
+          <FormField label="Time zone">
+            <Input
+              className="h-9 w-48"
+              list="discovery-rule-time-zones"
+              value={schedule.timezone}
+              maxLength={64}
+              onChange={(e) => onChange({ ...schedule, timezone: e.target.value.trim() })}
+            />
+            <TimeZoneList id="discovery-rule-time-zones" />
+          </FormField>
+        </div>
+      )}
+      {schedule && problems.length === 0 && (
+        <div className="text-xs text-muted">
+          {describeSchedule(schedule)}
+          {nextRun ? ` · next run ${regionalDate(new Date(nextRun), 'datetime')}` : ''}. Runs only while the rule is Active or Simulating and
+          the engine is on; a slot missed while it was off is not caught up.
+        </div>
+      )}
+      {problems.length > 0 && (
+        <ul className="list-disc pl-5 text-xs text-warning-fg">
+          {problems.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Set custom field" rows: one field and its value per row (a rule sets each field at most once). The value input
+ * follows the field's type; the server stores it in the field's canonical form.
+ */
+function CustomFieldsEditor({
+  actions,
+  catalog,
+  kinds,
+  onChange,
+}: {
+  actions: RuleAction[]
+  catalog: RuleCatalog
+  kinds: AssetKind[]
+  onChange: (next: RuleAction[]) => void
+}) {
+  const wanted = new Set(kinds.map((k) => (k === 'server' ? 'server' : 'device')))
+  const fields = (catalog.custom_fields ?? []).filter((f) => f.asset_kinds.some((k) => wanted.has(k)))
+  const used = new Set(actions.map((a) => a.value?.field))
+  const setRow = (i: number, value: { field: string; value: any }) =>
+    onChange(actions.map((a, j) => (j === i ? { ...a, value } : a)))
+  if (!fields.length) {
+    return (
+      <div className="text-xs text-muted">
+        No custom field applies to these assets. Add one under Network → Groups &amp; Fields.
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-2">
+      {actions.map((a, i) => {
+        const def = fields.find((f) => f.key === a.value?.field)
+        return (
+          <div key={i} className="flex flex-wrap items-center gap-2">
+            <Select value={a.value?.field || undefined} onValueChange={(field) => setRow(i, { field, value: '' })}>
+              <SelectTrigger className="h-9 w-48" aria-label="Custom field">
+                <SelectValue placeholder="Field…" />
+              </SelectTrigger>
+              <SelectContent>
+                {fields.map((f) => (
+                  <SelectItem key={f.key} value={f.key} disabled={used.has(f.key) && f.key !== a.value?.field}>
+                    {f.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="min-w-[10rem] flex-1">
+              {def?.field_type === 'choice' ? (
+                <Select value={a.value?.value || undefined} onValueChange={(v) => setRow(i, { field: def.key, value: v })}>
+                  <SelectTrigger className="h-9" aria-label={`${def.label} value`}>
+                    <SelectValue placeholder="Choose…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(def.choices ?? []).map((c) => (
+                      <SelectItem key={c} value={c}>{c}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : def?.field_type === 'boolean' ? (
+                <div className="flex gap-2">
+                  {[true, false].map((b) => (
+                    <ToggleChip key={String(b)} active={a.value?.value === b} onClick={() => setRow(i, { field: def.key, value: b })}>
+                      {b ? 'Yes' : 'No'}
+                    </ToggleChip>
+                  ))}
+                </div>
+              ) : (
+                <Input
+                  className="h-9"
+                  aria-label={def ? `${def.label} value` : 'Value'}
+                  type={def?.field_type === 'number' ? 'number' : def?.field_type === 'date' ? 'date' : 'text'}
+                  disabled={!def}
+                  value={a.value?.value ?? ''}
+                  onChange={(e) => setRow(i, { field: a.value?.field ?? '', value: e.target.value })}
+                />
+              )}
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted hover:text-danger"
+              title="Remove field"
+              onClick={() => onChange(actions.filter((_, j) => j !== i))}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        )
+      })}
+      {fields.some((f) => !used.has(f.key)) && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onChange([...actions, { key: 'custom_field', value: { field: fields.find((f) => !used.has(f.key))!.key, value: '' } }])}
+        >
+          <Plus className="h-3.5 w-3.5" /> Add field
+        </Button>
+      )}
+    </div>
+  )
+}
+
 /** Why a reference list is empty, for the actions whose list a role often cannot read or that start empty. */
 const EMPTY_SOURCE_TEXT: Record<string, string> = {
   manual_maps: 'No network map could be listed: create one under Network Maps, or ask for map access.',
   sensors: 'No sensor could be listed: add one under Sensors, or ask for sensor access.',
   agent_policies: 'No agent policy could be listed: create one under Servers → Agent policies.',
   service_check_templates: 'No service check template could be listed: create one under Service checks → Templates.',
+  sites: 'No site could be listed: create one when adding a server or under Sensors.',
 }
 
 /**

@@ -52,8 +52,8 @@ from app.schemas.discovery_rules import (
 from app.services import tag_service
 from app.services.audit_service import write_audit_log
 from app.services.discovery_rules import actions as rule_actions
-from app.services.discovery_rules import conditions, inventory, portable, reconcile, runner
-from app.services.discovery_rules.facts import ENUM_VALUES, FIELD_SOURCES, FIELDS, REFERENCE_SOURCES
+from app.services.discovery_rules import conditions, inventory, portable, reconcile, runner, schedules
+from app.services.discovery_rules.facts import ENUM_VALUES, FIELD_SOURCES, FIELDS, REFERENCE_SOURCES, custom_catalog
 
 router = APIRouter(prefix="/discovery-v2/rules", tags=["Discovery rules"])
 
@@ -70,6 +70,7 @@ _REF_TABLES = {
     "sensors": "sensors",
     "agent_policies": "agent_policies",
     "service_check_templates": "service_check_templates",
+    "sites": "sites",
 }
 
 
@@ -79,7 +80,31 @@ async def _fleet_guard(db: AsyncSession, user: User) -> None:
 
 
 def _out(row: DiscoveryEngineRule) -> RuleOut:
-    return RuleOut.model_validate(row, from_attributes=True)
+    out = RuleOut.model_validate(row, from_attributes=True)
+    if row.schedule and "scheduled" in (row.triggers or []):
+        out.schedule_text = schedules.describe(row.schedule)
+        out.next_run_at = schedules.next_slot(datetime.now(timezone.utc), row.schedule)
+    return out
+
+
+def _schedule_or_422(payload) -> dict | None:
+    """The rule's own schedule, validated; only with the "scheduled" trigger."""
+    if payload.schedule is None:
+        return None
+    if "scheduled" not in payload.triggers:
+        raise HTTPException(422, "A schedule of its own needs the \"scheduled\" trigger")
+    try:
+        return schedules.validate(payload.schedule)
+    except schedules.ScheduleError as e:
+        raise HTTPException(422, str(e)) from None
+
+
+def _set_schedule(row: DiscoveryEngineRule, schedule: dict | None, now: datetime) -> None:
+    """Store a (changed) schedule with its starting point: the next slot runs,
+    a missed one is not caught up; a one-time run runs at its time."""
+    if schedule != row.schedule or schedule is None:
+        row.schedule = schedule
+        row.schedule_last_slot = schedules.starting_point(schedule, now)
 
 
 def _snapshot(row: DiscoveryEngineRule) -> dict:
@@ -89,6 +114,7 @@ def _snapshot(row: DiscoveryEngineRule) -> dict:
         "condition": row.condition, "actions": row.actions, "stop_processing": row.stop_processing,
         "triggers": list(row.triggers or []), "enforcement": row.enforcement, "on_unmatch": row.on_unmatch,
         "max_changes_per_run": row.max_changes_per_run,
+        "schedule": row.schedule,
     }
 
 
@@ -115,13 +141,47 @@ def _leaf_refs(node: dict, out: list) -> None:
         out.extend((src, str(v)) for v in vals)
 
 
-async def _normalise(db: AsyncSession, payload) -> tuple[dict, list[dict], list[str] | None]:
-    """Validated condition, actions and profile ids, or 422 naming the problem."""
+async def _custom_defs(db: AsyncSession) -> list[dict]:
+    from app.services import custom_fields
+    return await custom_fields.defs(db)
+
+
+async def _validate_rule(db: AsyncSession, condition_in: dict, actions_in: list, kinds: list[str]
+                         ) -> tuple[dict, list[dict]]:
+    """Validated condition and actions, custom fields included, or 422.
+
+    Custom field conditions (``custom.<key>``) are validated against the
+    field's type and stored with it; "Set custom field" values are coerced to
+    the field's type (the stored value is the field's canonical form)."""
+    from app.services import custom_fields
+    defs = await _custom_defs(db)
+    cf_fields, cf_enums, _ = custom_catalog(defs)
     try:
-        condition = conditions.validate(payload.condition)
-        acts = rule_actions.validate_actions(payload.actions, list(payload.asset_kinds))
+        condition = conditions.validate(condition_in, fields={**FIELDS, **cf_fields},
+                                        enums={**ENUM_VALUES, **cf_enums})
+        acts = rule_actions.validate_actions(actions_in, kinds)
     except (conditions.ConditionError, rule_actions.ActionError) as e:
         raise HTTPException(422, str(e)) from None
+    condition = conditions.stamp_custom_types(condition, cf_fields)
+    by_key = {d["key"]: d for d in defs}
+    asset_kinds = {"server" if k == "server" else "device" for k in kinds}
+    for a in acts:
+        if a["key"] != "custom_field":
+            continue
+        d = by_key.get(a["value"]["field"])
+        if d is None:
+            raise HTTPException(422, f"Unknown custom field: {a['value']['field']}")
+        if not asset_kinds & set(d["asset_kinds"] or []):
+            raise HTTPException(422, f"{d['label']} does not apply to the rule's assets "
+                                     f"(it is a field of {', '.join(d['asset_kinds'])}s)")
+        cols = custom_fields.coerce(d, a["value"]["value"])   # 422 naming the problem
+        a["value"] = {"field": d["key"], "value": custom_fields.display(cols)}
+    return condition, acts
+
+
+async def _normalise(db: AsyncSession, payload) -> tuple[dict, list[dict], list[str] | None]:
+    """Validated condition, actions and profile ids, or 422 naming the problem."""
+    condition, acts = await _validate_rule(db, payload.condition, payload.actions, list(payload.asset_kinds))
     refs: list[tuple[str, str]] = []
     _leaf_refs(condition, refs)
     for a in acts:
@@ -185,22 +245,32 @@ async def _name_taken(db: AsyncSession, name: str, exclude: uuid.UUID | None = N
 # ── catalog and settings ────────────────────────────────────────────────────
 
 @router.get("/catalog")
-async def catalog(_user: User = Depends(require_permission("discovery.view"))):
-    """Fields with their operators, actions and limits; the rule builder is drawn from it."""
+async def catalog(db: AsyncSession = Depends(get_db),
+                  _user: User = Depends(require_permission("discovery.view"))):
+    """Fields with their operators, actions and limits; the rule builder is drawn from it.
+    Custom fields (Groups & Fields) are listed as ``custom.<key>`` facts of the
+    devices and servers they apply to."""
+    defs = await _custom_defs(db)
+    cf_fields, cf_enums, cf_sources = custom_catalog(defs)
+    enums = {**ENUM_VALUES, **cf_enums}
+    sources = {**FIELD_SOURCES, **cf_sources}
     fields = []
-    for key, (ftype, label, help_) in FIELDS.items():
+    for key, (ftype, label, help_) in {**FIELDS, **cf_fields}.items():
         fields.append({
             "key": key, "type": ftype, "label": label, "help": help_,
             "operators": [{"key": op, "label": lbl, "value": kind}
                           for op, (lbl, kind) in conditions.OPERATORS[ftype].items()],
-            "values": ENUM_VALUES.get(key), "source": REFERENCE_SOURCES.get(key),
-            "applies_to": FIELD_SOURCES.get(key, []),
+            "values": enums.get(key), "source": REFERENCE_SOURCES.get(key),
+            "applies_to": sources.get(key, []), "custom": key in cf_fields,
         })
     return {
         "fields": fields,
         "groups": [{"key": "all", "label": "All of"}, {"key": "any", "label": "Any of"},
                    {"key": "none", "label": "None of"}],
         "actions": rule_actions.catalog(),
+        "custom_fields": [{"key": d["key"], "label": d["label"], "field_type": d["field_type"],
+                           "choices": d.get("choices"), "asset_kinds": list(d.get("asset_kinds") or [])}
+                          for d in defs],
         "decisions": list(rule_actions.DECISIONS),
         "import_as": list(rule_actions.IMPORT_AS),
         "device_types": list(rule_actions.DEVICE_TYPES),
@@ -242,6 +312,14 @@ async def put_settings(payload: EngineSettings, db: AsyncSession = Depends(get_d
     await _fleet_guard(db, user)
     before = await runner.load_settings(db)
     after = await runner.save_settings(db, payload.model_dump(), user.id)
+    if after.get("enabled") and not before.get("enabled"):
+        # Rules with their own schedule start from now: slots missed while the
+        # engine was off are not caught up (one-time runs still run).
+        now = datetime.now(timezone.utc)
+        for r in (await db.execute(select(DiscoveryEngineRule).where(DiscoveryEngineRule.schedule.is_not(None))
+                                   )).scalars().all():
+            if r.schedule.get("kind") != "once":
+                r.schedule_last_slot = schedules.starting_point(r.schedule, now)
     await write_audit_log(db, actor=user, action="discovery.rules.settings", resource_type="discovery_rules",
                           resource_id=None, metadata={"before": before, "after": after})
     await db.commit()
@@ -261,6 +339,7 @@ async def _create(db: AsyncSession, payload: RuleCreate, user: User, *, reason: 
                   builtin_key: str | None = None) -> DiscoveryEngineRule:
     """Validate and insert one rule with its first version (no commit)."""
     condition, acts, profile_ids = await _normalise(db, payload)
+    schedule = _schedule_or_422(payload)
     if payload.mode == "active":
         await _check_activation(db, user, acts, list(payload.asset_kinds))
     edge = (await db.execute(select(func.min(DiscoveryEngineRule.priority) if payload.position == "first"
@@ -276,6 +355,7 @@ async def _create(db: AsyncSession, payload: RuleCreate, user: User, *, reason: 
         created_by=user.id, updated_by=user.id, created_at=now, updated_at=now,
         activated_by=user.id if payload.mode == "active" else None,
         activated_at=now if payload.mode == "active" else None,
+        schedule=schedule, schedule_last_slot=schedules.starting_point(schedule, now),
     )
     db.add(row)
     await db.flush()
@@ -333,11 +413,7 @@ async def preview(payload: PreviewRequest, db: AsyncSession = Depends(get_db),
         rules = await runner.load_rules(db)
     if payload.rule is not None:
         draft = payload.rule
-        try:
-            condition = conditions.validate(draft.condition)
-            acts = rule_actions.validate_actions(draft.actions, list(draft.asset_kinds))
-        except (conditions.ConditionError, rule_actions.ActionError) as e:
-            raise HTTPException(422, str(e)) from None
+        condition, acts = await _validate_rule(db, draft.condition, draft.actions, list(draft.asset_kinds))
         draft_id = str(draft.id) if draft.id else "00000000-0000-0000-0000-000000000000"
         priority = draft.priority
         if priority is None and draft.id:
@@ -615,7 +691,15 @@ async def schedule_status(db: AsyncSession = Depends(get_db),
             "engine_enabled": bool(settings["enabled"]), "schedule_enabled": bool(settings.get("schedule_enabled")),
             "next": reconcile.next_slot(now, settings).isoformat(),
             "last_slot": state.get("last_scheduled_slot"), "last_run_at": state.get("last_scheduled_run_at"),
-            "rules": len(active), "simulating": len(simulating),
+            "rules": len([r for r in active if not r.get("schedule")]),
+            "simulating": len([r for r in simulating if not r.get("schedule")]),
+            "own_schedules": [{"id": r["id"], "name": r["name"], "mode": r["mode"],
+                               "schedule": schedules.describe(r["schedule"]),
+                               "next": (lambda n: n.isoformat() if n else None)(
+                                   schedules.next_slot(now, r["schedule"]) if settings["enabled"] else None),
+                               "last_slot": r["schedule_last_slot"].isoformat()
+                               if isinstance(r.get("schedule_last_slot"), datetime) else r.get("schedule_last_slot")}
+                              for r in active + simulating if r.get("schedule")],
             "last_run": dict(last) if last else None}
 
 
@@ -823,10 +907,15 @@ async def update_rule(rule_id: uuid.UUID, payload: RuleUpdate, db: AsyncSession 
     if await _name_taken(db, payload.name, exclude=row.id):
         raise HTTPException(409, "A rule with this name already exists")
     condition, acts, profile_ids = await _normalise(db, payload)
+    schedule = _schedule_or_422(payload)
     if payload.mode == "active":
         await _check_activation(db, user, acts, list(payload.asset_kinds))
     before = _snapshot(row)
     now = datetime.now(timezone.utc)
+    waking = row.mode in ("draft", "disabled") and payload.mode in ("active", "simulate")
+    _set_schedule(row, schedule, now)
+    if waking and schedule and schedule["kind"] != "once":
+        row.schedule_last_slot = schedules.starting_point(schedule, now)
     if payload.mode == "active" and (row.mode != "active" or acts != row.actions):
         row.activated_by, row.activated_at = user.id, now
     row.name = payload.name.strip()
@@ -864,6 +953,10 @@ async def set_mode(rule_id: uuid.UUID, payload: RuleModeRequest, db: AsyncSessio
         await _check_activation(db, user, list(row.actions or []), list(row.asset_kinds or ["device"]))
         row.activated_by, row.activated_at = user.id, datetime.now(timezone.utc)
     previous = row.mode
+    if previous in ("draft", "disabled") and payload.mode in ("active", "simulate") and row.schedule \
+            and row.schedule.get("kind") != "once":
+        # an idle rule does not catch up the slots it missed
+        row.schedule_last_slot = schedules.starting_point(row.schedule, datetime.now(timezone.utc))
     row.mode = payload.mode
     row.revision += 1
     row.updated_by = user.id
@@ -894,6 +987,8 @@ async def clone_rule(rule_id: uuid.UUID, db: AsyncSession = Depends(get_db),
         asset_kinds=list(src.asset_kinds or ["device"]), triggers=list(src.triggers or ["discovery"]),
         profile_ids=src.profile_ids, condition=src.condition, actions=src.actions,
         stop_processing=src.stop_processing, enforcement=src.enforcement, on_unmatch=src.on_unmatch,
+        max_changes_per_run=src.max_changes_per_run, schedule=src.schedule,
+        schedule_last_slot=schedules.starting_point(src.schedule, now),
         revision=1, created_by=user.id,
         updated_by=user.id,
         created_at=now, updated_at=now,

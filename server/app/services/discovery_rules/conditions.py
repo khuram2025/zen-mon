@@ -277,6 +277,20 @@ def validate(node: Any, *, _depth: int = 1, _count: list | None = None,
     return _validate_leaf(node, fields, enums)
 
 
+CUSTOM_PREFIX = "custom."
+
+
+def stamp_custom_types(node: dict, fields: dict) -> dict:
+    """Copy of a validated tree whose custom field leaves (``custom.<key>``)
+    carry the field's type, so the engine evaluates them without the custom
+    field catalog. A custom field's key and type never change."""
+    if "op" in node:
+        return {**node, "conditions": [stamp_custom_types(c, fields) for c in node.get("conditions") or []]}
+    if str(node.get("field")).startswith(CUSTOM_PREFIX) and node["field"] in fields:
+        return {**node, "type": fields[node["field"]][0]}
+    return node
+
+
 def fields_used(node: dict) -> set[str]:
     if "op" in node:
         out: set[str] = set()
@@ -329,9 +343,14 @@ def _text(value: Any) -> str:
 def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None, *, strict_booleans: bool = False) -> bool:
     field, op, want = leaf["field"], leaf["operator"], leaf.get("value")
     catalog = fields if fields is not None else FIELDS
-    if field not in catalog:          # a field removed since the tree was saved (custom field deleted)
+    if field in catalog:
+        ftype = catalog[field][0]
+    elif str(field).startswith(CUSTOM_PREFIX) and leaf.get("type") in OPERATORS:
+        # A discovery rule's custom field leaf carries the field's type, which
+        # never changes (see ``stamp_custom_types``).
+        ftype = leaf["type"]
+    else:                             # a field removed since the tree was saved (custom field deleted)
         return op in NEGATIVE
-    ftype = catalog[field][0]
     have = facts.get(field)
 
     if ftype == "inventory":

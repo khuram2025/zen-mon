@@ -38,6 +38,10 @@ class RuleIn(BaseModel):
     # Automatic runs ("changed", "scheduled") in which this rule would make
     # more changes wait for approval. None: only the engine-wide limit.
     max_changes_per_run: Optional[int] = Field(default=None, ge=1, le=100000)
+    # With the "scheduled" trigger: None follows the shared engine schedule;
+    # else the rule's own (app.services.discovery_rules.schedules):
+    # {"kind": "once" | "hourly" | "weekly" | "monthly", ...}.
+    schedule: Optional[dict[str, Any]] = None
 
 
 class RuleCreate(RuleIn):
@@ -73,6 +77,10 @@ class RuleOut(BaseModel):
     enforcement: str = "set_once"
     on_unmatch: str = "keep"
     max_changes_per_run: Optional[int] = None
+    schedule: Optional[dict[str, Any]] = None
+    schedule_last_slot: Optional[datetime] = None
+    schedule_text: Optional[str] = None
+    next_run_at: Optional[datetime] = None
     revision: int
     created_by: Optional[UUID] = None
     updated_by: Optional[UUID] = None

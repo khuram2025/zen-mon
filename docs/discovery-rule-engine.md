@@ -133,6 +133,9 @@ reported.
 | Server environment (servers) | single | `servers.manage` |
 | Turn ping monitoring on (only ever on) | single | `devices.manage` |
 | Add tags (devices, servers, children) | additive | `devices.manage` / `servers.manage` |
+| Site (servers; `servers.site_id`) | single | `servers.manage` |
+| Add to group (devices, servers, children; a static membership) | additive | `devices.manage_policies` |
+| Set custom field (one value per field, several fields per rule) | single per field | `devices.manage` / `servers.manage` |
 | Add to network map (placed on the bottom row to be arranged; never removes an operator's node) | additive | `maps.manage` |
 | Depends on (uplink parent; adds a `topology_dependencies` row, alerts suppressed while the parent is down) | single, added only | `devices.manage` |
 | Monitor or ignore interfaces (devices; patterns on name, alias, ifDescr, IF-MIB type, speed) | additive, per interface | `devices.manage` |
@@ -411,6 +414,55 @@ service checks) are loaded only when a rule tests or writes them
 under the same condition, so turning such a rule on re-evaluates the fleet
 once.
 
+## Sites, groups, custom fields and schedules (migrate-213)
+
+What the rule builder could not do before: put a server somewhere, put any
+asset in a group, test or set a custom field, and run a rule on a timetable
+of its own.
+
+* **Site** (servers): sets `servers.site_id` (a server has a site, not the
+  free-text Location devices have). The fact `site_id` (reference to sites)
+  tests it; the existing `sites` set fact still holds the site name.
+* **Add to group** (devices, servers, children): adds a `static` row to
+  `device_group_members`, so alert scopes, maintenance windows, reports and
+  dynamic groups see the asset like a hand-added member. Only static groups
+  that hold the asset's kind are accepted (a dynamic group is refused when the
+  rule is saved; a group holding devices only is reported as an error item for
+  a server). It is additive like tags: never removes a member an operator
+  added; a member removed by hand after a set-once rule added it stays out;
+  undo and revert remove only the membership the rule added. A device's own
+  (primary) group is still the single-valued *Device group* action. Group
+  counts are refreshed after a run.
+* **Custom fields** (Groups & Fields) are facts of assets in inventory as
+  `custom.<key>`, typed like the field (text, number, date, choice as enum,
+  boolean). A scan result has no custom fields (missing). When a rule is
+  saved, each custom leaf stores the field's type (`conditions.stamp_custom_types`;
+  a field's key and type never change), so the pure engine evaluates it without
+  the catalog. *Set custom field* takes `{field, value}`; the value is coerced
+  to the field's type when the rule is saved (`custom_fields.coerce`) and
+  written with `custom_fields.set_values`. Each field is its own single value
+  (setting key `custom_field:<field>`, assignment item = the field): the first
+  matching rule wins per field, hand edits, enforce, revert and undo work as
+  for any single value. A rule never clears a field; a field that does not
+  apply to the asset's kind is skipped. A custom field a discovery rule tests
+  or sets cannot be deleted (409). The `changed` pass's fingerprint includes
+  custom field values and static memberships while a rule uses them.
+* **A schedule of the rule's own** (`discovery_engine_rules.schedule`,
+  `app.services.discovery_rules.schedules`): with the `scheduled` trigger a
+  rule follows the shared engine schedule (`schedule` NULL, as before) or its
+  own: `once` (`at`, a local date and time, must be in the future when saved),
+  `hourly` (every 1-12 hours from `time`), `weekly` (chosen weekdays, all seven
+  = daily) or `monthly` (day 1-28), at a local time in its IANA `timezone`.
+  Each slot runs once (`schedule_last_slot`, re-checked under the apply lock);
+  rules due in the same pass run together in one run. Saving a schedule,
+  activating an idle rule or turning the engine on sets the starting point to
+  the current slot, so a missed slot is never caught up; a one-time run whose
+  time passed while the rule was idle runs when the rule is activated. The
+  shared engine schedule runs only rules without a schedule of their own;
+  *Run scheduled rules now* runs every scheduled rule. Same caps and approval
+  as any scheduled run. Export carries recurring schedules (never a one-time
+  run).
+
 ## Engine settings
 
 `system_settings['discovery_rules']`, edited on the Rules page:
@@ -474,7 +526,7 @@ Under `/api/v1/discovery-v2/rules`:
 | `GET /history/{id}/pending`, `POST /history/{id}/approve`, `POST /history/{id}/reject` | Review a run held by the change cap |
 | `GET /export`, `POST /import` | Rules as JSON with references by name |
 | `GET /unmatched` | Assets no active rule matches |
-| `GET /schedule`, `POST /schedule/run-now` | Scheduled runs: next and last run; run now |
+| `GET /schedule`, `POST /schedule/run-now` | Scheduled runs: next and last run, rules with their own schedule (`own_schedules`); run now |
 | `GET /starter`, `POST /starter` | Starter rules, added as Drafts |
 
 ## Data
@@ -499,6 +551,10 @@ Phase 4 needs no migration: it uses `discovery_engine_rules.max_changes_per_run`
 and `last_match_count` (migration 190), the existing run-item outcome
 `not_ready`, and `system_settings['discovery_rules_state']`
 (`last_scheduled_slot`, `last_scheduled_run_at`).
+
+Migration 213: `schedule` (JSONB, NULL = the shared schedule) and
+`schedule_last_slot` on `discovery_engine_rules`. Site, group and custom
+field actions need no schema (assignments keep their values).
 
 ## Not built
 

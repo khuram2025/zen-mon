@@ -36,6 +36,9 @@ class DiscoveryEngineRule(Base):
     on_unmatch: Mapped[str] = mapped_column(Text, nullable=False, default="keep")
     stop_processing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     max_changes_per_run: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # migrate-213: the rule's own schedule (NULL = the shared engine schedule)
+    schedule: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    schedule_last_slot: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     builtin_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(

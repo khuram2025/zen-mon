@@ -152,6 +152,8 @@ export function ruleBody(draft: RuleDraft) {
     enforcement: draft.enforcement || ('set_once' as const),
     on_unmatch: draft.on_unmatch || ('keep' as const),
     max_changes_per_run: draft.max_changes_per_run ?? null,
+    // a schedule of its own only goes with the scheduled trigger
+    schedule: draft.triggers?.includes('scheduled') ? draft.schedule ?? null : null,
   }
 }
 

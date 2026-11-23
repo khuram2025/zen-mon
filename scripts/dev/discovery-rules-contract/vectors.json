@@ -110,6 +110,32 @@
         {"id": "no-iis", "name": "No IIS", "priority": 20, "asset_kinds": ["server"], "condition": {"op": "all", "conditions": [{"field": "services", "operator": "has_none", "value": ["W3SVC"]}]}, "actions": [{"key": "tags", "value": ["no-iis"]}]}
       ],
       "expect": {"matched": ["sql"], "settings": {}, "tags": ["sql"]}
+    },
+    {
+      "name": "custom fields: typed condition, one value per field, first matching rule wins per field",
+      "custom_fields": [
+        {"key": "role", "label": "Role", "field_type": "choice", "choices": ["Core", "Edge"], "asset_kinds": ["device"]},
+        {"key": "tier", "label": "Tier", "field_type": "number", "asset_kinds": ["device"]}
+      ],
+      "facts": {"hostname": "core-1", "custom.role": "Core", "custom.tier": 2},
+      "rules": [
+        {"id": "core", "name": "Core devices", "priority": 10, "asset_kinds": ["device"],
+         "condition": {"op": "all", "conditions": [
+           {"field": "custom.role", "operator": "is", "value": "Core"},
+           {"field": "custom.tier", "operator": "lt", "value": 3}]},
+         "actions": [{"key": "custom_field", "value": {"field": "tier", "value": 1}}]},
+        {"id": "all", "name": "Everything", "priority": 20, "asset_kinds": ["device"],
+         "condition": {"op": "all", "conditions": []},
+         "actions": [{"key": "custom_field", "value": {"field": "tier", "value": 3}},
+                     {"key": "custom_field", "value": {"field": "role", "value": "Edge"}}]},
+        {"id": "not-edge", "name": "Not Edge", "priority": 30, "asset_kinds": ["device"],
+         "condition": {"op": "all", "conditions": [{"field": "custom.role", "operator": "is_not", "value": "Edge"}]},
+         "actions": [{"key": "tags", "value": ["not-edge"]}]}
+      ],
+      "expect": {"matched": ["core", "all", "not-edge"],
+                 "settings": {"custom_field:tier": {"field": "tier", "value": 1},
+                              "custom_field:role": {"field": "role", "value": "Edge"}},
+                 "tags": ["not-edge"], "shadowed": ["all"]}
     }
   ]
 }

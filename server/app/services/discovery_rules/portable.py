@@ -37,6 +37,7 @@ NAME_SOURCES: dict[str, tuple[str, str, str]] = {
     "sensors": ("sensors", "name", "name"),
     "agent_policies": ("agent_policies", "name", "name"),
     "service_check_templates": ("service_check_templates", "name", "name"),
+    "sites": ("sites", "name", "name"),
 }
 
 
@@ -95,6 +96,8 @@ async def export_rules(db: AsyncSession, rules: list[dict]) -> dict:
             "enforcement": r.get("enforcement", "set_once"), "on_unmatch": r.get("on_unmatch", "keep"),
             "stop_processing": r["stop_processing"],
             "max_changes_per_run": r.get("max_changes_per_run"),
+            # a one-time run is not carried over: its time has usually passed
+            "schedule": r.get("schedule") if (r.get("schedule") or {}).get("kind") != "once" else None,
             "profiles": [ref("discovery_profiles", p) for p in r.get("profile_ids") or []] or None,
             "condition": cond, "actions": acts,
         })
