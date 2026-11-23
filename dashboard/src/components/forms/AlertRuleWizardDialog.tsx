@@ -52,6 +52,7 @@ import { toast } from '@/components/ui/Toast'
 import { AlertWizardFooter, isExplicitWizardSave } from './AlertWizardFooter'
 import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 import { NetflowConditionFields, NetflowDryRun, NetflowScopeFields } from './NetflowAlertFields'
+import { ServerConditionTree } from './ServerConditionTree'
 import {
   defaultNetflowForm,
   describeScopeDraft,
@@ -78,8 +79,11 @@ import {
   serverScopeOf,
   serverScopeLabel,
   serverWatchChange,
+  singleFromTree,
+  treeFromDraft,
   SERVER_SCOPE_OPTIONS,
   type ServerScopeMode,
+  type ServerTree,
 } from './serverAlertRule'
 import { TagPicker } from '@/components/tags/TagPicker'
 import { groupsApi, treeOrder, type DeviceGroup } from '@/pages/groups/api'
@@ -163,6 +167,8 @@ type WizardState = {
   recovery_sms_template: string
   /** NetFlow rules (source 'netflow'): condition, parameters and FlowFilter scope. */
   nf: NetflowRuleForm
+  /** Server rules: two or more conditions joined by AND/OR (migrate-211). null = one condition. */
+  condition_tree: ServerTree | null
 }
 
 const STEPS = [
@@ -306,6 +312,7 @@ const DEFAULT_STATE: WizardState = {
   recovery_email_body: '',
   recovery_sms_template: '',
   nf: defaultNetflowForm(),
+  condition_tree: null,
 }
 
 // Metrics a device rule reads from a confirmed status change; only those rules are held while a device flaps.
@@ -471,6 +478,8 @@ function ruleToState(rule: any): WizardState {
     // the editor showing six empty boxes.
     ...templateState(rule.effective_templates || rule),
     nf: isNetflowMetric(rule.metric) ? formFromRule(rule) : defaultNetflowForm(),
+    // A combined server rule (self-contained, like the fields above).
+    condition_tree: source === 'server' && rule.condition_tree && Array.isArray(rule.condition_tree.items) ? rule.condition_tree : null,
   }
 }
 
@@ -601,7 +610,8 @@ export function AlertRuleWizardDialog({
   const statusRule = isStatusRule(s)
   const flapHold = flapHoldApplies(s)
   const isServer = s.source === 'server'
-  const serverKind = isServer ? serverMetricKind(s.conditions[0]?.metric) : null
+  // A combined server rule takes the threshold rules' holds and clear settings.
+  const serverKind = isServer ? (s.condition_tree ? 'pct' : serverMetricKind(s.conditions[0]?.metric)) : null
   const isLifecycle = isServer && serverKind === 'event'
   const rebootRule = isRebootRule(s)
   const first0 = s.conditions[0]
@@ -972,7 +982,7 @@ export function AlertRuleWizardDialog({
       s.source === 'netflow'
         ? summarizeNetflowForm(s.nf)
         : s.source === 'server'
-        ? serverRuleCondition({ ...first, target: s.target, min_duration: s.min_duration })
+        ? serverRuleCondition({ ...first, target: s.target, min_duration: s.min_duration, condition_tree: s.condition_tree })
         : s.source === 'trap'
         ? s.trap_oid ? `Trap OID prefix ${s.trap_oid}` : 'Any SNMP trap'
         : s.source === 'service'
@@ -1287,7 +1297,7 @@ export function AlertRuleWizardDialog({
                           // Nor does a server tag / group scope carry over to a device rule.
                           setScopeMode('all')
                           setS({ ...s, source: src, target: '', server_id: '', server_scope: 'all', group_id: '', scope_tag: '',
-                            conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                            conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }], condition_tree: null })
                         } else if (['apm', 'syslog', 'netflow', 'service', 'gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(s.source)) {
                           setS({ ...s, source: src, target: '', server_id: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
                         } else {
@@ -1494,7 +1504,12 @@ export function AlertRuleWizardDialog({
                   </>
                 )}
 
-                {isServer && (() => {
+                {isServer && s.condition_tree && (
+                  <ServerConditionTree tree={s.condition_tree}
+                    onChange={(tree) => setS((st) => ({ ...st, condition_tree: tree }))}
+                    onSingle={() => setS((st) => (st.condition_tree ? { ...st, ...singleFromTree(st.condition_tree), condition_tree: null } : st))} />
+                )}
+                {isServer && !s.condition_tree && (() => {
                   const c = s.conditions[0]
                   const spec = serverMetric(c.metric)
                   const unit = spec?.unit ?? ''
@@ -1557,6 +1572,15 @@ export function AlertRuleWizardDialog({
                           or linked to it). A server that is silent and does not answer ping, or has no ping monitoring, is
                           paged by <span className="font-medium text-text">Device Down</span> instead.
                         </p>
+                      )}
+                      {(serverKind === 'pct' || serverKind === 'svc' || serverKind === 'proc' || serverKind === 'auto') && (
+                        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+                          <Button type="button" variant="outline" size="sm"
+                            onClick={() => setS((st) => ({ ...st, condition_tree: treeFromDraft(st), min_duration: st.min_duration || 300 }))}>
+                            <Plus className="h-3.5 w-3.5" /> Add condition
+                          </Button>
+                          <span className="text-xs text-muted">Combine several conditions in one rule, for example CPU and memory both above 90%.</span>
+                        </div>
                       )}
                     </div>
                   )

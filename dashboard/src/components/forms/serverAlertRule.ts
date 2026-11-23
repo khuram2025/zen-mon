@@ -89,7 +89,8 @@ export function serverMetricLabel(metric: string): string {
 }
 
 /** One line describing when the rule fires, for the rule list and the Review step. */
-export function serverRuleCondition(r: { metric: string; operator?: string | null; threshold?: number | null; target?: string | null; min_duration?: number | null }): string {
+export function serverRuleCondition(r: { metric: string; operator?: string | null; threshold?: number | null; target?: string | null; min_duration?: number | null; condition_tree?: ServerTree | null }): string {
+  if (r.condition_tree && Array.isArray(r.condition_tree.items)) return serverTreeLabel(r.condition_tree)
   const kind = serverMetricKind(r.metric)
   if (kind === 'svc') return `Service ${r.target || '?'} stopped`
   if (kind === 'proc') return `Process ${r.target || '?'} not running`
@@ -107,6 +108,139 @@ export function serverRuleCondition(r: { metric: string; operator?: string | nul
   // An unknown (newer) metric shows its value without a unit rather than as a percentage.
   const label = spec ? spec.label.replace(/ \([^)]*\)$/, '') : r.metric
   return `${label} ${op} ${r.threshold ?? 0}${spec?.unit ?? ''}`
+}
+
+/* ── Combined rules (condition_tree, migrate-211, server/app/services/rule_conditions.py) ─────────────── */
+
+/** One condition of a combined rule. `target` names one service / process / mount / disk / NIC ('' = any), or the
+ *  automatic services to leave out. */
+export type ServerTreeCondition = {
+  id?: string
+  metric: string
+  operator: string
+  threshold: number
+  reset_threshold?: number | null
+  target?: string
+}
+export type ServerTreeGroup = { logic: 'AND' | 'OR'; items: ServerTreeCondition[] }
+export type ServerTree = { logic: 'AND' | 'OR'; items: Array<ServerTreeCondition | ServerTreeGroup> }
+
+/** At most this many conditions in one rule (rule_conditions.MAX_CONDITIONS). */
+export const MAX_TREE_CONDITIONS = 10
+
+/** What a combined rule can watch: levels and states. Restart, shutdown and agent offline stand alone. */
+export const COMBINABLE_SERVER_METRICS = SERVER_METRICS.filter((m) => m.kind === 'pct' || m.kind === 'svc' || m.kind === 'proc' || m.kind === 'auto')
+
+/** Metrics with instances, and the noun of one ("filesystem", "disk", "network interface"). */
+export const TREE_INSTANCE: Record<string, string> = {
+  host_filesystem_pct: 'filesystem (mount)',
+  host_fs_days_left: 'filesystem (mount)',
+  host_disk_latency_ms: 'disk',
+  host_nic_errors: 'network interface',
+}
+
+export function isTreeGroup(item: ServerTreeCondition | ServerTreeGroup): item is ServerTreeGroup {
+  return !!item && Array.isArray((item as ServerTreeGroup).items)
+}
+
+export function treeConditions(tree: ServerTree | null | undefined): ServerTreeCondition[] {
+  const out: ServerTreeCondition[] = []
+  for (const item of tree?.items || []) {
+    if (isTreeGroup(item)) out.push(...item.items)
+    else out.push(item)
+  }
+  return out
+}
+
+/** A new condition on a metric, with that metric's starting limit. */
+export function newTreeCondition(metric = 'host_memory_pct'): ServerTreeCondition {
+  const spec = serverMetric(metric)
+  const kind = serverMetricKind(metric)
+  return kind === 'pct'
+    ? { metric, operator: spec?.operators?.[0] || '>', threshold: spec?.defaultThreshold ?? 90, reset_threshold: null, target: '' }
+    : { metric, operator: '>', threshold: 0, target: '' }
+}
+
+/** The draft's single condition plus a second one, as a combined rule ("Add condition"). */
+export function treeFromDraft(s: Pick<ServerDraft, 'conditions' | 'target'>): ServerTree {
+  const c = s.conditions[0]
+  const first: ServerTreeCondition = c && COMBINABLE_SERVER_METRICS.some((m) => m.value === c.metric)
+    ? { metric: c.metric, operator: c.operator, threshold: Number(c.threshold), reset_threshold: c.reset_threshold ?? null, target: s.target || '' }
+    : newTreeCondition('host_cpu_pct')
+  const second = newTreeCondition(first.metric === 'host_memory_pct' ? 'host_cpu_pct' : 'host_memory_pct')
+  return { logic: 'AND', items: [first, second] }
+}
+
+/** The single condition a combined rule falls back to ("Use one condition"): its first. */
+export function singleFromTree(tree: ServerTree): { conditions: ServerDraft['conditions']; target: string } {
+  const c = treeConditions(tree)[0] || newTreeCondition('host_cpu_pct')
+  return { conditions: [{ metric: c.metric, operator: c.operator, threshold: Number(c.threshold), reset_threshold: c.reset_threshold ?? null }], target: c.target || '' }
+}
+
+function conditionWords(c: ServerTreeCondition): string {
+  const kind = serverMetricKind(c.metric)
+  const target = String(c.target || '').trim()
+  if (kind === 'svc') return `Service ${target || '?'} stopped`
+  if (kind === 'proc') return `Process ${target || '?'} not running`
+  if (kind === 'auto') return target ? `An automatic service stopped (except ${target})` : 'An automatic service stopped'
+  const spec = serverMetric(c.metric)
+  const label = spec ? spec.label.replace(/ \([^)]*\)$/, '') : c.metric
+  const op = OP_SYMBOL[String(c.operator || '')] || c.operator || '>'
+  return `${label}${target && TREE_INSTANCE[c.metric] ? ` ${target}` : ''} ${op} ${c.threshold ?? 0}${spec?.unit ?? ''}`
+}
+
+/** "(CPU usage > 90% and Memory usage > 90%) or Service nginx stopped" for the list and the Review step. */
+export function serverTreeLabel(tree: ServerTree): string {
+  const join = (logic: string) => (logic === 'OR' ? ' or ' : ' and ')
+  return (tree.items || []).map((item) => (isTreeGroup(item)
+    ? `(${item.items.map(conditionWords).join(join(item.logic))})`
+    : conditionWords(item))).join(join(tree.logic))
+}
+
+/** What stops a combined rule from being saved, or null (mirrors rule_conditions.validate_tree). */
+export function serverTreeProblem(tree: ServerTree): string | null {
+  const all = treeConditions(tree)
+  if (all.length < 2) return 'A combined rule needs at least two conditions (or use one condition).'
+  if (all.length > MAX_TREE_CONDITIONS) return `A rule can combine at most ${MAX_TREE_CONDITIONS} conditions.`
+  for (const item of tree.items) {
+    if (isTreeGroup(item) && item.items.length < 2) return 'A group holds at least two conditions.'
+  }
+  for (const c of all) {
+    const kind = serverMetricKind(c.metric)
+    const spec = serverMetric(c.metric)
+    if (!COMBINABLE_SERVER_METRICS.some((m) => m.value === c.metric)) return `${spec?.label || c.metric} needs a rule of its own.`
+    if (kind === 'svc' && !String(c.target || '').trim()) return 'Enter the service name.'
+    if (kind === 'proc' && !String(c.target || '').trim()) return 'Enter the process name.'
+    if (kind !== 'pct') continue
+    const thr = Number(c.threshold)
+    if (!Number.isFinite(thr)) return `${spec?.label || c.metric}: enter the limit.`
+    if (isServerPercent(c.metric) && !(thr >= 0 && thr <= 100)) return `${spec?.label}: the limit is a percentage from 0 to 100.`
+    if (spec?.operators && !spec.operators.includes(OP_SYMBOL[c.operator] || c.operator)) return `${spec.label}: use ${spec.operators.join(' or ')}.`
+    if (c.metric === 'host_fs_days_left' && !(thr > 0)) return 'Days until full must be more than 0.'
+    if (c.reset_threshold != null && Number.isFinite(Number(c.reset_threshold))) {
+      const r = Number(c.reset_threshold)
+      const high = ['>', '>=', 'gt', 'gte'].includes(c.operator)
+      if ((high && r > thr) || (!high && r < thr)) return `${spec?.label}: the clear level must be on the healthy side of the limit.`
+    }
+  }
+  return null
+}
+
+/** The tree as /host-alert-rules stores it. */
+export function treePayload(tree: ServerTree): ServerTree {
+  const cond = (c: ServerTreeCondition): ServerTreeCondition => {
+    const kind = serverMetricKind(c.metric)
+    const target = String(c.target || '').trim()
+    return {
+      ...(c.id ? { id: c.id } : {}),
+      metric: c.metric,
+      operator: kind === 'pct' ? (OP_SYMBOL[c.operator] || c.operator) : '>',
+      threshold: kind === 'pct' ? Number(c.threshold) : 0,
+      ...(kind === 'pct' && c.reset_threshold != null && String(c.reset_threshold) !== '' ? { reset_threshold: Number(c.reset_threshold) } : {}),
+      ...(target ? { target } : {}),
+    }
+  }
+  return { logic: tree.logic, items: tree.items.map((i) => (isTreeGroup(i) ? { logic: i.logic, items: i.items.map(cond) } : cond(i))) }
 }
 
 /**
@@ -228,6 +362,8 @@ export type ServerDraft = {
   schedule_start: string
   schedule_end: string
   schedule_days: number[]
+  /** A combined rule: two or more conditions joined by AND/OR. null = one condition (`conditions[0]`). */
+  condition_tree?: ServerTree | null
 }
 
 /** Defaults when changing what a server rule watches; preserve valid zero values between percent metrics. */
@@ -256,6 +392,11 @@ export function serverWatchChange(s: Pick<ServerDraft, 'conditions' | 'min_durat
 
 /** What is missing before the draft can be saved, or null. */
 export function serverDraftProblem(s: ServerDraft): { step: 'trigger' | 'scope'; message: string } | null {
+  if (s.condition_tree) {
+    const problem = serverTreeProblem(s.condition_tree)
+    if (problem) return { step: 'trigger', message: problem }
+    return serverScopeProblem(s)
+  }
   const c = s.conditions[0]
   const kind = serverMetricKind(c?.metric)
   if (!c || !isServerMetric(c.metric)) return { step: 'trigger', message: 'Choose what to watch on the server.' }
@@ -273,6 +414,10 @@ export function serverDraftProblem(s: ServerDraft): { step: 'trigger' | 'scope';
   if (kind === 'pct' && spec && !isServerPercent(c.metric) && Number(c.threshold) < 0) {
     return { step: 'trigger', message: 'The limit cannot be negative.' }
   }
+  return serverScopeProblem(s)
+}
+
+function serverScopeProblem(s: ServerDraft): { step: 'trigger' | 'scope'; message: string } | null {
   const scope = serverScopeOf(s)
   if (scope === 'one' && (!s.server_id || s.server_id === '__pick__')) return { step: 'scope', message: 'Select a server, or choose "All servers".' }
   if (scope === 'tag' && !String(s.scope_tag || '').trim()) return { step: 'scope', message: 'Choose a tag, or choose "All servers".' }
@@ -283,6 +428,7 @@ export function serverDraftProblem(s: ServerDraft): { step: 'trigger' | 'scope';
 
 /** The /host-alert-rules body for the draft (create and update take the same fields). */
 export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
+  if (s.condition_tree) return combinedRulePayload(s, s.condition_tree)
   const c = s.conditions[0]
   const kind = serverMetricKind(c.metric)
   const pct = kind === 'pct'
@@ -317,6 +463,34 @@ export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
     schedule_start: s.schedule_start || null,
     schedule_end: s.schedule_end || null,
     schedule_days: s.schedule_days.length ? s.schedule_days : null,
+    // Sent on every save: an edit that goes back to one condition turns a combined rule single.
+    condition_tree: null,
+  }
+}
+
+/** The body of a combined rule: the tree carries every condition; the holds and the rest as for one condition. */
+function combinedRulePayload(s: ServerDraft, tree: ServerTree): Record<string, unknown> {
+  const scope = serverScopeOf(s)
+  const filtered = scope === 'tag' || scope === 'group'
+  return {
+    name: s.name,
+    description: s.description || null,
+    enabled: s.enabled,
+    condition_tree: treePayload(tree),
+    severity: s.severity,
+    min_duration: Math.max(0, Math.round(Number(s.min_duration) || 0)),
+    clear_duration: s.clear_duration,
+    recovery_alert: s.reset_mode === 'auto',
+    cooldown: s.cooldown,
+    notify_channels: s.notify_channels,
+    server_id: scope === 'one' && s.server_id && s.server_id !== '__pick__' ? s.server_id : null,
+    scope_tag: filtered ? String(s.scope_tag || '').trim() || null : null,
+    group_id: filtered ? s.group_id || null : null,
+    priority: s.priority || null,
+    escalation_policy_id: s.escalation_mode === 'policy' ? s.escalation_policy_id || null : null,
+    schedule_start: s.schedule_start || null,
+    schedule_end: s.schedule_end || null,
+    schedule_days: s.schedule_days.length ? s.schedule_days : null,
   }
 }
 
@@ -346,5 +520,6 @@ export function serverRuleCopy(r: any): Record<string, unknown> {
     schedule_start: r.schedule_start || '',
     schedule_end: r.schedule_end || '',
     schedule_days: Array.isArray(r.schedule_days) ? r.schedule_days : [],
+    condition_tree: r.condition_tree && Array.isArray(r.condition_tree.items) ? r.condition_tree : null,
   })
 }

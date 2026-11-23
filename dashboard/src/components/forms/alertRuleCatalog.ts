@@ -586,7 +586,7 @@ export function triggerSummary(r: any, idx?: TemplateIndex): { title: string; de
     : [{ metric: r.metric, operator: r.operator, threshold: r.threshold }]
   const first = conds[0]
   if (source === 'trap') return { title: 'SNMP trap', detail: r.trap_oid ? `Trap OID ${r.trap_oid}` : 'Any trap' }
-  if (source === 'server') return { title: serverMetricLabel(r.metric), detail: serverRuleCondition(r) }
+  if (source === 'server') return { title: r.condition_tree ? 'Combined conditions' : serverMetricLabel(r.metric), detail: serverRuleCondition(r) }
   if (source === 'apm') {
     const ev = APM_EVENT_TRIGGERS.find((x) => x.value === r.metric)
     if (ev) return { title: ev.label, detail: r.metric === 'apm_synthetic_down' ? 'After configured retries' : 'Multi-window error-budget burn' }

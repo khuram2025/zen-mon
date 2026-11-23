@@ -974,7 +974,7 @@ async def _rule_payload(db: AsyncSession, rule_id, user: User, perms: list[str],
     try:
         label = ap.conditions_label(rule.get("conditions"), rule.get("condition_logic") or "AND",
                                     metric=rule["metric"], operator=rule["operator"],
-                                    threshold=rule.get("threshold"))
+                                    threshold=rule.get("threshold"), tree=rule.get("condition_tree"))
     except Exception:
         label = " AND ".join(f"{c.get('metric')} {c.get('operator')} {c.get('threshold')}" for c in conds)
     levels = rule.get("escalation_levels") or []

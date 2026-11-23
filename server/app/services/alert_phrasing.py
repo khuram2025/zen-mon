@@ -718,13 +718,19 @@ def _same_threshold(a, b) -> bool:
 
 def conditions_label(conditions: Optional[Iterable[dict]], logic: str = "AND",
                      *, metric: Optional[str] = None, operator: Optional[str] = None,
-                     threshold=None, threshold_text: Optional[str] = None) -> str:
+                     threshold=None, threshold_text: Optional[str] = None, tree=None) -> str:
     """Label for a rule that may carry several conditions.
 
     Falls back to the rule's single metric/operator/threshold columns when the
     ``conditions`` array is empty, which is how most rules are still stored.
     ``threshold_text`` is applied to the rule's own metric/threshold only.
+    ``tree`` is a combined rule's condition tree (migrate-211), which wins:
+    "(Host CPU above 90% and host memory above 90%) or service nginx stopped".
     """
+    from app.services import rule_conditions as rc
+    parsed = rc.parse(tree)
+    if parsed:
+        return rc.tree_label(parsed)
     def own(c) -> Optional[str]:
         if (threshold_text is not None and c.get("metric") == metric
                 and _same_threshold(c.get("threshold"), threshold)):
@@ -1532,7 +1538,8 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
                        branding=None, status_detail: Optional[str] = None,
                        now=None, recovered_from: Optional[str] = None,
                        noun: Optional[str] = None,
-                       status_cause: Optional[str] = None) -> dict:
+                       status_cause: Optional[str] = None,
+                       tree=None, matched: str = "") -> dict:
     """The condition/duration half of the template variables.
 
     Kept separate from the identity half (host, severity, timestamps) because
@@ -1576,7 +1583,7 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
                                threshold_text=thr_text)
     label = conditions_label(conditions, condition_logic, metric=metric,
                              operator=operator, threshold=threshold,
-                             threshold_text=thr_text)
+                             threshold_text=thr_text, tree=tree)
 
     base_noun = metric_noun(key)
     noun_ = (noun or "").strip() or base_noun
@@ -1693,6 +1700,8 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         "host_suffix": f" — {subject_noun}" if subject_noun else "",
         "asset": who or "",
         "event_time": at,
+        # A combined rule: the conditions that made it true, with their readings.
+        "matched_conditions": matched or "",
     }
 
 
@@ -1755,6 +1764,7 @@ def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
     return phrasing_variables(
         metric=field("metric"), operator=field("operator"), threshold=field("threshold"),
         conditions=conditions, condition_logic=field("condition_logic") or "AND",
+        tree=field("condition_tree"),
         reading=reading, duration=duration, is_recovery=is_recovery,
         subject_noun=subject_noun or (hostname or None),
         value=value, value_context=value_context, device_status=device_status, **extra,

@@ -165,7 +165,7 @@ _SWEEP_SQL = """
            a.triggered_at, a.resolved_at, a.acknowledged_at, a.metadata,
            a.metadata->>'notified_at' AS notified_at,
            r.name AS rule_name, r.metric, r.operator, r.threshold,
-           r.conditions, r.condition_logic, r.severity AS rule_severity,
+           r.conditions, r.condition_logic, r.condition_tree, r.severity AS rule_severity,
            r.notify_channels, r.escalation_levels, r.max_repeat,
            r.recovery_alert,
            d.hostname AS device_hostname, host(d.ip_address) AS device_ip,
@@ -290,6 +290,7 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
     condition = ap.conditions_label(
         row.conditions, row.condition_logic or "AND",
         metric=row.metric, operator=row.operator, threshold=row.threshold,
+        tree=getattr(row, "condition_tree", None),
     )
     total = int(row.max_repeat or 0) or None
     summary = _incident_text(row)
@@ -581,7 +582,7 @@ def _policy_sweep_sql(*, ids_only: bool = False) -> str:
            a.triggered_at, a.resolved_at, a.acknowledged_at, a.acknowledged_by, a.assigned_to,
            a.metadata, {suppressed_sql('a')} AS suppressed,
            r.id AS eff_rule_id, COALESCE(r.name, 'ZenPlus monitoring') AS rule_name, r.metric, r.operator, r.threshold,
-           r.conditions, r.condition_logic, r.severity AS rule_severity, r.priority AS rule_priority,
+           r.conditions, r.condition_logic, r.condition_tree, r.severity AS rule_severity, r.priority AS rule_priority,
            r.notify_channels, r.recovery_alert, r.escalation_policy_id,
            d.hostname AS device_hostname, host(d.ip_address) AS device_ip,
            COALESCE(s.hostname, CASE WHEN a.metadata->>'source' = 'controller_monitoring'
@@ -654,7 +655,8 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
     priority = _priority_of(row)
     duration = ap.duration_between(row.triggered_at, now)
     condition = ap.conditions_label(row.conditions, row.condition_logic or "AND",
-                                    metric=row.metric, operator=row.operator, threshold=row.threshold)
+                                    metric=row.metric, operator=row.operator, threshold=row.threshold,
+                                    tree=getattr(row, "condition_tree", None))
     step_txt = _step_label(policy, plan.step) if plan.step >= 0 else ""
     # Steps are numbered from 1 everywhere a person reads them ("Escalation
     # step 2", "Step 2 of 3"); plan.step is the zero-based index.
