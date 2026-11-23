@@ -65,6 +65,8 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
   // pages cache these lists in other shapes (GET /agent-policies answers {items}).
   const sensors = useQuery<any>({ queryKey: ['discovery', 'rules', 'ref', 'sensors'], queryFn: async () => (await api.get('/sensors')).data, ...opts })
   const policies = useQuery<any>({ queryKey: ['discovery', 'rules', 'ref', 'agent-policies'], queryFn: async () => (await api.get('/agent-policies')).data, ...opts })
+  // "Site" (servers): GET /sites, the list the server and sensor pages use.
+  const sites = useQuery<any>({ queryKey: ['sites'], queryFn: async () => (await api.get('/sites')).data, ...opts })
   const svcTemplates = useQuery<any>({
     queryKey: ['discovery', 'rules', 'ref', 'service-check-templates'],
     queryFn: async () => (await api.get('/service-check-templates')).data,
@@ -81,13 +83,14 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
       sensors: withHints(sensors.data, (r) => [r.site_name, r.status && r.status !== 'online' ? r.status : null]),
       agent_policies: withHints(policies.data, (r) => [r.platform]),
       service_check_templates: withHints(svcTemplates.data, (r) => [r.check_type ?? r.type]),
+      sites: asOptions(sites.data),
     }
     const lookups: Lookups = {}
     for (const [source, list] of Object.entries(options)) {
       lookups[source] = Object.fromEntries(list.map((o) => [o.id, o.name]))
     }
     return { lookups, options }
-  }, [groups.data, templates.data, creds.data, profiles.data, maps.data, sensors.data, policies.data, svcTemplates.data])
+  }, [groups.data, templates.data, creds.data, profiles.data, maps.data, sensors.data, policies.data, svcTemplates.data, sites.data])
 }
 
 function withHints(rows: any, hint: (row: any) => (string | null | undefined)[]): RefOption[] {
@@ -398,5 +401,24 @@ export function DevicePicker({
         </>
       )}
     </div>
+  )
+}
+
+/** The browser's time zone names for the schedule's time zone field (none on a browser that cannot list them). */
+export function TimeZoneList({ id }: { id: string }) {
+  const zones = useMemo(() => {
+    try {
+      const list = (Intl as any).supportedValuesOf?.('timeZone') as string[] | undefined
+      return Array.isArray(list) ? Array.from(new Set(['UTC', ...list])) : ['UTC']
+    } catch {
+      return ['UTC']
+    }
+  }, [])
+  return (
+    <datalist id={id}>
+      {zones.map((z) => (
+        <option key={z} value={z} />
+      ))}
+    </datalist>
   )
 }

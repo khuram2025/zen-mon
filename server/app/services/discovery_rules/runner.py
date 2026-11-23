@@ -110,6 +110,8 @@ def rule_dict(row: DiscoveryEngineRule) -> dict:
         "on_unmatch": row.on_unmatch or "keep",
         "max_changes_per_run": row.max_changes_per_run,
         "last_match_count": row.last_match_count,
+        "schedule": row.schedule,
+        "schedule_last_slot": row.schedule_last_slot,
     }
 
 

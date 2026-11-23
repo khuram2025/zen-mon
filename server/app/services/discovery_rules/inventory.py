@@ -55,23 +55,30 @@ WRITABLE: dict[str, dict[str, str]] = {
         "snmp_interval": "snmp_poll_interval", "ping_enabled": "ping_enabled", "tags": "tags",
     },
     "server": {"owner": "owner", "environment": "environment", "tags": "tags", "map": "map",
-               "agent_policy": "agent_policy"},
+               "agent_policy": "agent_policy", "site": "site_id"},
     "child": {"group": "group_id", "location": "location", "owner": "owner", "tags": "tags", "map": "map"},
 }
+# Static group membership and custom field values, on every kind.
+for _w in WRITABLE.values():
+    _w.update({"add_group": "add_group", "custom_field": "custom_field"})
 WRITABLE["device"].update({"map": "map", "dependency_parent": "dependency_parent", "sensor": "sensor",
                            "service_template": "service_template", "interfaces": "interfaces"})
 # Set-membership values: the asset is on these maps / depends on these parents
 # / is monitored from these sensors / has a check from these service check
 # templates. Like tags they are only added; item_key is the map, parent,
 # sensor or template id.
-SET_KEYS = {"map", "dependency_parent", "sensor", "service_template"}
+SET_KEYS = {"map", "dependency_parent", "sensor", "service_template", "add_group"}
 # Created service checks are never deleted by undo or un-match.
 KEEP_ON_UNDO = {"service_template"}
 # Per-item single values: interface monitoring, item_key = the interface
 # (its ifName in lower case, or "#<ifIndex>" when the name is empty or not unique).
 ITEM_KEYS = {"interfaces"}
 KIND_TABLE = {"device": "devices", "child": "devices", "server": "servers"}
-_UUID_KEYS = {"group", "template", "snmp_credential", "agent_policy"}
+_UUID_KEYS = {"group", "template", "snmp_credential", "agent_policy", "site"}
+# Custom fields: one single value per field, item_key = the field's key, values
+# compared in their canonical text form (``cf_norm``).
+CUSTOM = "custom_field"
+CUSTOM_PREFIX = CUSTOM + ":"
 _INT_KEYS = {"ping_interval", "snmp_interval"}
 
 DEVICE_SQL = """
@@ -104,8 +111,25 @@ WHERE true
 
 # ── values ──────────────────────────────────────────────────────────────────
 
+def cf_norm(value: Any) -> str | None:
+    """Comparable text of a custom field value: yes/no as true/false, whole
+    numbers without a fraction, dates as YYYY-MM-DD."""
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        f = float(value)
+        return str(int(f)) if f.is_integer() else repr(f)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return str(value)
+
+
 def norm(key: str, value: Any) -> Any:
     """Comparable form of a setting value."""
+    if key == CUSTOM:
+        return cf_norm(value)
     if value is None or value == "":
         return None
     if key in _UUID_KEYS:
@@ -136,9 +160,13 @@ def _tags(raw) -> list[str]:
 def current_values(kind: str, row: Any) -> dict[str, Any]:
     g = (lambda k: row.get(k)) if isinstance(row, dict) else (lambda k: getattr(row, k, None))
     sets = {"map": [str(x).lower() for x in (g("_maps") or [])],
-            "dependency_parent": [str(x).lower() for x in (g("_parents") or [])]}
+            "dependency_parent": [str(x).lower() for x in (g("_parents") or [])],
+            "add_group": [str(x).lower() for x in (g("_static_groups") or [])],
+            CUSTOM: {k: cf_norm(v) for k, v in (g("_custom") or {}).items()},
+            "_custom_kinds": g("_custom_kinds") or {}}
     if kind == "server":
         return {"owner": g("owner"), "environment": g("environment"), "tags": _tags(g("tags")), **sets,
+                "site": g("site_id"),
                 "agent_policy": g("agent_policy_id"), "_has_agent": bool(g("agent_count")),
                 "_agent_platforms": [p for p in (g("agent_platforms") or []) if p],
                 "_policy_platforms": g("_policy_platforms") or {}}
@@ -197,6 +225,8 @@ def needs(rules: Iterable[dict]) -> set[str]:
                 walk(c)
         elif node.get("field") in EXTRA_FACTS:
             out.add(EXTRA_FACTS[node["field"]])
+        elif str(node.get("field") or "").startswith(CUSTOM_FACT):
+            out.add("custom_fields")
 
     for r in rules:
         walk(r.get("condition"))
@@ -205,10 +235,16 @@ def needs(rules: Iterable[dict]) -> set[str]:
                 out.add("interfaces")
             elif a.get("key") == "service_template":
                 out.add("service_checks")
+            elif a.get("key") == CUSTOM:
+                out.add("custom_fields")
+            elif a.get("key") == "add_group":
+                out.add("groups")
     return out
 
 
-ALL_EXTRAS = frozenset({"interfaces", "topology", "sensors", "baselines", "service_checks", "server_inventory"})
+ALL_EXTRAS = frozenset({"interfaces", "topology", "sensors", "baselines", "service_checks", "server_inventory",
+                        "custom_fields", "groups"})
+CUSTOM_FACT = "custom."
 
 
 def facts_for(kind: str, row: Any) -> dict:
@@ -254,7 +290,34 @@ def plan_changes(kind: str, asset_id: str, current: dict, plan: dict, owned: dic
             return
         out.append({**base, "outcome": "apply"})
 
+    def custom_entry(field, entry):
+        """One custom field: a single value per field (item_key = the field)."""
+        kinds = (current.get("_custom_kinds") or {}).get(field)
+        if not kinds or ("server" if kind == "server" else "device") not in kinds:
+            return   # the field was deleted, or does not apply to this kind of asset
+        r = ref(entry)
+        desired = cf_norm((entry["value"] or {}).get("value"))
+        cur = cf_norm((current.get(CUSTOM) or {}).get(field))
+        base = {"asset_kind": kind, "asset_id": str(asset_id), "action_key": CUSTOM, "item_key": field,
+                "before": cur, "after": desired, "rule_id": r["rule_id"], "rule_name": r["rule_name"],
+                "rule_revision": r["rule_revision"]}
+        a = owned.get((CUSTOM, field))
+        edited = a is not None and cf_norm(a.get("value")) != cur
+        if edited and not r["enforce"]:
+            if cur != desired:
+                out.append({**base, "outcome": "kept_manual_edit",
+                            "detail": "Changed by hand after a rule set it; the rule sets it only once"})
+            return
+        if cur == desired:
+            return
+        out.append({**base, "outcome": "apply",
+                    "detail": "Re-applied over a manual edit (enforce)" if edited else None})
+
     for key, entry in (plan.get("settings") or {}).items():
+        if key.startswith(CUSTOM_PREFIX):
+            if CUSTOM in writable:
+                custom_entry(key[len(CUSTOM_PREFIX):], entry)
+            continue
         if key == "decision" or key not in writable:
             continue
         if key in SET_KEYS:
@@ -354,6 +417,16 @@ def plan_changes(kind: str, asset_id: str, current: dict, plan: dict, owned: dic
                     "rule_revision": (rules_by_id.get(a.get("rule_id")) or {}).get("revision")}
             if key in KEEP_ON_UNDO:
                 continue   # created service checks stay
+            if key == CUSTOM:
+                cur = cf_norm((current.get(CUSTOM) or {}).get(item))
+                if cur is None or cur != cf_norm(a.get("value")):
+                    continue   # cleared or changed by hand since
+                prev = cf_norm(a.get("previous"))
+                if prev == cur:
+                    continue
+                out.append({**base, "before": cur, "after": prev, "outcome": "revert",
+                            "detail": "The asset no longer matches the rule (revert on un-match)"})
+                continue
             if key in ITEM_KEYS:
                 cur = (current.get(key) or {}).get(item)
                 if cur is None or cur != a.get("value"):
@@ -489,6 +562,7 @@ async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]], extras: 
     for _, r in assets:
         r["_maps"] = maps.get(str(r["id"]), [])
         r["_parents"] = parents.get(str(r["id"]), [])
+    await _attach_groups_and_fields(db, assets)
     devices = [r for k, r in assets if k == "device"]
     if devices:
         await _attach_device_extras(db, devices, extras)
@@ -505,6 +579,39 @@ async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]], extras: 
         facts = await server_inventory_facts.load(db, [str(r["id"]) for r in servers], needles)
         for r in servers:
             r["_inventory"] = facts.get(str(r["id"]), {})
+
+
+async def _attach_groups_and_fields(db: AsyncSession, assets: list[tuple[str, dict]]) -> None:
+    """Static group memberships (``_static_groups``), custom field values
+    (``_custom``: {key: value}) and which kinds each custom field applies to
+    (``_custom_kinds``). Children are devices in both tables."""
+    by_kind: dict[str, list[str]] = {}
+    for k, r in assets:
+        by_kind.setdefault("server" if k == "server" else "device", []).append(str(r["id"]))
+    groups: dict = {}
+    custom: dict = {}
+    kinds: dict[str, list[str]] = {}
+    if assets:
+        kinds = {key: list(ak or []) for key, ak in (await db.execute(text(
+            "SELECT key, asset_kinds FROM custom_field_defs"))).all()}
+    for ak, ids in by_kind.items():
+        for aid, gid in (await db.execute(text(
+                "SELECT asset_id::text, group_id::text FROM device_group_members WHERE asset_kind = :k"
+                " AND source = 'static' AND asset_id = ANY(CAST(:ids AS uuid[]))"), {"k": ak, "ids": ids})).all():
+            groups.setdefault((ak, aid), []).append(gid)
+        if kinds:
+            for r in (await db.execute(text(
+                    "SELECT v.asset_id::text AS asset_id, d.key, v.value_text, v.value_num, v.value_date, v.value_bool"
+                    " FROM custom_field_values v JOIN custom_field_defs d ON d.id = v.field_id"
+                    " WHERE v.asset_kind = :k AND v.asset_id = ANY(CAST(:ids AS uuid[]))"),
+                    {"k": ak, "ids": ids})).mappings().all():
+                from app.services.custom_fields import display
+                custom.setdefault((ak, r["asset_id"]), {})[r["key"]] = display(dict(r))
+    for k, r in assets:
+        ak = "server" if k == "server" else "device"
+        r["_static_groups"] = groups.get((ak, str(r["id"])), [])
+        r["_custom"] = custom.get((ak, str(r["id"])), {})
+        r["_custom_kinds"] = kinds
 
 
 def check_name(template_name: str, hostname: str | None) -> str:
@@ -735,6 +842,35 @@ async def _write(db: AsyncSession, change: dict, value: Any, *, apply_credential
             reason = (res.skipped[0].get("reason") if res.skipped else None) or "not created"
             raise NotWritten(f"No service check created: {reason}")
         return
+    if key == "add_group":
+        ak = "server" if kind == "server" else "device"
+        if value is None:
+            await db.execute(text(
+                "DELETE FROM device_group_members WHERE group_id = CAST(:g AS uuid) AND asset_kind = :k"
+                " AND asset_id = CAST(:id AS uuid) AND source = 'static'"), {**params, "g": change["item_key"], "k": ak})
+            return
+        g = (await db.execute(text("SELECT kind, asset_kinds FROM device_groups WHERE id = CAST(:g AS uuid)"),
+                              {"g": change["item_key"]})).first()
+        if g is None:
+            raise NotWritten("The group was deleted")
+        if g[0] != "static":
+            raise NotWritten("The group is dynamic; its members come from its condition")
+        if ak not in (g[1] or []):
+            raise NotWritten(f"The group holds {', '.join(g[1] or [])} only")
+        await db.execute(text(
+            "INSERT INTO device_group_members (group_id, asset_kind, asset_id, source)"
+            " VALUES (CAST(:g AS uuid), :k, CAST(:id AS uuid), 'static') ON CONFLICT DO NOTHING"),
+            {**params, "g": change["item_key"], "k": ak})
+        return
+    if key == CUSTOM:
+        from fastapi import HTTPException
+        from app.services import custom_fields
+        try:
+            await custom_fields.set_values(db, "server" if kind == "server" else "device", change["asset_id"],
+                                           {change["item_key"]: value}, None)
+        except HTTPException as e:   # the field was deleted, or the value no longer fits it
+            raise NotWritten(str(e.detail)) from None
+        return
     if key == "agent_policy":
         await db.execute(text("UPDATE agents SET policy_id = CAST(:v AS uuid), updated_at = now()"
                               " WHERE server_id = CAST(:id AS uuid)"), {**params, "v": value})
@@ -862,6 +998,7 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
     counts = {"applied": 0, "kept_manual_edit": 0, "not_reversible": 0, "skipped_changed": 0, "reverted": 0,
               "not_ready": 0}
     by_asset: dict = {}
+    groups_changed = any(c["action_key"] == "add_group" and c["outcome"] == "revert" for c in changes)
     for c in changes:
         by_asset.setdefault((c["asset_kind"], c["asset_id"]), []).append(c)
     for (kind, aid), group in by_asset.items():
@@ -894,7 +1031,9 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
             key = c["action_key"]
             setlike = key == "tags" or key in SET_KEYS
             if c["outcome"] == "revert":
-                if key in ITEM_KEYS:
+                if key == CUSTOM:
+                    still = cf_norm((current.get(CUSTOM) or {}).get(c["item_key"])) == c["before"]
+                elif key in ITEM_KEYS:
                     still = (current.get(key) or {}).get(c["item_key"]) == c["before"]
                 else:
                     still = _present(current, key, c["item_key"]) if setlike else \
@@ -912,7 +1051,9 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
                 db.add(_item(run.id, c, c["outcome"]))
                 counts[c["outcome"]] = counts.get(c["outcome"], 0) + 1
                 continue
-            if key in ITEM_KEYS:
+            if key == CUSTOM:
+                still = cf_norm((current.get(CUSTOM) or {}).get(c["item_key"])) == c["before"]
+            elif key in ITEM_KEYS:
                 still = (current.get(key) or {}).get(c["item_key"]) == c["before"]
             elif setlike:
                 still = not _present(current, key, c["item_key"])
@@ -942,6 +1083,11 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
             await _assign(db, c, run.id)
             db.add(_item(run.id, c, "applied"))
             counts["applied"] += 1
+            if key == "add_group":
+                groups_changed = True
+    if groups_changed:
+        from app.services.device_groups import membership
+        await membership.refresh_counts(db)
     return counts
 
 
@@ -1031,7 +1177,9 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
             continue
         current = current_values(c["asset_kind"], row)
         setlike = key == "tags" or key in SET_KEYS
-        if key in ITEM_KEYS:
+        if key == CUSTOM:
+            still = cf_norm((current.get(CUSTOM) or {}).get(c["item_key"])) == cf_norm(it["after"])
+        elif key in ITEM_KEYS:
             still = (current.get(key) or {}).get(c["item_key"]) == it["after"]
         elif setlike:
             still = _present(current, key, c["item_key"])
@@ -1064,6 +1212,9 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
                  "v": json.dumps(it["before"])})
         db.add(_item(undo.id, c, "reverted"))
         counts["reverted"] += 1
+    if any(it["action_key"] == "add_group" for it in items):
+        from app.services.device_groups import membership
+        await membership.refresh_counts(db)
     now = datetime.now(timezone.utc)
     undo.counts = {**counts, "imported_devices": len(imported)}
     undo.status = "partial" if counts["skipped_changed"] or counts["not_reversible"] else "completed"

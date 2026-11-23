@@ -291,10 +291,19 @@ def _vectors():
 
 @pytest.mark.parametrize("vector", _vectors(), ids=lambda v: v["name"])
 def test_contract_vectors(vector):
-    rules = [{**r, "condition": conditions.validate(r["condition"]),
+    from app.services.discovery_rules.facts import ENUM_VALUES, FIELDS, custom_catalog
+    cf, ce, _ = custom_catalog(vector.get("custom_fields") or [])
+
+    def cond(c):
+        return conditions.stamp_custom_types(
+            conditions.validate(c, fields={**FIELDS, **cf}, enums={**ENUM_VALUES, **ce}), cf)
+
+    rules = [{**r, "condition": cond(r["condition"]),
               "actions": actions.validate_actions(r["actions"], r.get("asset_kinds", ["device"])),
               "triggers": ["discovery"], "revision": 1, "mode": "active"} for r in vector["rules"]]
-    plan = engine.evaluate(sample_facts(vector["facts"]), rules)
+    facts = sample_facts(vector["facts"])
+    facts.update({k: v for k, v in vector["facts"].items() if k.startswith("custom.")})
+    plan = engine.evaluate(facts, rules)
     exp = vector["expect"]
     assert [m["rule_id"] for m in plan["matched"]] == exp["matched"]
     assert {k: v["value"] for k, v in plan["settings"].items()} == exp["settings"]

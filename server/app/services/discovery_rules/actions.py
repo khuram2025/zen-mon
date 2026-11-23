@@ -12,6 +12,7 @@ API checks that the referenced row exists.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -86,6 +87,18 @@ ACTIONS: dict[str, ActionSpec] = {a.key: a for a in (
                ("service_checks.manage",), ("device",), source="service_check_templates",
                help="Creates the template's service check for the device (named \"<template> · <hostname>\") "
                     "unless one exists. Undo and un-match leave created checks in place."),
+    # Server site, group membership and custom fields (migrate-213 era)
+    ActionSpec("site", "Site", "single", "ref", ("servers.manage",), ("server",), source="sites",
+               help="The server's site (where it is). Devices keep a free-text Location."),
+    ActionSpec("add_group", "Add to group", "additive", "ref", ("devices.manage_policies",),
+               ("device", "server", "child"), source="device_groups",
+               help="Makes the device or server a static member of the group (alert scopes, maintenance, reports "
+                    "and dynamic groups see it like a hand-added member). A device's own group is set with "
+                    "\"Device group\". Never removes a member an operator added."),
+    ActionSpec("custom_field", "Set custom field", "single", "custom", ("devices.manage",),
+               ("device", "server", "child"),
+               help="Sets one custom field (Groups & Fields). A rule may set several fields; for each field the "
+                    "first matching rule wins."),
     ActionSpec("tags", "Add tags", "additive", "tags", ("devices.manage",), ("device", "server", "child"),
                help="Tags from every matching rule are merged. A tag is how a new device becomes "
                     "visible to a team whose view is limited by tags."),
@@ -95,6 +108,9 @@ INTERFACE_FIELDS = ("if_name", "if_alias", "if_descr", "if_type", "speed")
 INTERFACE_SETS = ("monitor", "ignore")
 MAX_INTERFACE_PATTERNS = 10
 MAX_INTERFACE_PATTERN = 200
+
+CUSTOM_KEY = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
+MAX_CUSTOM_FIELDS = 20
 
 DEVICE_TYPES = ("router", "switch", "firewall", "access_point", "load_balancer", "wireless_controller",
                 "printer", "ups", "storage", "server", "other")
@@ -224,6 +240,19 @@ def validate_action(raw: Any) -> dict:
         out["value"] = n
     elif spec.value == "interfaces":
         out["value"] = _interface_patterns(value)
+    elif spec.value == "custom":
+        # {"field": <custom field key>, "value": ...}; the API checks the field
+        # exists, applies to the rule's asset kinds, and coerces the value to
+        # its type (app.services.custom_fields.coerce).
+        if not isinstance(value, dict):
+            raise ActionError("Set custom field: choose a field and a value")
+        field = str(value.get("field") or "").strip()
+        if not CUSTOM_KEY.match(field):
+            raise ActionError("Set custom field: choose a field")
+        raw = value.get("value")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            raise ActionError("Set custom field: a value is required (a rule never clears a field)")
+        out["value"] = {"field": field, "value": raw}
     elif spec.value == "tags":
         tags = value if isinstance(value, list) else str(value or "").split(",")
         clean: list[str] = []
@@ -261,14 +290,28 @@ def validate_actions(raw: Any, asset_kinds: list[str]) -> list[dict]:
     out: list[dict] = []
     for item in raw:
         action = validate_action(item)
-        if action["key"] in seen:
-            raise ActionError(f"{ACTIONS[action['key']].label} is set twice in one rule")
-        seen.add(action["key"])
+        # A rule sets each custom field at most once; other actions appear once.
+        ident = setting_key(action)
+        if ident in seen:
+            what = f"Custom field {action['value']['field']}" if action["key"] == "custom_field" \
+                else ACTIONS[action["key"]].label
+            raise ActionError(f"{what} is set twice in one rule")
+        seen.add(ident)
         spec = ACTIONS[action["key"]]
         if not set(asset_kinds) & set(spec.asset_kinds):
             raise ActionError(f"{spec.label} does not apply to {', '.join(asset_kinds)}")
         out.append(action)
+    if sum(1 for a in out if a["key"] == "custom_field") > MAX_CUSTOM_FIELDS:
+        raise ActionError(f"A rule sets at most {MAX_CUSTOM_FIELDS} custom fields")
     return out
+
+
+def setting_key(action: dict) -> str:
+    """The single value an action sets: its key, or ``custom_field:<field>``
+    (each custom field is its own single value, first matching rule wins)."""
+    if action.get("key") == "custom_field" and isinstance(action.get("value"), dict):
+        return f"custom_field:{action['value'].get('field')}"
+    return action.get("key")
 
 
 def permissions_needed(actions: list[dict], asset_kinds: list[str] | None = None) -> set[str]:
@@ -288,7 +331,7 @@ def permissions_needed(actions: list[dict], asset_kinds: list[str] | None = None
                 # ("device") needs only the device permissions.
                 needed.add("servers.manage")
             continue
-        if spec.key in ("map", "service_template"):
+        if spec.key in ("map", "service_template", "add_group"):
             needed.update(spec.permission)
             continue
         applies = kinds & set(spec.asset_kinds)

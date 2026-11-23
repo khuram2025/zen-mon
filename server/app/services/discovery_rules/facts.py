@@ -63,6 +63,7 @@ FIELDS: dict[str, tuple[str, str, str]] = {
     "controller_polling": ("boolean", "Polled by the controller", "The controller itself monitors the device "
                            "(not only remote sensors)"),
     "agent_policy": ("reference", "Agent policy", "The policy the server's agent runs"),
+    "site_id": ("reference", "Site", "The server's site"),
     "baselines": ("set", "Software baselines", "Names of the enabled software baselines that apply to the server"),
     "baseline_status": ("enum", "Baseline compliance", "compliant, non_compliant or not_evaluated"),
 }
@@ -82,7 +83,7 @@ _DEVICE = {"ip_address", "hostname", "sys_descr", "sys_object_id", "vendor", "mo
            "serial_number", "snmp_credential_id", "is_server", "tags", "group_id", "template_id", "location",
            "owner", "status", "ping_enabled", "snmp_enabled"}
 _SERVER = {"ip_address", "hostname", "fqdn", "os", "os_version", "device_type", "is_server", "tags", "owner",
-           "status", "environment", "os_type", "collection_mode", "sites", "agent_policy", "baselines",
+           "status", "environment", "os_type", "collection_mode", "sites", "site_id", "agent_policy", "baselines",
            "baseline_status"}
 _SERVER |= set(_INVENTORY)
 _DEVICE |= {"interface_count", "interface_names", "neighbors", "neighbor_count", "depends_on", "sensors", "sites",
@@ -118,7 +119,29 @@ REFERENCE_SOURCES: dict[str, str] = {
     "group_id": "device_groups",
     "template_id": "device_profiles",
     "agent_policy": "agent_policies",
+    "site_id": "sites",
 }
+
+# Custom fields (Groups & Fields) are facts of devices and servers in inventory
+# as custom.<key>, typed like the field (see ``custom_catalog``).
+CUSTOM_PREFIX = "custom."
+_CUSTOM_TYPE = {"text": "text", "number": "number", "date": "date", "choice": "enum", "boolean": "boolean"}
+
+
+def custom_catalog(defs: list[dict]) -> tuple[dict, dict, dict]:
+    """(fields, enums, sources) for the custom fields ``defs``: added to
+    FIELDS / ENUM_VALUES / FIELD_SOURCES when a rule is validated and in the
+    catalog. A field for devices is a fact of devices and controller-managed
+    children."""
+    fields, enums, sources = {}, {}, {}
+    for d in defs:
+        key = CUSTOM_PREFIX + d["key"]
+        fields[key] = (_CUSTOM_TYPE[d["field_type"]], d["label"], d.get("description") or "Custom field")
+        if d["field_type"] == "choice":
+            enums[key] = [str(c) for c in (d.get("choices") or [])]
+        kinds = list(d.get("asset_kinds") or [])
+        sources[key] = (["device", "child"] if "device" in kinds else []) + (["server"] if "server" in kinds else [])
+    return fields, enums, sources
 
 _SERVER_OS_HINTS = ("windows", "linux", "ubuntu", "debian", "centos", "rhel",
                     "red hat", "suse", "fedora", "esxi", "macos")
@@ -257,6 +280,7 @@ def facts_from_device(row: Any) -> dict[str, Any]:
         out["sensors"] = list(_get(row, "_sensors"))
         out["sites"] = list(_get(row, "_sites") or [])
         out["controller_polling"] = bool(_get(row, "_central"))
+    _custom_facts(out, row)
     return out
 
 
@@ -287,7 +311,16 @@ def facts_from_server(row: Any) -> dict[str, Any]:
         out["baseline_status"] = _get(row, "_baseline_status")
     for k, v in (_get(row, "_inventory") or {}).items():
         out[k] = v
+    sid = _get(row, "site_id")
+    out["site_id"] = str(sid) if sid else None
+    _custom_facts(out, row)
     return out
+
+
+def _custom_facts(out: dict, row: Any) -> None:
+    """Custom field values as ``custom.<key>`` facts (assets in inventory)."""
+    for k, v in (_get(row, "_custom") or {}).items():
+        out[CUSTOM_PREFIX + k] = v
 
 
 def facts_from_child(row: Any) -> dict[str, Any]:

@@ -7,8 +7,9 @@ applies.
 Order and conflicts
 -------------------
 Rules are evaluated in ascending ``priority`` (lower number first). For each
-single-valued action (import decision, group, template, ...) the first
-matching rule sets the value; a later matching rule that sets the same action
+single-valued action (import decision, group, template, ...; each custom
+field separately, as ``custom_field:<field>``) the first matching rule sets
+the value; a later matching rule that sets the same action
 is recorded in ``shadowed``. Tags from every matching rule are merged. A
 matching rule with ``stop_processing`` ends the evaluation. Priorities are
 unique, so there are no ties.
@@ -20,7 +21,7 @@ import hashlib
 from typing import Any, Iterable
 
 from . import conditions
-from .actions import ACTIONS
+from .actions import ACTIONS, setting_key
 from .facts import asset_kind_of
 
 TRACE_RULE_LIMIT = 25
@@ -95,12 +96,14 @@ def evaluate(facts: dict, rules: Iterable[dict], *, trigger: str = "discovery",
             entry = {"value": action["value"], **ref}
             if "import_as" in action:
                 entry["import_as"] = action["import_as"]
-            if key in settings:
-                winner = settings[key]
-                shadowed.append({"key": key, "value": action["value"], **ref,
+            # Each custom field is its own single value: custom_field:<field>.
+            skey = setting_key(action)
+            if skey in settings:
+                winner = settings[skey]
+                shadowed.append({"key": skey, "value": action["value"], **ref,
                                  "winner_rule_id": winner["rule_id"], "winner_rule_name": winner["rule_name"]})
             else:
-                settings[key] = entry
+                settings[skey] = entry
         if rule.get("stop_processing"):
             stopped_by = rid
             break

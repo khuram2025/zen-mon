@@ -832,4 +832,71 @@ assert.match(editorInv, /field\?\.type === 'inventory' && <div[^>]*>\{inventoryH
 assert.match(editorInv, /inventoryPlaceholder\(field\.key, 'list'\)/)
 assert.match(editorInv, /inventoryPlaceholder\(field\.key, 'text'\)/)
 
+// ── server site, "Add to group", custom fields, a rule's own schedule (migrate-213) ──
+const GRP = 'eeeeeeee-0000-0000-0000-000000000001'
+const SITE = 'eeeeeeee-0000-0000-0000-000000000002'
+const cfCatalog = {
+  ...catalog,
+  actions: [...catalog.actions,
+    { key: 'site', label: 'Site', kind: 'single', value: 'ref', permission: ['servers.manage'], asset_kinds: ['server'], source: 'sites', help: '', min: null, max: null },
+    { key: 'add_group', label: 'Add to group', kind: 'additive', value: 'ref', permission: ['devices.manage_policies'], asset_kinds: ['device', 'server', 'child'], source: 'device_groups', help: '', min: null, max: null },
+    { key: 'custom_field', label: 'Set custom field', kind: 'single', value: 'custom', permission: ['devices.manage'], asset_kinds: ['device', 'server', 'child'], source: null, help: '', min: null, max: null }],
+  custom_fields: [
+    { key: 'role', label: 'Role', field_type: 'choice', choices: ['Core', 'Edge'], asset_kinds: ['device'] },
+    { key: 'tier', label: 'Tier', field_type: 'number', choices: null, asset_kinds: ['device', 'server'] },
+    { key: 'warranty_end', label: 'Warranty end', field_type: 'date', choices: null, asset_kinds: ['server'] }],
+}
+const cfLookups = { device_groups: { [GRP]: 'Windows 2019' }, sites: { [SITE]: 'Riyadh DC' } }
+assert.equal(M.summarizeAction({ key: 'site', value: SITE }, cfLookups, cfCatalog), 'Site: Riyadh DC')
+assert.equal(M.summarizeAction({ key: 'add_group', value: GRP }, cfLookups, cfCatalog), 'Add to group: Windows 2019')
+assert.equal(M.summarizeAction({ key: 'custom_field', value: { field: 'role', value: 'Core' } }, cfLookups, cfCatalog), 'Role: Core')
+assert.equal(M.summarizeAction({ key: 'custom_field', value: { field: 'tier', value: true } }, cfLookups, cfCatalog), 'Tier: Yes')
+assert.ok(M.SET_ACTION_KEYS.has('add_group'), 'group membership is only added, like tags')
+assert.deepEqual(M.defaultActionValue({ key: 'custom_field', value: 'custom' }), { key: 'custom_field', value: { field: '', value: '' } })
+const cfProblems = (actions, kinds = ['device']) => M.actionProblems({ actions, asset_kinds: kinds }, cfCatalog)
+assert.deepEqual(cfProblems([{ key: 'custom_field', value: { field: 'role', value: 'Core' } },
+                             { key: 'custom_field', value: { field: 'tier', value: '2' } }]), [], 'several fields in one rule')
+assert.deepEqual(cfProblems([{ key: 'custom_field', value: { field: 'tier', value: 1 } }, { key: 'custom_field', value: { field: 'tier', value: 2 } }]),
+  ['Custom field tier: only once per rule'])
+assert.deepEqual(cfProblems([{ key: 'custom_field', value: { field: 'tier', value: 'high' } }]), ['Tier: a number is required'])
+assert.deepEqual(cfProblems([{ key: 'custom_field', value: { field: 'warranty_end', value: '2027-01-01' } }]),
+  ['Warranty end is a field of servers only'])
+assert.deepEqual(cfProblems([{ key: 'custom_field', value: { field: '', value: '' } }]), ['Set custom field: choose a field'])
+assert.equal(M.actionIdentity({ key: 'custom_field', value: { field: 'role' } }), 'custom_field:role')
+assert.equal(M.summarizeAction({ key: 'custom_field:role', value: { field: 'role', value: 'Edge' } }, cfLookups, cfCatalog), 'Role: Edge',
+  'a plan setting keyed per field reads like the action')
+assert.equal(M.settingLabel('custom_field:tier', cfCatalog), 'Tier')
+assert.equal(M.settingLabel('add_group', null), 'Group membership')
+assert.equal(M.changeText('custom_field', null, '2', cfLookups, 'tier'), 'tier: not set → 2')
+assert.equal(M.changeText('add_group', null, GRP, cfLookups), '+ Windows 2019')
+assert.equal(M.changeText('site', null, SITE, cfLookups), 'not set → Riyadh DC')
+
+// schedules: the server's schedules.describe wording, checks before saving, local time -> instant
+assert.equal(M.describeSchedule(null), 'Shared schedule')
+assert.equal(M.describeSchedule({ kind: 'weekly', days: [4, 3, 2, 1, 0], time: '02:00', timezone: 'Asia/Riyadh' }), 'Weekdays at 02:00 (Asia/Riyadh)')
+assert.equal(M.describeSchedule({ kind: 'weekly', days: [0, 1, 2, 3, 4, 5, 6], time: '02:00', timezone: 'UTC' }), 'Daily at 02:00 (UTC)')
+assert.equal(M.describeSchedule({ kind: 'weekly', days: [0, 2], time: '02:00', timezone: 'UTC' }), 'Mon, Wed at 02:00 (UTC)')
+assert.equal(M.describeSchedule({ kind: 'hourly', every_hours: 6, time: '00:30', timezone: 'UTC' }), 'Every 6 hours from 00:30 (UTC)')
+assert.equal(M.describeSchedule({ kind: 'monthly', day: 1, time: '03:00', timezone: 'UTC' }), 'Monthly on day 1 at 03:00 (UTC)')
+assert.equal(M.describeSchedule({ kind: 'once', at: '2026-12-01T22:00', timezone: 'UTC' }), 'Once on 2026-12-01 at 22:00 (UTC)')
+const at = new Date('2026-11-23T12:00:00Z')
+assert.deepEqual(M.scheduleProblems({ kind: 'once', at: '2026-11-23T14:00', timezone: 'Asia/Riyadh' }, at), ['Run once at: choose a time in the future'],
+  '14:00 Riyadh is 11:00 UTC: already past')
+assert.deepEqual(M.scheduleProblems({ kind: 'once', at: '2026-11-23T16:00', timezone: 'Asia/Riyadh' }, at), [])
+assert.deepEqual(M.scheduleProblems({ kind: 'weekly', days: [], time: '02:00', timezone: 'UTC' }), ['Weekly: choose at least one day'])
+assert.deepEqual(M.scheduleProblems({ kind: 'monthly', day: 30, time: '2:00', timezone: 'Mars/Base' }),
+  ['Schedule: a known time zone, such as Asia/Riyadh or UTC', 'Schedule: a time as HH:MM', 'Monthly: a day from 1 to 28'])
+assert.deepEqual(M.scheduleProblems({ kind: 'hourly', every_hours: 5, time: '00:00', timezone: 'UTC' }), ['Every: 1, 2, 3, 4, 6, 8 or 12 hours'])
+assert.equal(M.zonedToDate('2026-11-23T14:00', 'Asia/Riyadh').toISOString(), '2026-11-23T11:00:00.000Z')
+assert.equal(M.defaultSchedule('weekly', 'UTC').days.length, 7)
+assert.equal(M.ruleRunsText({ triggers: ['scheduled'], schedule_text: 'Weekdays at 02:00 (UTC)' }),
+  'runs on a schedule (weekdays at 02:00 (UTC)) · set once')
+assert.ok(M.ruleProblems({ ...M.defaultRule(), name: 'x', triggers: ['scheduled'], schedule: { kind: 'weekly', days: [], time: '02:00', timezone: 'UTC' } }, cfCatalog)
+  .includes('Weekly: choose at least one day'))
+const editorGaps = read('src/pages/discovery/RuleEditorPage.tsx')
+assert.match(editorGaps, /<CustomFieldsEditor actions=\{customs\}/, 'custom field actions share one card')
+assert.match(editorGaps, /<ScheduleEditor/, 'the scheduled trigger offers a schedule of the rule\'s own')
+assert.match(read('src/pages/discovery/api.ts'), /schedule: draft\.triggers\?\.includes\('scheduled'\) \? draft\.schedule \?\? null : null/)
+assert.match(read('src/pages/discovery/ruleUi.tsx'), /sites: asOptions\(sites\.data\)/)
+
 console.log('discovery rules model: ok')

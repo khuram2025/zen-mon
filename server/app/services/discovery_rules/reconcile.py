@@ -84,12 +84,28 @@ _DEVICE_EXTRAS = {
 }
 
 
+def _shared_parts(kind: str, alias: str, extras: frozenset | set) -> str:
+    """Fingerprint parts every kind has while a rule needs them: custom field
+    values ("custom_fields") and static group memberships ("groups")."""
+    ak = "server" if kind == "server" else "device"
+    out = ""
+    if "custom_fields" in extras:
+        out += (", (SELECT md5(string_agg(concat_ws(':', v.field_id, v.value_text, v.value_num, v.value_date,"
+                f" v.value_bool), ',' ORDER BY v.field_id)) FROM custom_field_values v WHERE v.asset_kind = '{ak}'"
+                f" AND v.asset_id = {alias}.id)")
+    if "groups" in extras:
+        out += (", (SELECT string_agg(g.group_id::text, ',' ORDER BY g.group_id) FROM device_group_members g"
+                f" WHERE g.asset_kind = '{ak}' AND g.asset_id = {alias}.id AND g.source = 'static')")
+    return out
+
+
 def hash_sql(kind: str, extras: frozenset | set = frozenset()) -> str:
     """[(kind, id, md5 of the facts rules test)] for every asset of ``kind``."""
+    shared = _shared_parts(kind, "s" if kind == "server" else "d", extras)
     if kind == "device":
         parts = [v for k, (v, _) in sorted(_DEVICE_EXTRAS.items()) if k in extras]
         joins = " ".join(j for k, (_, j) in sorted(_DEVICE_EXTRAS.items()) if k in extras)
-        tail = "".join(", " + p for p in parts)
+        tail = "".join(", " + p for p in parts) + shared
         return f"""
 SELECT 'device' AS kind, d.id::text AS id, md5(concat_ws('|', d.hostname, host(d.ip_address), d.sys_object_id,
        d.sys_descr, d.vendor, d.model, d.device_type, d.os_version, d.serial_number, d.snmp_credential_id::text,
@@ -101,10 +117,10 @@ WHERE d.poll_mode IS DISTINCT FROM 'via_controller'"""
         return f"""
 SELECT 'child' AS kind, d.id::text AS id, md5(concat_ws('|', d.hostname, host(d.ip_address), d.vendor, d.model,
        d.device_type, d.os_version, d.serial_number, d.tags::text, d.group_id::text, d.location, d.owner,
-       d.managed_source, c.hostname, m.v)) AS hash
+       d.managed_source, c.hostname, m.v{shared})) AS hash
 FROM devices d LEFT JOIN devices c ON c.id = d.managed_by_device_id {_MAPS.format(col='device_id', alias='d')}
 WHERE d.poll_mode = 'via_controller'"""
-    base = ""
+    base = shared
     if "server_inventory" in extras:
         from app.services.server_inventory_facts import HASH_PARTS
         base += "".join(", " + HASH_PARTS[k] for k in ("services", "software", "processes"))
@@ -424,16 +440,27 @@ async def _save_state(db: AsyncSession, **values) -> None:
 
 async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply_credential=None,
                          force: bool = False) -> dict:
-    """Run the rules with the ``scheduled`` trigger over the whole inventory
-    when a scheduled time has passed (once per slot; the first slot after the
-    schedule is turned on only marks the start). Same caps and approval as the
-    ``changed`` pass. ``force`` runs now regardless of the schedule. Commits."""
+    """Run the rules with the ``scheduled`` trigger when a scheduled time has
+    passed: rules without a schedule of their own on the shared engine
+    schedule (once per slot; the first slot after the schedule is turned on
+    only marks the start), rules with their own schedule at their own slots
+    (``schedules``). Same caps and approval as the ``changed`` pass. ``force``
+    runs every scheduled rule now regardless of the schedules. Commits."""
     from .runner import load_settings
 
     now = now or datetime.now(timezone.utc)
     settings = await load_settings(db)
     if not settings["enabled"]:
         return {"skipped": "engine_off"}
+    out = await _shared_pass(db, settings, now, apply_credential, force)
+    if not force:
+        own = await _own_pass(db, settings, now, apply_credential)
+        if own is not None:
+            out["own_schedules"] = own
+    return out
+
+
+async def _shared_pass(db: AsyncSession, settings: dict, now: datetime, apply_credential, force: bool) -> dict:
     state = await _state(db)
     if not settings.get("schedule_enabled") and not force:
         if state.get("last_scheduled_slot"):
@@ -452,6 +479,9 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
         if datetime.fromisoformat(str(done)) >= slot:
             return {"skipped": "not_due", "next": next_slot(now, settings).isoformat()}
     active, simulating, revision = await rules_for(db, "scheduled")
+    if not force:   # rules with a schedule of their own run at their own times
+        active = [r for r in active if not r.get("schedule")]
+        simulating = [r for r in simulating if not r.get("schedule")]
     await db.execute(text(inventory.APPLY_LOCK))
     # re-read under the lock: another worker may have run this slot
     state = await _state(db)
@@ -463,6 +493,73 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
     if not active and not simulating:
         await db.commit()
         return {"skipped": "no_rules"}
+    return await _run_scheduled(db, active, simulating, revision, settings, now, {"slot": slot.isoformat()},
+                                apply_credential)
+
+
+def _as_dt(value) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+async def _own_pass(db: AsyncSession, settings: dict, now: datetime, apply_credential) -> dict | None:
+    """Rules with a schedule of their own whose slot is due run together, once
+    per slot each. A recurring schedule with no starting point yet (saved
+    before migrate-213's starting point, or reset) only gets one."""
+    from . import schedules
+
+    active, simulating, revision = await rules_for(db, "scheduled")
+    own = [r for r in active + simulating if r.get("schedule")]
+    if not own:
+        return None
+    started = 0
+    for r in own:
+        if r.get("schedule_last_slot") is None and r["schedule"]["kind"] != "once":
+            point = schedules.last_slot(now, r["schedule"])
+            if point is not None:
+                await db.execute(text("UPDATE discovery_engine_rules SET schedule_last_slot = :s"
+                                      " WHERE id = CAST(:id AS uuid) AND schedule_last_slot IS NULL"),
+                                 {"s": point, "id": r["id"]})
+                started += 1
+    due = {r["id"] for r in own if schedules.due(r["schedule"], _as_dt(r.get("schedule_last_slot")), now)}
+    if not due:
+        if started:
+            await db.commit()
+        return {"due": 0, "started": started} if started else None
+    await db.execute(text(inventory.APPLY_LOCK))
+    # re-read under the lock: another worker may have run these slots
+    rows = (await db.execute(text(
+        "SELECT id::text, schedule, schedule_last_slot FROM discovery_engine_rules"
+        " WHERE id = ANY(CAST(:ids AS uuid[])) FOR UPDATE"), {"ids": sorted(due)})).all()
+    slots = {}
+    for rid, sched, last in rows:
+        if isinstance(sched, str):
+            import json
+            sched = json.loads(sched)
+        slot = schedules.due(sched, last, now) if sched else None
+        if slot is not None:
+            slots[rid] = slot
+    for rid, slot in slots.items():
+        await db.execute(text("UPDATE discovery_engine_rules SET schedule_last_slot = :s WHERE id = CAST(:id AS uuid)"),
+                         {"s": slot, "id": rid})
+    if not slots:
+        await db.commit()
+        return {"due": 0, "started": started}
+    names = [r["name"] for r in own if r["id"] in slots]
+    res = await _run_scheduled(db, [r for r in active if r["id"] in slots],
+                               [r for r in simulating if r["id"] in slots], revision, settings, now,
+                               {"rules": names, "slots": {k: v.isoformat() for k, v in slots.items()}},
+                               apply_credential)
+    return {"due": len(slots), "started": started, "rules": names, **res}
+
+
+async def _run_scheduled(db: AsyncSession, active: list[dict], simulating: list[dict], revision: str,
+                         settings: dict, now: datetime, targets: dict, apply_credential) -> dict:
+    """Evaluate ``active`` (and record ``simulating``) over the whole
+    inventory; hold for approval when a cap or the growth stop says so.
+    Caller holds APPLY_LOCK. ``revision`` is of every scheduled rule, as
+    approval compares it. Commits."""
     held = await _waiting(db, "scheduled", revision)
     if held:
         await db.commit()
@@ -478,7 +575,8 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
         for m in p["matched"]:
             if m["rule_id"] in rule_matches:
                 rule_matches[m["rule_id"]] += 1
-    out: dict[str, Any] = {"assets": len(assets), "matched": matched, "slot": slot.isoformat()}
+    out: dict[str, Any] = {"assets": len(assets), "matched": matched, **{k: v for k, v in targets.items()
+                                                                          if k == "slot"}}
     # A full run has no per-asset history of scheduled matches: a rule whose
     # match count grew is treated as newly matching the assets it changes.
     grew = {r["id"] for r in active
@@ -493,6 +591,7 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
         writes = [c for c in changes if c["outcome"] in ("apply", "revert")]
         run = DiscoveryEngineRun(
             trigger="scheduled", mode="apply", status="needs_approval", rules_revision=revision,
+            targets={"assets": len(assets), **targets},
             plan={"changes": inventory._jsonable(changes), "assets": [], "reasons": reasons,
                   "rule_matches": rule_matches},
             counts={**inventory.summarise(changes, len(assets), matched),
@@ -502,7 +601,7 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
         await db.commit()
         return {**out, "needs_approval": str(run.id), "changes": len(writes), "reasons": reasons}
     run = DiscoveryEngineRun(trigger="scheduled", mode="apply", rules_revision=revision, status="running",
-                             targets={"assets": len(assets), "slot": slot.isoformat()})
+                             targets={"assets": len(assets), **targets})
     db.add(run)
     await db.flush()
     counts = await inventory.apply_changes(db, changes, run, apply_credential=apply_credential)

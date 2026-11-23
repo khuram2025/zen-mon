@@ -102,7 +102,7 @@ import {
   summarizeCondition,
   summarizeCounts,
 } from './ruleModel'
-import { ChangesTable, ModeBadge, useRuleCatalog, useRuleLookups, useWithDeviceNames } from './ruleUi'
+import { ChangesTable, ModeBadge, useRuleCatalog, useRuleLookups, useWithDeviceNames, TimeZoneList } from './ruleUi'
 
 const RULES_KEY = ['discovery', 'rules', 'list'] as const
 const SETTINGS_KEY = ['discovery', 'rules', 'settings'] as const
@@ -727,24 +727,6 @@ function EngineCard({
   )
 }
 
-/** The browser's time zone names for the schedule's time zone field (none on a browser that cannot list them). */
-function TimeZoneList({ id }: { id: string }) {
-  const zones = useMemo(() => {
-    try {
-      const list = (Intl as any).supportedValuesOf?.('timeZone') as string[] | undefined
-      return Array.isArray(list) ? Array.from(new Set(['UTC', ...list])) : ['UTC']
-    } catch {
-      return ['UTC']
-    }
-  }, [])
-  return (
-    <datalist id={id}>
-      {zones.map((z) => (
-        <option key={z} value={z} />
-      ))}
-    </datalist>
-  )
-}
 
 /**
  * When the rules with the scheduled trigger run next (in the viewer's time), how many there are, the last scheduled run
@@ -792,7 +774,9 @@ function ScheduleStatus({
     },
   })
   if (!status) return null
-  const total = status.rules + status.simulating
+  const own = status.own_schedules ?? []
+  const total = status.rules + status.simulating + own.length
+  const ownNext = own.filter((o) => o.next).sort((a, b) => String(a.next).localeCompare(String(b.next)))[0]
   if (!status.schedule_enabled && total === 0 && !status.last_run) return null
   const last = status.last_run
   const lastLink = last ? (last.status === 'needs_approval' ? `/discovery/rules?review=${last.id}` : `/discovery/rules?run=${last.id}`) : null
@@ -819,6 +803,17 @@ function ScheduleStatus({
         · {plural(status.rules, 'active rule')}
         {status.simulating ? `, ${status.simulating} simulating` : ''}
       </span>
+      {own.length > 0 && (
+        <span className="text-muted" title={own.map((o) => `${o.name}: ${o.schedule}`).join('\n')}>
+          · {plural(own.length, 'rule')} on {own.length === 1 ? 'its' : 'their'} own schedule
+          {ownNext?.next && (
+            <>
+              {' '}(next: {ownNext.name},{' '}
+              <span className="text-text">{regionalDate(new Date(ownNext.next), 'datetime')}</span>)
+            </>
+          )}
+        </span>
+      )}
       {last && lastLink && (
         <span className="text-muted">
           · last run{' '}
@@ -849,7 +844,7 @@ function ScheduleStatus({
         title="Run the scheduled rules now?"
         description={
           <>
-            {plural(status.rules, 'active rule')} with the scheduled trigger run over every device and server they look
+            Every rule with the scheduled trigger, whatever its schedule, runs over every device and server it looks
             at{status.simulating ? `, and ${status.simulating} simulating rule${status.simulating === 1 ? '' : 's'} record what they would do` : ''}.
             The same limits apply as on a scheduled run: more than {settings.max_changes_per_run ?? 100} changes, a
             rule's own limit or the growth stop make the run wait for approval.

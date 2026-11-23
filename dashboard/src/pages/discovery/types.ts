@@ -271,6 +271,8 @@ export type FieldType =
   | 'boolean'
   /** Names a server's agent reports (services, installed software, watched processes). */
   | 'inventory'
+  /** Custom fields of type date: YYYY-MM-DD. */
+  | 'date'
 export type RefSource =
   | 'device_groups'
   | 'device_profiles'
@@ -281,6 +283,7 @@ export type RefSource =
   | 'sensors'
   | 'agent_policies'
   | 'service_check_templates'
+  | 'sites'
 
 export interface CatalogOperator {
   key: string
@@ -298,6 +301,17 @@ export interface CatalogField {
   source: string | null
   /** Where the field has a value (phase 2); missing on an older API = scan results only. */
   applies_to?: FieldSource[]
+  /** A custom field (Groups & Fields), tested as custom.<key>. */
+  custom?: boolean
+}
+
+/** A custom field a rule can test and set (Groups & Fields). */
+export interface RuleCustomField {
+  key: string
+  label: string
+  field_type: 'text' | 'number' | 'date' | 'choice' | 'boolean'
+  choices: string[] | null
+  asset_kinds: ('device' | 'server')[]
 }
 
 export interface CatalogAction {
@@ -305,7 +319,8 @@ export interface CatalogAction {
   label: string
   kind: 'single' | 'additive'
   /** `on`: the only value is true ("Turn ping monitoring on"); a rule never turns monitoring off. */
-  value: 'decision' | 'ref' | 'text' | 'int' | 'tags' | 'on' | 'interfaces'
+  /** `custom`: {field, value} - one custom field (a rule may set several). */
+  value: 'decision' | 'ref' | 'text' | 'int' | 'tags' | 'on' | 'interfaces' | 'custom'
   permission: string[]
   asset_kinds: AssetKind[]
   source: string | null
@@ -332,6 +347,8 @@ export interface RuleCatalog {
   interface_sets?: { key: InterfaceSet; label: string }[]
   /** Phase 4: the intervals a schedule may use (hours). */
   schedule_hours?: number[]
+  /** Custom fields rules can test (custom.<key>) and set ("Set custom field"). */
+  custom_fields?: RuleCustomField[]
 }
 
 export type InterfaceField = 'if_name' | 'if_alias' | 'if_descr' | 'if_type' | 'speed'
@@ -398,6 +415,8 @@ export interface RuleScheduleStatus {
   /** active rules with the scheduled trigger */
   rules: number
   simulating: number
+  /** Rules with a schedule of their own (they do not follow the shared schedule). */
+  own_schedules?: { id: string; name: string; mode: string; schedule: string; next: string | null; last_slot: string | null }[]
   last_run: { id: string; status: string; started_at: string; counts: Record<string, any> | null } | null
 }
 
@@ -458,7 +477,16 @@ export interface RuleDraft {
   on_unmatch: OnUnmatch
   /** Phase 4: automatic runs in which this rule would make more changes wait for approval; null = engine limit only. */
   max_changes_per_run?: number | null
+  /** With the scheduled trigger: null follows the shared engine schedule, else the rule's own. */
+  schedule?: RuleSchedule | null
 }
+
+/** A rule's own schedule (local wall-clock time in `timezone`). */
+export type RuleSchedule =
+  | { kind: 'once'; at: string; timezone: string }
+  | { kind: 'hourly'; every_hours: number; time: string; timezone: string }
+  | { kind: 'weekly'; days: number[]; time: string; timezone: string }
+  | { kind: 'monthly'; day: number; time: string; timezone: string }
 
 export interface DiscoveryRule extends RuleDraft {
   id: string
@@ -472,6 +500,10 @@ export interface DiscoveryRule extends RuleDraft {
   updated_at: string | null
   last_evaluated_at: string | null
   last_match_count: number | null
+  /** "Weekdays at 02:00 (Asia/Riyadh)" for a rule with its own schedule */
+  schedule_text?: string | null
+  next_run_at?: string | null
+  schedule_last_slot?: string | null
 }
 
 export interface RuleVersion {

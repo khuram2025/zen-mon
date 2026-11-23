@@ -36,6 +36,7 @@ import type {
   RuleMode,
   InterfacePattern,
   RuleEngineSettings,
+  RuleSchedule,
   ScheduleRunResult,
   UnmatchedReport,
 } from './types'
@@ -65,6 +66,7 @@ export function defaultRule(): RuleDraft {
     enforcement: 'set_once',
     on_unmatch: 'keep',
     max_changes_per_run: null,
+    schedule: null,
   }
 }
 
@@ -330,15 +332,31 @@ const ACTION_SOURCE: Record<string, string> = {
   sensor: 'sensors',
   agent_policy: 'agent_policies',
   service_template: 'service_check_templates',
+  site: 'sites',
+  add_group: 'device_groups',
 }
 
 /**
  * Actions whose value is one of a set (map placements, uplink parents, monitoring sensors, service checks made from
  * templates): only ever added, like tags.
  */
-export const SET_ACTION_KEYS = new Set(['tags', 'map', 'dependency_parent', 'sensor', 'service_template'])
+export const SET_ACTION_KEYS = new Set(['tags', 'map', 'dependency_parent', 'sensor', 'service_template', 'add_group'])
+
+/** A custom field action's identity: one value per field ("custom_field:<field>"), other actions by key. */
+export function actionIdentity(a: RuleAction): string {
+  return a.key === 'custom_field' ? `custom_field:${a.value?.field ?? ''}` : a.key
+}
+
+/** "Yes"/"No" for booleans, the value as text otherwise. */
+export function customValueText(v: unknown): string {
+  if (v === true) return 'Yes'
+  if (v === false) return 'No'
+  return String(v ?? '')
+}
 
 export function summarizeAction(action: RuleAction, lookups?: Lookups, catalog?: RuleCatalog | null): string {
+  // a plan's setting for one custom field is keyed custom_field:<field>
+  if (action.key.startsWith('custom_field:')) return summarizeAction({ ...action, key: 'custom_field' }, lookups, catalog)
   const v = action.value
   switch (action.key) {
     case 'decision':
@@ -361,6 +379,12 @@ export function summarizeAction(action: RuleAction, lookups?: Lookups, catalog?:
     case 'agent_policy': return `Agent policy: ${refName(lookups, ACTION_SOURCE.agent_policy, v)}`
     case 'service_template': return `Service check: ${refName(lookups, ACTION_SOURCE.service_template, v)}`
     case 'interfaces': return `Interfaces: ${summarizeInterfacePatterns(Array.isArray(v) ? v : [])}`
+    case 'site': return `Site: ${refName(lookups, ACTION_SOURCE.site, v)}`
+    case 'add_group': return `Add to group: ${refName(lookups, ACTION_SOURCE.add_group, v)}`
+    case 'custom_field': {
+      const def = catalog?.custom_fields?.find((f) => f.key === v?.field)
+      return `${def?.label ?? v?.field ?? 'Custom field'}: ${customValueText(v?.value)}`
+    }
     default: {
       const spec = catalog?.actions.find((a) => a.key === action.key)
       const shown = Array.isArray(v) ? v.join(', ') : spec?.source ? refName(lookups, spec.source, v) : String(v ?? '')
@@ -387,6 +411,7 @@ export function defaultActionValue(spec: { key: string; value: string; min?: num
     case 'on': return { key: spec.key, value: true }
     case 'int': return { key: spec.key, value: spec.key === 'snmp_interval' ? 300 : spec.min && spec.min > 60 ? spec.min : 60 }
     case 'interfaces': return { key: spec.key, value: [defaultInterfacePattern()] }
+    case 'custom': return { key: spec.key, value: { field: '', value: '' } }
     default: return { key: spec.key, value: '' }
   }
 }
@@ -398,9 +423,24 @@ export function actionProblems(draft: Pick<RuleDraft, 'actions' | 'asset_kinds'>
   for (const a of draft.actions) {
     const spec = catalog?.actions.find((s) => s.key === a.key)
     const label = spec?.label ?? a.key
-    if (seen.has(a.key)) out.push(`${label}: only once per rule`)
-    seen.add(a.key)
+    const id = actionIdentity(a)
+    if (seen.has(id)) out.push(a.key === 'custom_field' ? `Custom field ${a.value?.field}: only once per rule` : `${label}: only once per rule`)
+    seen.add(id)
     if (!spec) continue
+    if (spec.value === 'custom') {
+      const def = catalog?.custom_fields?.find((f) => f.key === a.value?.field)
+      if (!a.value?.field) out.push('Set custom field: choose a field')
+      else if (!def) out.push(`Custom field ${a.value.field} no longer exists`)
+      else {
+        const raw = a.value?.value
+        if (raw === '' || raw == null) out.push(`${def.label}: a value is required`)
+        else if (def.field_type === 'number' && !Number.isFinite(Number(raw))) out.push(`${def.label}: a number is required`)
+        else if (def.field_type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(String(raw))) out.push(`${def.label}: a date as YYYY-MM-DD`)
+        const kinds = draft.asset_kinds.map((k) => (k === 'server' ? 'server' : 'device'))
+        if (!def.asset_kinds.some((k) => kinds.includes(k))) out.push(`${def.label} is a field of ${def.asset_kinds.join(' and ')}s only`)
+      }
+      continue
+    }
     if (!spec.asset_kinds.some((k) => draft.asset_kinds.includes(k))) {
       out.push(`${label} applies to ${kindsPhrase(spec.asset_kinds)} only`)
     }
@@ -426,6 +466,7 @@ export function ruleProblems(draft: RuleDraft, catalog: RuleCatalog | null | und
   if (!draft.name.trim()) out.push('Give the rule a name')
   if (!draft.asset_kinds.length) out.push('Choose what the rule looks at: network devices, servers or controller-managed children')
   if (draft.triggers && !draft.triggers.length) out.push('Choose when the rule runs: on scan results, on new devices and servers, whenever they change, or at the scheduled times')
+  if (draft.triggers?.includes('scheduled')) out.push(...scheduleProblems(draft.schedule))
   const cap = draft.max_changes_per_run
   if (cap != null && (!Number.isInteger(cap) || cap < 1 || cap > 100000)) out.push('Changes per automatic run: a whole number from 1 to 100000, or empty')
   return [...out, ...conditionProblems(draft.condition, catalog, catalog?.limits ?? DEFAULT_LIMITS), ...actionProblems(draft, catalog)]
@@ -661,11 +702,17 @@ export const ENFORCEMENT_HELP: Record<Enforcement, string> = {
 }
 
 /** "Runs on scans and new devices and servers · set once" (rule list line). */
-export function ruleRunsText(rule: { triggers?: string[] | null; enforcement?: string | null; on_unmatch?: string | null }): string {
+export function ruleRunsText(rule: {
+  triggers?: string[] | null
+  enforcement?: string | null
+  on_unmatch?: string | null
+  schedule_text?: string | null
+}): string {
   const t = (rule.triggers?.length ? rule.triggers : ['discovery']).map((k) => TRIGGER_SHORT[k] ?? k)
   const enf = rule.enforcement === 'enforce' ? 'enforced' : 'set once'
   const unmatch = rule.on_unmatch === 'revert' ? ' · reverts when no longer matching' : ''
-  return `runs on ${joinWords(t, 'and')} · ${enf}${unmatch}`
+  const own = rule.schedule_text ? ` (${rule.schedule_text.charAt(0).toLowerCase()}${rule.schedule_text.slice(1)})` : ''
+  return `runs on ${joinWords(t, 'and')}${own} · ${enf}${unmatch}`
 }
 
 const SOURCE_WORD: Record<FieldSource, string> = { scan: 'scans', device: 'devices', server: 'servers', child: 'children' }
@@ -1021,6 +1068,10 @@ export function settingLabel(actionKey: string | null | undefined, catalog: Rule
   if (!actionKey) return '—'
   if (actionKey === 'tags') return 'Tag'
   if (actionKey === 'ping_enabled') return 'Ping monitoring'
+  if (actionKey.startsWith('custom_field:')) {
+    const field = actionKey.slice('custom_field:'.length)
+    return catalog?.custom_fields?.find((f) => f.key === field)?.label ?? `Custom field ${field}`
+  }
   const spec: CatalogAction | undefined = catalog?.actions.find((a) => a.key === actionKey)
   return spec?.label ?? SETTING_FALLBACK[actionKey] ?? sentenceCase(actionKey.replace(/_/g, ' '))
 }
@@ -1040,6 +1091,9 @@ const SETTING_FALLBACK: Record<string, string> = {
   map: 'Network map',
   dependency_parent: 'Depends on (uplink parent)',
   interfaces: 'Interface monitoring',
+  site: 'Site',
+  add_group: 'Group membership',
+  custom_field: 'Custom field',
   sensor: 'Monitor from sensor',
   agent_policy: 'Agent policy',
   service_template: 'Service check from template',
@@ -1066,6 +1120,9 @@ export function formatSettingValue(actionKey: string | null | undefined, value: 
  * interface shows its name: "Interface gi1/0/2: monitored → ignored").
  */
 export function changeText(actionKey: string | null | undefined, before: any, after: any, lookups?: Lookups, itemKey?: string | null): string {
+  if (actionKey === 'custom_field' && itemKey) {
+    return `${itemKey}: ${formatSettingValue(actionKey, before, lookups)} → ${formatSettingValue(actionKey, after, lookups)}`
+  }
   if (actionKey === 'interfaces') {
     return `${interfaceLabel(itemKey)}: ${formatSettingValue(actionKey, before, lookups)} → ${formatSettingValue(actionKey, after, lookups)}`
   }
@@ -1354,4 +1411,67 @@ export function unmatchedKindsText(report: Pick<UnmatchedReport, 'kinds'>): stri
       return `${c.unmatched} of ${c.assets} ${KIND_PLURAL[k]}`
     })
     .join(' · ')
+}
+
+// ── a rule's own schedule (migrate-213) ─────────────────────────────────────
+
+export const WEEKDAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+export const HOURLY_STEPS = [1, 2, 3, 4, 6, 8, 12]
+
+/** A starting schedule of a kind, in the browser's time zone. */
+export function defaultSchedule(kind: RuleSchedule['kind'], tz = browserTimeZone()): RuleSchedule {
+  switch (kind) {
+    case 'once': {
+      const d = new Date(Date.now() + 24 * 3600 * 1000)
+      const pad = (n: number) => String(n).padStart(2, '0')
+      return { kind, at: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T02:00`, timezone: tz }
+    }
+    case 'hourly': return { kind, every_hours: 6, time: '00:00', timezone: tz }
+    case 'monthly': return { kind, day: 1, time: '02:00', timezone: tz }
+    default: return { kind: 'weekly', days: [0, 1, 2, 3, 4, 5, 6], time: '02:00', timezone: tz }
+  }
+}
+
+/** "Weekdays at 02:00 (Asia/Riyadh)": the wording the server's schedules.describe uses. */
+export function describeSchedule(s: RuleSchedule | null | undefined): string {
+  if (!s) return 'Shared schedule'
+  const tz = s.timezone || 'UTC'
+  switch (s.kind) {
+    case 'once': return `Once on ${s.at.replace('T', ' at ')} (${tz})`
+    case 'hourly': return `Every ${s.every_hours === 1 ? 'hour' : `${s.every_hours} hours`} from ${s.time} (${tz})`
+    case 'monthly': return `Monthly on day ${s.day} at ${s.time} (${tz})`
+    default: {
+      const days = [...s.days].sort()
+      const when = days.length === 7 ? 'Daily' : days.join(',') === '0,1,2,3,4' ? 'Weekdays' : days.map((d) => WEEKDAY_SHORT[d]).join(', ')
+      return `${when} at ${s.time} (${tz})`
+    }
+  }
+}
+
+/** What is wrong with a schedule before it is saved (the server checks again). */
+export function scheduleProblems(s: RuleSchedule | null | undefined, now = new Date()): string[] {
+  if (!s) return []
+  const out: string[] = []
+  if (!isTimeZone(s.timezone)) out.push('Schedule: a known time zone, such as Asia/Riyadh or UTC')
+  if (s.kind === 'once') {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s.at)) out.push('Run once at: a date and time')
+    else if (isTimeZone(s.timezone) && zonedToDate(s.at, s.timezone) <= now) out.push('Run once at: choose a time in the future')
+    return out
+  }
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.time)) out.push('Schedule: a time as HH:MM')
+  if (s.kind === 'hourly' && !HOURLY_STEPS.includes(s.every_hours)) out.push('Every: 1, 2, 3, 4, 6, 8 or 12 hours')
+  if (s.kind === 'weekly' && !s.days.length) out.push('Weekly: choose at least one day')
+  if (s.kind === 'monthly' && !(Number.isInteger(s.day) && s.day >= 1 && s.day <= 28)) out.push('Monthly: a day from 1 to 28')
+  return out
+}
+
+/** The instant of a local wall-clock time "YYYY-MM-DDTHH:MM" in an IANA zone. */
+export function zonedToDate(local: string, tz: string): Date {
+  const guess = new Date(`${local}:00Z`)
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(guess)
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value)
+  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'))
+  return new Date(guess.getTime() - (asUtc - guess.getTime()))
 }

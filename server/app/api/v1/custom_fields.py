@@ -201,6 +201,14 @@ async def delete_field(key: str, db: AsyncSession = Depends(get_db), user: User 
     users = [name for name, cond in rows if _uses_field(cond, key)]
     if users:
         raise HTTPException(status_code=409, detail=f"Used by dynamic group(s): {', '.join(users)}")
+    # Discovery rules test custom fields (custom.<key>) and set them ("Set custom field").
+    rules = (await db.execute(text("SELECT name, condition, actions FROM discovery_engine_rules"))).all()
+    rule_users = [name for name, cond, acts in rules
+                  if _uses_field(cond, key) or any(isinstance(a, dict) and a.get("key") == "custom_field"
+                                                   and (a.get("value") or {}).get("field") == key
+                                                   for a in (json.loads(acts) if isinstance(acts, str) else acts or []))]
+    if rule_users:
+        raise HTTPException(status_code=409, detail=f"Used by discovery rule(s): {', '.join(rule_users)}")
     await db.execute(text("DELETE FROM custom_field_defs WHERE id = CAST(:id AS uuid)"), {"id": existing["id"]})
     await write_audit_log(db, actor=user, action="custom_field.delete", resource_type="custom_field",
                           resource_id=key, metadata={"label": existing["label"], "values_removed": existing["value_count"]})
