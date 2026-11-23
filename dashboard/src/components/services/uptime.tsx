@@ -24,6 +24,28 @@ export const BAND_FILL: Record<UptimeBand, string> = {
   none: 'rgb(var(--surface3) / 0.7)',
 }
 
+const LEGEND: Array<{ band: UptimeBand; label: string; hint: string }> = [
+  { band: 'perfect', label: '≥ 99.95%', hint: 'Day at or above 99.95% confirmed availability' },
+  { band: 'good', label: '≥ 99%', hint: 'Day at or above 99%' },
+  { band: 'fair', label: '≥ 95%', hint: 'Day at or above 95%' },
+  { band: 'poor', label: '< 95%', hint: 'Day below 95%' },
+  { band: 'none', label: 'No data', hint: 'No confirmed evidence that day (not monitored, or before the monitor existed)' },
+]
+
+/** Key for the daily availability bars. */
+export function UptimeBarsLegend({ className }: { className?: string }) {
+  return (
+    <span className={cn('inline-flex flex-wrap items-center gap-x-2.5 gap-y-1 font-normal normal-case tracking-normal', className)}>
+      {LEGEND.map((l) => (
+        <span key={l.band} className="inline-flex items-center gap-1" title={l.hint}>
+          <span className="h-2 w-2 rounded-[2px]" style={{ backgroundColor: BAND_FILL[l.band] }} aria-hidden />
+          {l.label}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 export const BAND_TEXT: Record<UptimeBand, string> = {
   perfect: 'text-success',
   good: 'text-success',

@@ -53,6 +53,7 @@ import { ClockSkewBanner } from '@/components/services/list/ClockSkewBanner'
 import { SavedViews } from '@/components/services/list/SavedViews'
 import { ExportMenu, ImportDialog } from '@/components/services/list/ExportImport'
 import { BAR_DAYS, MonitorRow, type LoadState } from '@/components/services/list/MonitorRow'
+import { UptimeBarsLegend } from '@/components/services/uptime'
 import {
   BULK_TEST_CAP, BulkActionDialog, type BulkAction, type BulkItem, type BulkResult,
 } from '@/components/services/list/BulkActionDialog'
@@ -89,6 +90,8 @@ function useServerNow(everyMs: number): number {
   }, [everyMs])
   return now
 }
+
+const SEARCH_DEBOUNCE_MS = 250
 
 function boolParam(v: string): boolean | null {
   return v === 'true' ? true : v === 'false' ? false : null
@@ -148,6 +151,14 @@ export function ServicesPage() {
   const [legacyApi, setLegacyApi] = useState(false)
   const advancedCount = [enabledFilter, staleFilter, maintFilter, authFilter, sensorFilter].filter(Boolean).length
   const [moreOpen, setMoreOpen] = useState(advancedCount > 0)
+  const [searchDraft, setSearchDraft] = useState(search)
+  // Follow the address when it changes elsewhere (Clear, a saved view, back).
+  useEffect(() => { setSearchDraft(search) }, [search])
+  useEffect(() => {
+    if (searchDraft === search) return
+    const t = window.setTimeout(() => patchParams({ q: searchDraft || null, page: '1' }), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(t)
+  }, [searchDraft]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Queries ─────────────────────────────────────────────────────────── */
 
@@ -372,9 +383,12 @@ export function ServicesPage() {
 
   const statusKey = statusSetKeyOf(statusFilter)
   const otherKpiFilters = [enabledFilter, staleFilter, maintFilter].filter(Boolean).length
+  // Status cards count monitors that are probing; their filter adds "enabled"
+  // (an older link without it still lights the card).
+  const statusKpi = statusKey && !staleFilter && !maintFilter && (!enabledFilter || enabledFilter === 'true')
   const activeKpi: KpiKey | null =
     !statusFilter && !otherKpiFilters ? 'all'
-      : statusKey && !otherKpiFilters ? statusKey
+      : statusKpi ? statusKey
         : !statusFilter && otherKpiFilters === 1 && enabledFilter === 'false' ? 'paused'
           : !statusFilter && otherKpiFilters === 1 && staleFilter === 'true' ? 'stale'
             : !statusFilter && otherKpiFilters === 1 && maintFilter === 'true' ? 'maint'
@@ -386,7 +400,7 @@ export function ServicesPage() {
     if (k === 'paused') return patchParams({ ...reset, enabled: 'false' })
     if (k === 'stale') return patchParams({ ...reset, stale: 'true' })
     if (k === 'maint') return patchParams({ ...reset, maint: 'true' })
-    return patchParams({ ...reset, status: statusParamFor(k) })
+    return patchParams({ ...reset, status: statusParamFor(k), enabled: 'true' })
   }
 
   const sumCount = (keys: Array<keyof SummaryExt>): number | null => {
@@ -406,6 +420,9 @@ export function ServicesPage() {
     ? uptimeValues.reduce((s, v) => s + v, 0) / uptimeValues.length
     : null
   const staleCount = sumCount(['stale'])
+  // Older appliances report no `active`; their status counts include paused monitors.
+  const activeTotal = summary ? (summary.active ?? summary.total) : null
+  const upShare = summary && activeTotal ? Math.round(((summary.up || 0) / activeTotal) * 100) : null
   const notReported = 'not reported by this appliance version'
 
   const activeFilterCount = FILTER_PARAM_KEYS.filter((k) => params.get(k)).length
@@ -470,7 +487,7 @@ export function ServicesPage() {
           state={summaryState}
           icon={<CheckCircle2 className="h-3.5 w-3.5" />}
           tone="success"
-          sub={summary?.total ? `${Math.round(((summary.up || 0) / summary.total) * 100)}% of fleet · stored status` : '—'}
+          sub={upShare != null ? `${upShare}% of active monitors` : '—'}
           active={activeKpi === 'up'}
           onClick={() => applyKpi('up')}
         />
@@ -567,8 +584,9 @@ export function ServicesPage() {
           <div className="relative min-w-[180px] flex-1 sm:max-w-xs">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <Input
-              value={search}
-              onChange={(e) => patchParams({ q: e.target.value || null, page: '1' })}
+              value={searchDraft}
+              onChange={(e) => setSearchDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') patchParams({ q: searchDraft || null, page: '1' }) }}
               placeholder="Search monitors…"
               aria-label="Search monitors"
               className="h-8 pl-8 text-xs"
@@ -765,7 +783,10 @@ export function ServicesPage() {
             )}
           </span>
           <span className="w-[30%] min-w-[220px]">Monitor</span>
-          <span className="min-w-0 flex-1" title={`Confirmed availability per calendar day (${reportingTimezone})`}>Last {BAR_DAYS} days</span>
+          <span className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <span title={`Confirmed availability per calendar day (${reportingTimezone})`}>Last {BAR_DAYS} days</span>
+            <UptimeBarsLegend className="text-2xs text-muted" />
+          </span>
           <span className="w-16 text-right">24 h</span>
           <span className="w-[64px] text-right">Response</span>
           <span className="w-14 text-right">Every</span>

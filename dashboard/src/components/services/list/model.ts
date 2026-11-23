@@ -10,6 +10,8 @@ import type { ServiceCheck, ServiceCheckSummary } from '@/types'
 export type ListRow = ServiceCheck & {
   stale?: boolean
   evidence_age_sec?: number | null
+  /** When an enabled, failing monitor entered its current state (newer appliances). */
+  status_since?: string | null
   owner_team?: string | null
   runbook_url?: string | null
 }
@@ -18,6 +20,8 @@ export type ListMeta = { total: number; skip: number; limit: number; server_time
 export type ListResponse = { data: ListRow[]; meta: ListMeta }
 
 export type SummaryExt = ServiceCheckSummary & {
+  /** Enabled monitors; the status counts cover only these (newer appliances). */
+  active?: number
   paused?: number
   stale?: number
   in_maintenance?: number
