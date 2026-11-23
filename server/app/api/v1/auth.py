@@ -39,7 +39,7 @@ from app.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
-from app.services import auth_policy, oidc_service, role_source, session_service
+from app.services import auth_policy, oidc_service, role_source, session_service, user_profile
 from app.services.audit_service import write_audit_log
 from app.services.external_auth import (
     EXTERNAL_PASSWORD_HASH,
@@ -49,7 +49,8 @@ from app.services.external_auth import (
     RADIUS_SETTINGS_KEY,
     ExternalAuthError,
     ldap_authenticate,
-    map_ldap_role,
+    explain_ldap_role,
+    ldap_username_rule,
     map_radius_role,
     merge_config,
     radius_authenticate,
@@ -107,10 +108,7 @@ async def _role_exists(db: AsyncSession, role_name: str) -> bool:
 async def _external_login(
     db: AsyncSession, username: str, password: str, existing: Optional[User]
 ) -> Optional[User]:
-    """Authenticate against LDAP/RADIUS and provision or refresh the
-    matching local user row. Returns None on bad credentials; raises 403
-    for policy denials (provider disabled, no role mapped, provisioning
-    off, mapped role missing)."""
+    """Authenticate a listed LDAP/RADIUS account or use an enabled provisioning provider."""
     from app.api.v1.settings import _get_system_setting
 
     ldap_cfg = merge_config(LDAP_DEFAULTS, await _get_system_setting(db, LDAP_SETTINGS_KEY))
@@ -126,18 +124,24 @@ async def _external_login(
             )
         sources = [(existing.auth_source, cfg)]
     else:
-        sources = [(s, c) for s, c in (("ldap", ldap_cfg), ("radius", radius_cfg)) if c["enabled"]]
+        sources = [(s, c) for s, c in (("ldap", ldap_cfg), ("radius", radius_cfg))
+                   if c["enabled"] and (c.get("auto_provision") or
+                       (s == "ldap" and ldap_username_rule(c, username)[0]))]
 
     for source, cfg in sources:
-        email: Optional[str] = None
-        full_name: Optional[str] = None
         try:
             if source == "ldap":
                 info = await asyncio.to_thread(ldap_authenticate, cfg, username, password)
                 if info is None:
                     continue
-                role = map_ldap_role(cfg, info["groups"])
-                email, full_name = info["email"], info["full_name"]
+                verified_name = info.get("ad_username", "")
+                if verified_name.lower() != username.lower():
+                    verified_name = ""
+                named_role, _ = ldap_username_rule(cfg, verified_name)
+                needs_rule = existing is None or existing.ldap_username_rule_required
+                if not cfg.get("auto_provision") and needs_rule and not named_role:
+                    continue
+                role, _ = explain_ldap_role(cfg, info["groups"], verified_name)
             else:
                 info = await asyncio.to_thread(radius_authenticate, cfg, username, password)
                 if info is None:
@@ -147,7 +151,9 @@ async def _external_login(
             logger.warning("%s authentication error for %r", source, username, exc_info=True)
             continue
 
-        if role is None:
+        keeps_own_role = existing is not None and bool(existing.role_manual)
+        uses_listed_role = role_source.uses_listed_role(source, cfg, keeps_own_role)
+        if role is None and not uses_listed_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"{source.upper()} sign-in succeeded, but no ZenPlus role is mapped for this account",
@@ -156,7 +162,8 @@ async def _external_login(
         # provision or refresh an account onto a role that does not exist. An
         # account whose role an administrator set by hand does not take the
         # mapped role, so a stale mapping does not lock it out.
-        keeps_own_role = existing is not None and bool(existing.role_manual)
+        if uses_listed_role and not await _role_exists(db, existing.role):
+            raise HTTPException(status_code=403, detail="The assigned ZenPlus role no longer exists")
         if not keeps_own_role and not await _role_exists(db, role):
             logger.error("%s mapping for %r points at missing role %r", source, username, role)
             raise HTTPException(
@@ -166,23 +173,15 @@ async def _external_login(
             )
 
         if existing is None:
-            if not cfg.get("auto_provision"):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Automatic account creation is disabled for {source.upper()} users",
-                )
-            candidate = email or f"{username}@{source}.external"
-            if not await _email_available(db, candidate, own_id=None):
-                candidate = f"{username}@{source}.external"
             user = User(
-                username=username,
-                email=candidate,
+                username=verified_name if source == "ldap" and named_role else username,
+                email=None if source == "ldap" else f"{username}@{source}.external",
                 password_hash=EXTERNAL_PASSWORD_HASH,
-                full_name=full_name,
                 role=role,
                 is_active=True,
                 auth_source=source,
                 directory_role=role,
+                ldap_username_rule_required=(source == "ldap" and bool(named_role)),
             )
             db.add(user)
             await db.flush()
@@ -194,10 +193,8 @@ async def _external_login(
             previous = role_source.apply_directory_role(user, role)
             if previous is not None:
                 logger.info("%s user %r role refreshed %r -> %r", source, username, previous, role)
-            if full_name:
-                user.full_name = full_name
-            if email and email != user.email and await _email_available(db, email, own_id=user.id):
-                user.email = email
+        if source == "ldap":
+            await user_profile.sync_ldap_profile(db, user, info)
         return user
 
     return None
@@ -336,10 +333,7 @@ async def _login_impl(data: LoginRequest, db: AsyncSession, request: Optional[Re
             )
 
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is disabled",
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
     method = user.auth_source if user.auth_source != "local" else "password"
     if user.auth_source == "local" and user.mfa_enabled:

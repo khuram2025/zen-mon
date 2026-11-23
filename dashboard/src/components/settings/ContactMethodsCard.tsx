@@ -107,7 +107,9 @@ export function ContactMethodsCard() {
           )}
           {!enabledEmail && (
             <p className="text-xs text-muted">
-              With no enabled email method, email pages go to your account address{data.account_email ? <> <span className="font-medium text-text">{data.account_email}</span></> : ''}.
+              {data.account_email
+                ? <>With no enabled email method, email pages go to your account address <span className="font-medium text-text">{data.account_email}</span>.</>
+                : 'Add an email contact to receive pages by email.'}
             </p>
           )}
           <form onSubmit={add} className="grid gap-2 rounded-md border border-border bg-surface2/30 p-3 sm:grid-cols-[110px_minmax(0,1fr)_160px_auto]">

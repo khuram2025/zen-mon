@@ -34,7 +34,7 @@ const norm = (s: string) => s.replace(/[\s_.\-]+/g, '').toLowerCase()
 export function passwordProblems(
   pw: string,
   policy: PasswordPolicy,
-  ctx: { username?: string; email?: string } = {},
+  ctx: { username?: string; email?: string | null } = {},
 ): string[] {
   const out: string[] = []
   if (pw.length < policy.min_length) out.push(`Use at least ${policy.min_length} characters (${pw.length} so far)`)

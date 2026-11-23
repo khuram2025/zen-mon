@@ -15,6 +15,23 @@ mapping rule.
 
 ## The rule
 
+LDAP / Active Directory defaults to **Only allow listed accounts** for new
+provider configurations. In this mode, add the directory sign-in name under
+**Settings → Users & Access → Users → New user**, select **LDAP / Active
+Directory**, and assign a role. The user signs in with their directory password.
+ZenPlus reads the configured name and email attributes when the account is
+added and refreshes them after the user authenticates. An account can sign in
+without an email address. If AD has no usable address, ZenPlus leaves it blank.
+ZenPlus requires an active LDAP account in Users, and a role set there by an
+administrator is sufficient after the directory verifies the password. Accounts
+set to follow the directory continue to require a matching role mapping.
+
+For established LDAP configurations with automatic creation enabled, turn on
+**Only allow listed accounts** under the provider’s Role mapping tab to require
+an existing account. Review any accounts previously created on first sign-in.
+
+For accounts that still require a provider role mapping:
+
 > The directory decides **whether** a directory account may sign in.
 > The role mapping decides **which role** it holds, unless an administrator set
 > one by hand. A hand-set role stays until an administrator hands the account
@@ -67,10 +84,21 @@ Nobody changes who decides their own role.
 
 * **Visibility scope** and **Active / Disabled** are set by hand and are never
   touched by sign-in.
-* **Full name and email** are refreshed from the directory at each sign-in when
-  it supplies them (LDAP, OIDC); the Edit dialog says so. RADIUS supplies
-  neither, so hand edits stay.
+* **Full name and email** for LDAP come from the configured directory attributes
+  when the account is added and when it signs in. OIDC updates fields supplied by
+  the provider at sign-in. RADIUS keeps manually entered profile fields.
 * **Password, forced password change, MFA** are the directory's: the actions
   are hidden and the API refuses them.
 * **Username**: sign-in matches ignoring case and the database enforces
   uniqueness ignoring case, so `JSmith` is the account `jsmith`, not a second one.
+
+### Username rules in LDAP listed-accounts mode
+
+Choose **AD username** in Role mapping, enter the AD account name (for example
+`a.test`), and select a role. AD must verify the password and return that
+sAMAccountName. Username comparison ignores case. An exact username rule is
+evaluated before group rules. A user first admitted by a username rule must
+continue matching one in listed-accounts mode, including after the first login
+creates their profile. Removing the rule denies subsequent sign-ins. Existing
+group entries retain their group semantics. An account explicitly assigned in
+Users keeps its assigned role.

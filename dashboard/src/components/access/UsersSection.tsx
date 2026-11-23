@@ -258,7 +258,7 @@ export function UsersSection() {
                               <span className="truncate">{u.full_name || u.username}</span>
                               {isMe && <Badge variant="outline" className="px-1.5 py-0 text-2xs">You</Badge>}
                             </button>
-                            <div className="truncate text-xs text-muted">{u.full_name ? <>{u.username} · </> : null}{u.email}</div>
+                            {(u.full_name || u.email) && <div className="truncate text-xs text-muted">{[u.full_name && u.username, u.email].filter(Boolean).join(' · ')}</div>}
                           </div>
                         </div>
                       </Td>

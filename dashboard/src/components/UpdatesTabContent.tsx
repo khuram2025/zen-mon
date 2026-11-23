@@ -82,6 +82,7 @@ interface UpdateStatus {
 }
 
 interface UpdatePlan {
+  hold?: string
   from_version: string
   checked_at: string
   plan_id: string
@@ -185,6 +186,12 @@ export function UpdatesTabContent() {
     },
     onError: (e: any) => toast.error('Check failed', apiErrorMessage(e)),
   })
+
+  const refreshPlan = checkNow.mutate
+  useEffect(() => {
+    if (status?.auto_update && !status.updater_running && !status.active_update &&
+        plan && plan.from_version !== status.current_version) refreshPlan()
+  }, [status?.auto_update, status?.updater_running, status?.active_update, status?.current_version, plan, refreshPlan])
 
   const installNow = useMutation({
     mutationFn: async () => (await api.post('/system/install-update', {
@@ -458,7 +465,7 @@ export function UpdatesTabContent() {
               <p className="text-sm font-medium">
                 {status?.timer_active
                   ? `Active · every ${status.check_interval_hours}h`
-                  : 'Inactive'}
+                  : status?.auto_update ? 'Automatic installation paused — updater timer is off' : 'Inactive'}
               </p>
             </div>
             {status?.last_check && (
@@ -470,8 +477,9 @@ export function UpdatesTabContent() {
 
       {plan && (
         <section aria-label="Available upgrade path" className="rounded-xl border border-border bg-surface p-6">
-          <h3 className="text-sm font-semibold">{plan.steps.length ? 'Available upgrade path' : hold ? 'Updates are on hold for this appliance' : 'No eligible updates available'}</h3>
+          <h3 className="text-sm font-semibold">{plan.steps.length ? 'Available upgrade path' : hold || plan.hold ? 'Updates are on hold for this appliance' : 'No eligible updates available'}</h3>
           <p className="mt-1 text-xs text-muted">Checked {fmtDate(plan.checked_at)}. Checking does not download or install updates.</p>
+          {plan.hold && <p role="status" className="mt-2 text-sm text-amber-500">{plan.hold}</p>}
           {hold && plan.from_version === status.current_version && (
             <div role="status" className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
               <p className="text-sm font-medium">
@@ -502,26 +510,38 @@ export function UpdatesTabContent() {
                 ))}
               </ol>
               <p className="mb-3 text-xs text-muted">{pathSummary(plan.steps)} Each step must pass verification and health checks before the next starts; a failed step stops the path and the appliance is rolled back to the version it had.</p>
-              <label htmlFor="update-target" className="block text-xs font-medium">Install through version</label>
-              <select id="update-target" value={targetVersion} onChange={e => setTargetVersion(e.target.value)}
-                disabled={installNow.isPending}
-                className="mt-1 rounded-lg border border-border bg-surface2 px-3 py-2 text-sm">
-                {plan.steps.map((step, index) => <option key={step.id} value={step.version}>
-                  v{step.version}{index === plan.steps.length - 1 ? ' — complete required path' : ' — stop after this step'}
-                </option>)}
-              </select>
-              <p className="mt-3 text-xs text-muted">{status.auto_update
-                ? `Automatic installation is enabled. Scheduled runs follow this same path in order, one version at a time, within the configured maintenance window (${status.maintenance_timezone || 'appliance local time'}).`
-                : 'Automatic installation is off. Scheduled checks leave installation to you.'}</p>
-              <button className="mt-4 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                disabled={installNow.isPending || status.updater_running || !!status.active_update || !targetVersion}
-                onClick={() => setReviewInstall(true)}>Review installation</button>
+              {status.auto_update ? (
+                <div role="status" className="rounded-lg bg-surface2 p-3 text-sm">
+                  <p className="font-medium">{status.timer_active
+                    ? `Next automatic installation: v${plan.steps[0].version}`
+                    : 'Automatic installation paused — updater timer is off'}</p>
+                  <p className="mt-1 text-xs text-muted">The eligible destination is v{plan.steps[plan.steps.length - 1].version}.
+                    {status.timer_active && (status.maintenance_window_start && status.maintenance_window_end
+                      ? ` Each step starts during ${status.maintenance_window_start}–${status.maintenance_window_end} (${status.maintenance_timezone || 'appliance time'}). Remaining steps resume in the next window.`
+                      : ' Installation can start at the next scheduled check.')}</p>
+                </div>
+              ) : (
+                <>
+                  <p className="mb-3 text-xs text-muted">Automatic installation is off. Choose how far to install.</p>
+                  <label htmlFor="update-target" className="block text-xs font-medium">Install through version</label>
+                  <select id="update-target" value={targetVersion} onChange={e => setTargetVersion(e.target.value)}
+                    disabled={installNow.isPending}
+                    className="mt-1 rounded-lg border border-border bg-surface2 px-3 py-2 text-sm">
+                    {plan.steps.map((step, index) => <option key={step.id} value={step.version}>
+                      v{step.version}{index === plan.steps.length - 1 ? ' — complete required path' : ' — stop after this step'}
+                    </option>)}
+                  </select>
+                  <button className="mt-4 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    disabled={installNow.isPending || status.updater_running || !!status.active_update || !targetVersion}
+                    onClick={() => setReviewInstall(true)}>Review installation</button>
+                </>
+              )}
             </>
           )}
         </section>
       )}
 
-      <Dialog open={reviewInstall} onOpenChange={open => { if (!installNow.isPending) setReviewInstall(open) }}>
+      <Dialog open={reviewInstall && !status.auto_update} onOpenChange={open => { if (!installNow.isPending) setReviewInstall(open) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Install updates now?</DialogTitle>
@@ -609,7 +629,7 @@ export function UpdatesTabContent() {
           <div className="flex items-center justify-between rounded-lg bg-surface2 p-4">
             <div>
               <p className="text-sm font-medium">Automatic Updates</p>
-              <p className="text-xs text-muted">Apply updates as soon as they are available</p>
+              <p className="text-xs text-muted">Install required versions in order during the maintenance window</p>
             </div>
             <Switch
               checked={config.auto_update}

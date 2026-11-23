@@ -42,8 +42,10 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   user?: User | null
 }) {
   const isEdit = !!user?.id
-  const source = user?.auth_source || 'local'
-  const isExternal = isEdit && source !== 'local'
+  const [newSource, setNewSource] = useState<'local' | 'ldap'>('local')
+  const source = isEdit ? user?.auth_source || 'local' : newSource
+  const isExternal = source !== 'local'
+  const profileFromAd = source === 'ldap'
   const me = useAuth((s) => s.user)
   const isSelf = isEdit && me?.id === user?.id
   const qc = useQueryClient()
@@ -77,6 +79,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
 
   useEffect(() => {
     if (!open) return
+    setNewSource('local')
     setUsername(user?.username || '')
     setEmail(user?.email || '')
     setFullName(user?.full_name || '')
@@ -113,7 +116,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   const storedSource = user?.role_source === 'manual' ? 'manual' : 'directory'
   const sourceChanged = isExternal && !isSelf && roleSource !== storedSource
   // The role is editable for a local account, and for a directory account once it is set here.
-  const roleFromDirectory = isExternal && roleSource === 'directory'
+  const roleFromDirectory = isEdit && isExternal && roleSource === 'directory'
   const roleChanged = !isSelf && !roleFromDirectory && role !== user?.role
   const directoryRole = user?.directory_role || null
   const directoryRoleLabel = directoryRole ? roleMeta[directoryRole]?.display_name || directoryRole : null
@@ -126,27 +129,30 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   }
 
   const pwCheck = usePasswordCheck(password, password2, { username: username.trim() || user?.username, email })
-  const emailError = !email.trim() ? 'Email is required' : !EMAIL_RE.test(email.trim()) ? 'Enter a valid email address' : undefined
+  const emailError = profileFromAd ? undefined
+    : !email.trim() ? 'Email is required' : !EMAIL_RE.test(email.trim()) ? 'Enter a valid email address' : undefined
   const usernameError = isEdit ? undefined : username.trim().length < 3 ? 'Username must be at least 3 characters' : username.trim().length > 100 ? 'Username can be at most 100 characters' : undefined
   const scopeError = scopeMode === 'tags' && scopeTags.length === 0 ? 'Choose at least one tag, or switch to “All resources”' : undefined
-  const valid = !emailError && !usernameError && !scopeError && (isEdit || pwCheck.ok)
+  const valid = !emailError && !usernameError && !scopeError && (isEdit || isExternal || pwCheck.ok)
 
   const effectiveScope = scopeMode === 'all' ? [] : scopeTags
   const dirty = isEdit
-    ? email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
-      || (fullName.trim() || null) !== (user?.full_name || null)
+    ? (!profileFromAd && (email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
+      || (fullName.trim() || null) !== (user?.full_name || null)))
       || roleChanged || sourceChanged
       || isActive !== (user?.is_active ?? true)
       || JSON.stringify([...effectiveScope].sort()) !== JSON.stringify([...(user?.scope_tags || [])].sort())
-    : !!(username || email || fullName || password)
+    : !!(username || email || fullName || password || newSource !== 'local')
 
   const save = useMutation({
     mutationFn: async () => {
       if (isEdit) {
         // Only what changed: unchanged access fields would needlessly revoke sessions.
         const payload: Record<string, unknown> = {}
-        if (email.trim().toLowerCase() !== (user!.email || '').toLowerCase()) payload.email = email.trim()
-        if ((fullName.trim() || null) !== (user!.full_name || null)) payload.full_name = fullName.trim() || null
+        if (!profileFromAd) {
+          if (email.trim().toLowerCase() !== (user!.email || '').toLowerCase()) payload.email = email.trim()
+          if ((fullName.trim() || null) !== (user!.full_name || null)) payload.full_name = fullName.trim() || null
+        }
         if (roleChanged) payload.role = role
         if (sourceChanged) payload.role_source = roleSource
         if (isActive !== (user!.is_active ?? true)) payload.is_active = isActive
@@ -155,8 +161,9 @@ export function UserFormDialog({ open, onOpenChange, user }: {
         return (await api.put(`/users/${user!.id}`, payload)).data
       }
       return (await api.post('/users', {
-        username: username.trim(), email: email.trim(), full_name: fullName.trim() || null,
-        password, role, scope_tags: effectiveScope, must_change_password: mustChange,
+        username: username.trim(),
+        auth_source: newSource, role, scope_tags: effectiveScope,
+        ...(isExternal ? {} : { email: email.trim(), full_name: fullName.trim() || null, password, must_change_password: mustChange }),
       })).data
     },
     onSuccess: (r: any) => {
@@ -190,31 +197,48 @@ export function UserFormDialog({ open, onOpenChange, user }: {
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{isEdit ? `Edit user: ${user?.username}` : 'New local user'}</DialogTitle>
+            <DialogTitle>{isEdit ? `Edit user: ${user?.username}` : 'New user'}</DialogTitle>
             <DialogDescription>
               {isExternal
-                ? `This account signs in through ${SOURCE_LABEL[source]}, which checks the password and decides whether the account may sign in. Its role follows the role mapping unless you set one here.`
+                ? (isEdit ? `This account signs in through ${SOURCE_LABEL[source]}. Review its role and access below.`
+                  : 'Enter the AD sign-in username and assign a role. ZenPlus reads the name and email from Active Directory. Email stays blank when AD has no address.')
                 : isEdit
                   ? 'Local account with a password stored on this appliance.'
-                  : 'Creates a local account. Directory users are created automatically on their first sign-in.'}
+                  : 'Choose a sign-in source and assign a ZenPlus role.'}
             </DialogDescription>
           </DialogHeader>
           <form noValidate onSubmit={submit} className="space-y-4">
             {errors.general && <div role="alert" className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger">{errors.general}</div>}
 
+            {!isEdit && (
+              <FormField label="Sign-in source">
+                <Select value={newSource} onValueChange={(v: 'local' | 'ldap') => { setNewSource(v); setErrors({}) }}>
+                  <SelectTrigger aria-label="Sign-in source"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local">Local</SelectItem>
+                    <SelectItem value="ldap">LDAP / Active Directory</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FormField>
+            )}
+
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <FormField label="Username" required hint={isEdit ? 'Usernames cannot be changed.' : '3–100 characters. Used to sign in; unique ignoring case.'} error={(submitted || username) ? (errors.username || usernameError) : errors.username}>
                 <Input value={username} onChange={(e) => { setUsername(e.target.value); setErrors({}) }} disabled={isEdit} placeholder="jsmith" autoComplete="off" autoFocus={!isEdit} aria-invalid={!!(errors.username || usernameError)} />
               </FormField>
-              <FormField label="Full name" hint={isExternal && source !== 'radius' ? 'Updated from the directory at each sign-in when it supplies a name.' : undefined}>
-                <Input value={fullName} maxLength={255} onChange={(e) => setFullName(e.target.value)} placeholder="John Smith" />
-              </FormField>
+              {(!profileFromAd || isEdit) && (
+                <FormField label="Full name" hint={profileFromAd ? 'Synced from Active Directory.' : isExternal && source !== 'radius' ? 'Updated from the directory at sign-in.' : undefined}>
+                  <Input value={fullName} maxLength={255} onChange={(e) => setFullName(e.target.value)} readOnly={profileFromAd} placeholder={profileFromAd ? undefined : 'John Smith'} />
+                </FormField>
+              )}
             </div>
-            <FormField label="Email" required hint={isExternal && source !== 'radius' ? 'Updated from the directory at each sign-in when it supplies an address.' : undefined} error={(submitted || email) ? (errors.email || emailError) : errors.email}>
-              <Input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setErrors({}) }} placeholder="user@example.com" autoComplete="off" aria-invalid={!!(errors.email || emailError)} />
-            </FormField>
+            {(!profileFromAd || isEdit) && (
+              <FormField label="Email" required={!profileFromAd} hint={profileFromAd ? 'Synced from Active Directory when an address is available.' : isExternal && source !== 'radius' ? 'Updated from the directory at sign-in.' : undefined} error={(submitted || email) ? (errors.email || emailError) : errors.email}>
+                <Input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setErrors({}) }} readOnly={profileFromAd} placeholder={profileFromAd ? undefined : 'user@example.com'} autoComplete="off" aria-invalid={!!(errors.email || emailError)} />
+              </FormField>
+            )}
 
-            {!isEdit && (
+            {!isEdit && !isExternal && (
               <>
                 <NewPasswordFields password={password} onPassword={(v) => { setPassword(v); setErrors({}) }} confirm={password2} onConfirm={setPassword2} ctx={{ username, email }} label="Initial password" />
                 {errors.password && <p role="alert" className="-mt-2 text-xs text-danger">{errors.password}</p>}
@@ -225,7 +249,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
               </>
             )}
 
-            {isExternal && (
+            {isEdit && isExternal && (
               <fieldset className="space-y-1.5">
                 <legend className="mb-1 text-sm font-medium">Role is decided by</legend>
                 <div role="radiogroup" aria-label="Role is decided by" className="inline-flex overflow-hidden rounded-md border border-border text-xs">
@@ -244,7 +268,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
                         ? `Saving applies the role the mapping gives this account (${directoryRoleLabel}) and signs it out. From then on the mapping is applied at every sign-in.`
                         : 'The role the mapping gives this account is not known yet. Saving signs the account out; it takes the mapped role at its next sign-in.'
                       : 'The role mapping in Authentication is applied at every sign-in. Choose “An administrator” to give this account a different role.'
-                    : `The role below is kept at every sign-in. The directory still decides whether this account may sign in${directoryRoleLabel ? `; its mapping gives ${directoryRoleLabel}` : ''}.`}
+                    : `Sign-in keeps the selected role. ${source === 'ldap' ? 'In listed-accounts mode, this role also grants access after directory authentication.' : 'The provider’s role mapping still controls admission.'}`}
                 </p>
               </fieldset>
             )}

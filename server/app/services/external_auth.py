@@ -54,7 +54,7 @@ LDAP_DEFAULTS: dict = {
     "group_attr": "memberOf",
     "group_mappings": [],   # [{"group": "CN=NetAdmins,...", "role": "admin"}]
     "default_role": "",
-    "auto_provision": True,
+    "auto_provision": False,
     # Server-managed metadata (not part of the editable form).
     "revision": 0,
     "updated_at": "",
@@ -122,9 +122,22 @@ def _ldap_cn(dn: str) -> str:
         return (head.split("=", 1)[1] if "=" in head else head).strip().lower()
 
 
-def explain_ldap_role(cfg: dict, groups: list[str]) -> tuple[Optional[str], Optional[dict]]:
+def ldap_username_rule(cfg: dict, username: str):
+    """Only exact AD account names can admit a user in listed-accounts mode."""
+    if username:
+        for index, rule in enumerate(cfg.get("group_mappings") or []):
+            if (rule.get("kind") == "username" and rule.get("role")
+                    and rule.get("group", "").strip().lower() == username.lower()):
+                return rule["role"], {"kind": "mapping", "index": index, "match": rule["group"]}
+    return None, None
+
+
+def explain_ldap_role(cfg: dict, groups: list[str], username: str = "") -> tuple[Optional[str], Optional[dict]]:
     """(role, matched rule). The rule is {'kind': 'mapping', 'index': i, 'match': text}
     for a mapping row, {'kind': 'default'} for the fallback, or None when nothing matched."""
+    role, matched = ldap_username_rule(cfg, username)
+    if matched:
+        return role, matched
     lowered = [g.lower() for g in groups]
     cns = {_ldap_cn(g) for g in groups}
     for i, mapping in enumerate(cfg.get("group_mappings") or []):
@@ -132,7 +145,7 @@ def explain_ldap_role(cfg: dict, groups: list[str]) -> tuple[Optional[str], Opti
         role = mapping.get("role")
         if not wanted or not role:
             continue
-        if wanted in lowered or wanted in cns:
+        if mapping.get("kind", "group") == "group" and (wanted in lowered or wanted in cns):
             return role, {"kind": "mapping", "index": i, "match": mapping.get("group")}
     if cfg.get("default_role"):
         return cfg["default_role"], {"kind": "default"}
@@ -174,19 +187,12 @@ def ldap_test_bind(cfg: dict):
         conn.unbind()
 
 
-def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]:
-    """Verify credentials against LDAP.
-
-    Returns {"dn", "email", "full_name", "groups"} on success, None on
-    bad credentials / unknown user. Raises ExternalAuthError when the
-    directory itself is unreachable or misconfigured.
-    """
+def ldap_lookup_user(cfg: dict, username: str) -> Optional[dict]:
+    """Read a single user's attributes using the configured service bind."""
     import ldap3
     from ldap3.core.exceptions import LDAPException
     from ldap3.utils.conv import escape_filter_chars
 
-    if not password:
-        return None
     if not cfg.get("server") or not cfg.get("base_dn"):
         raise ExternalAuthError("LDAP server and base DN are required")
 
@@ -194,56 +200,66 @@ def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]
     port = int(cfg.get("port") or (636 if use_ssl else 389))
 
     try:
-        def _open(user, pwd):
-            return ldap_open(cfg, user, pwd)
+        search_conn = ldap_open(cfg, cfg.get("bind_dn"), cfg.get("bind_password"))
+        try:
+            if not search_conn.bind():
+                raise ExternalAuthError(
+                    f"LDAP service bind failed: {search_conn.result.get('description', 'invalid bind DN or password')}"
+                )
 
-        search_conn = _open(cfg.get("bind_dn"), cfg.get("bind_password"))
-        if not search_conn.bind():
-            raise ExternalAuthError(
-                f"LDAP service bind failed: {search_conn.result.get('description', 'invalid bind DN or password')}"
+            flt = (cfg.get("user_filter") or "(sAMAccountName={username})").replace(
+                "{username}", escape_filter_chars(username)
             )
+            attrs = [a for a in (cfg.get("email_attr"), cfg.get("name_attr"), cfg.get("group_attr")) if a]
+            if any(m.get("kind") == "username" for m in cfg.get("group_mappings") or []):
+                if "sAMAccountName" not in attrs:
+                    attrs.append("sAMAccountName")
+            search_conn.search(cfg["base_dn"], flt, search_scope=ldap3.SUBTREE, attributes=attrs)
+            if len(search_conn.entries) != 1:
+                return None
 
-        flt = (cfg.get("user_filter") or "(sAMAccountName={username})").replace(
-            "{username}", escape_filter_chars(username)
-        )
-        attrs = [a for a in (cfg.get("email_attr"), cfg.get("name_attr"), cfg.get("group_attr")) if a]
-        search_conn.search(cfg["base_dn"], flt, search_scope=ldap3.SUBTREE, attributes=attrs)
-        if len(search_conn.entries) != 1:
+            entry = search_conn.entries[0]
+
+            def _attr_values(name: str) -> list[str]:
+                try:
+                    return [str(v) for v in entry[name].values] if name in entry else []
+                except (KeyError, LDAPException):
+                    return []
+
+            email_vals = _attr_values(cfg.get("email_attr") or "mail")
+            name_vals = _attr_values(cfg.get("name_attr") or "displayName")
+            return {
+                "dn": entry.entry_dn,
+                "ad_username": next(iter(_attr_values("sAMAccountName")), ""),
+                "email": email_vals[0] if email_vals else None,
+                "full_name": name_vals[0] if name_vals else None,
+                "groups": _attr_values(cfg.get("group_attr") or "memberOf"),
+            }
+        finally:
             search_conn.unbind()
-            return None
-
-        entry = search_conn.entries[0]
-        dn = entry.entry_dn
-
-        def _attr_values(name: str) -> list[str]:
-            try:
-                return [str(v) for v in entry[name].values] if name in entry else []
-            except (KeyError, LDAPException):
-                return []
-
-        email_vals = _attr_values(cfg.get("email_attr") or "mail")
-        name_vals = _attr_values(cfg.get("name_attr") or "displayName")
-        groups = _attr_values(cfg.get("group_attr") or "memberOf")
-        search_conn.unbind()
-
-        user_conn = _open(dn, password)
-        ok = user_conn.bind()
-        user_conn.unbind()
-        if not ok:
-            return None
-
-        return {
-            "dn": dn,
-            "email": email_vals[0] if email_vals else None,
-            "full_name": name_vals[0] if name_vals else None,
-            "groups": groups,
-        }
-    except ExternalAuthError:
-        raise
     except LDAPException as exc:
         raise ExternalAuthError(f"LDAP error: {exc}") from exc
     except OSError as exc:
         raise ExternalAuthError(f"Cannot reach LDAP server {cfg['server']}:{port}: {exc}") from exc
+
+
+def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]:
+    """Find a user, then verify their password with a separate directory bind."""
+    from ldap3.core.exceptions import LDAPException
+
+    if not password:
+        return None
+    info = ldap_lookup_user(cfg, username)
+    if info is None:
+        return None
+    try:
+        user_conn = ldap_open(cfg, info["dn"], password)
+        try:
+            return info if user_conn.bind() else None
+        finally:
+            user_conn.unbind()
+    except (LDAPException, OSError) as exc:
+        raise ExternalAuthError(f"LDAP user bind failed: {exc}") from exc
 
 
 # ── RADIUS ────────────────────────────────────────────────────────────────────

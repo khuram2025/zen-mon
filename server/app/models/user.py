@@ -12,7 +12,7 @@ class User(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(50), default="viewer")
@@ -40,6 +40,7 @@ class User(Base):
     # mapping is applied at every sign-in. directory_role: what the mapping gave
     # at the last sign-in, applied or not. See app/services/role_source.py.
     role_manual: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    ldap_username_rule_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     directory_role: Mapped[str] = mapped_column(String(50), nullable=True)
     # Personal IANA time zone for on-call views and notices (migrate-164);
     # NULL = the appliance zone.

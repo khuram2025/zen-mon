@@ -14,8 +14,9 @@ The rule, in one place so sign-in, the user API and the page say the same:
     hand-set role stays until an administrator hands the account back to the
     directory.
 
-Neither side is dropped: the role the mapping gives is recorded on every
-sign-in (``users.directory_role``) and shown next to the hand-set one.
+LDAP listed-accounts mode also admits users with a role assigned in ZenPlus
+after they authenticate in LDAP. Any mapped role is recorded separately
+(``users.directory_role``).
 """
 from __future__ import annotations
 
@@ -36,12 +37,17 @@ def role_source(user) -> str:
     return MANUAL if getattr(user, "role_manual", False) else DIRECTORY
 
 
-def apply_directory_role(user, mapped_role: str) -> Optional[str]:
+def uses_listed_role(source: str, cfg: dict, role_manual: bool) -> bool:
+    """An administrator-assigned LDAP role can admit a listed account."""
+    return source == "ldap" and not cfg.get("auto_provision") and role_manual
+
+
+def apply_directory_role(user, mapped_role: Optional[str]) -> Optional[str]:
     """Sign-in of an existing directory account: record what the mapping gives
     and apply it unless the role was set by hand. Returns the previous role
     when the account's role changed, else None."""
     user.directory_role = mapped_role
-    if getattr(user, "role_manual", False):
+    if mapped_role is None or getattr(user, "role_manual", False):
         return None
     if user.role == mapped_role:
         return None

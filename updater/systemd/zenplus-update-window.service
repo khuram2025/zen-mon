@@ -1,0 +1,6 @@
+[Unit]
+Description=Schedule the next appliance maintenance window
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/zenplus-updater-schedule.py calendar

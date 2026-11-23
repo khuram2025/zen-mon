@@ -226,3 +226,12 @@ def test_two_update_instances_cannot_acquire_same_lock(tmp_path):
         with pytest.raises(LockError): second.acquire()
     finally: first.release()
     second.acquire(); second.release()
+
+
+def test_scheduled_update_defers_for_running_ubuntu_maintenance(monkeypatch):
+    from updater import schedule
+    states = iter(["inactive", "activating"])
+    monkeypatch.setattr(schedule.subprocess, "check_output", lambda *args, **kwargs: next(states))
+    assert not schedule.package_services_idle()
+    states = iter(["inactive", "inactive"])
+    assert schedule.package_services_idle()

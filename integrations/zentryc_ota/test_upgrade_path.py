@@ -79,6 +79,8 @@ class RequiredUpgradePathTests(TestCase):
         r.save()
         self.assertIsNone(get_available_update(self.appliance))
 
+        self.assertIn(self.releases[1].version, self.appliance.upgrade_hold)
+
     def test_other_arch_cannot_supply_missing_bridge(self):
         r = self.releases[1]
         r.arch = "arm64"
