@@ -20,6 +20,13 @@ and ``host_auto_service_stopped`` (per service; stored as ``> 0``, ``target``
 = service name patterns to leave out). ``cooldown`` delays a re-opened
 incident's trigger until that long after the last notified one.
 
+Combined rules (migrate-211, ``app.services.rule_conditions``): a
+``condition_tree`` holds two to ten conditions joined by AND/OR, with one level
+of groups. The flat metric/operator/threshold columns then mirror its first
+condition (lists and exports keep working) and ``target`` / ``reset_threshold``
+live on each condition instead. ``condition_tree: null`` turns a combined rule
+back into a single-condition rule on its first condition.
+
 The schedule (``schedule_start``/``schedule_end`` as HH:MM, ``schedule_days``
 1-7 for Mon-Sun) limits when notifications go out, as on every other rule;
 an update may move a rule between one server and all servers (``server_id``
@@ -41,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
 from app.services import alert_rule_scope as rs
+from app.services import rule_conditions as rc
 from app.services import alert_rule_exclusions as rx
 from app.services.alert_priority import priority_for
 from app.services.audit_service import write_audit_log
@@ -61,7 +69,7 @@ _HHMM = "^([01][0-9]|2[0-3]):[0-5][0-9]$"
 _COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, "
     "severity, min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
-    "recovery_alert, conditions, priority, escalation_policy_id, "
+    "recovery_alert, conditions, condition_logic, condition_tree, priority, escalation_policy_id, "
     "schedule_start, schedule_end, schedule_days, scope_tag, group_id, created_at, updated_at"
 )
 # Threshold metrics: the ones a reset threshold and clear hold apply to.
@@ -94,7 +102,8 @@ class HostRuleCreate(BaseModel):
     name: str
     description: Optional[str] = None
     enabled: bool = True
-    metric: str = Field(..., pattern=_METRIC)
+    # Required unless condition_tree is given (then it mirrors the first condition).
+    metric: Optional[str] = Field(None, pattern=_METRIC)
     operator: str = Field("gt", pattern=_OPERATOR)
     threshold: float = 0
     severity: str = Field("warning", pattern="^(info|warning|critical)$")
@@ -112,6 +121,8 @@ class HostRuleCreate(BaseModel):
     scope_tag: Optional[str] = Field(None, max_length=64)
     group_id: Optional[UUID] = None
     target: Optional[str] = None
+    # Two or more conditions joined by AND/OR (rule_conditions); None = one condition.
+    condition_tree: Optional[dict] = None
     # None = derived from severity (critical -> P2, warning -> P3, info -> P4).
     priority: Optional[str] = Field(None, pattern="^P[1-4]$")
     # None = the priority's default escalation policy.
@@ -137,6 +148,8 @@ class HostRuleUpdate(BaseModel):
     cooldown: Optional[int] = Field(None, ge=0, le=86400)
     notify_channels: Optional[list[str]] = None
     target: Optional[str] = None
+    # A tree makes the rule combined; an explicit null makes it single again.
+    condition_tree: Optional[dict] = None
     priority: Optional[str] = Field(None, pattern="^P[1-4]$")
     escalation_policy_id: Optional[UUID] = None
     # An explicit null moves the rule to all servers.
@@ -227,8 +240,25 @@ def _auto_reset(metric, operator, threshold) -> Optional[float]:
     return auto_reset_threshold({"metric": metric, "operator": operator, "threshold": threshold})
 
 
+def _tree_or_422(tree) -> dict:
+    try:
+        return rc.validate_tree(tree, "server")
+    except rc.TreeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _tree_columns(tree: dict) -> dict:
+    """The stored columns of a combined rule: the tree, and the flat columns
+    mirroring its first condition."""
+    m = rc.mirror(tree)
+    return {"condition_tree": json.dumps(tree), "metric": m["metric"], "operator": m["operator"],
+            "threshold": m["threshold"], "conditions": json.dumps(m["conditions"]),
+            "condition_logic": m["condition_logic"], "target": None}
+
+
 def _row(r) -> dict:
     threshold = float(r.threshold) if r.threshold is not None else None
+    tree = rc.parse(getattr(r, "condition_tree", None))
     return {
         "id": str(r.id),
         "name": r.name,
@@ -240,8 +270,10 @@ def _row(r) -> dict:
         "severity": r.severity,
         "min_duration": r.min_duration,
         "clear_duration": r.clear_duration,
-        "reset_threshold": _reset_of(r.conditions, r.metric),
-        "auto_reset_threshold": _auto_reset(r.metric, r.operator, threshold),
+        "reset_threshold": None if tree else _reset_of(r.conditions, r.metric),
+        "auto_reset_threshold": None if tree else _auto_reset(r.metric, r.operator, threshold),
+        "condition_tree": tree,
+        "condition_label": rc.tree_label(tree) if tree else None,
         "recovery_alert": bool(r.recovery_alert),
         "cooldown": r.cooldown,
         "notify_channels": r.notify_channels or [],
@@ -307,31 +339,45 @@ async def create_host_rule(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_rule_manager),
 ):
-    if data.metric in ("host_process_down", "host_service_down") and not data.target:
-        raise HTTPException(400, f"target is required for {data.metric}")
-    data.operator, data.threshold = _metric_rule(data.metric, data.operator, data.threshold, data.target)
+    if data.condition_tree is not None:
+        if data.reset_threshold is not None:
+            raise HTTPException(422, "A combined rule keeps each condition's clear level on the condition")
+        combined = _tree_columns(_tree_or_422(data.condition_tree))
+    else:
+        if not data.metric:
+            raise HTTPException(422, "Choose what the rule watches")
+        if data.metric in ("host_process_down", "host_service_down") and not data.target:
+            raise HTTPException(400, f"target is required for {data.metric}")
+        data.operator, data.threshold = _metric_rule(data.metric, data.operator, data.threshold, data.target)
+        combined = {"condition_tree": None, "metric": data.metric, "operator": data.operator,
+                    "threshold": data.threshold, "target": data.target, "condition_logic": "AND",
+                    "conditions": _condition_json(data.metric, data.operator, data.threshold,
+                                                  data.reset_threshold)}
     scope_tag, group_id = await _scope_or_422(db, data.server_id, data.scope_tag, data.group_id)
-    await rs.guard_rule_change(db, user, {**data.model_dump(), "scope_tag": scope_tag, "group_id": group_id})
-    conditions = _condition_json(data.metric, data.operator, data.threshold, data.reset_threshold)
+    await rs.guard_rule_change(db, user, {**data.model_dump(), "metric": combined["metric"],
+                                          "scope_tag": scope_tag, "group_id": group_id})
     row = (await db.execute(text(
         "INSERT INTO alert_rules "
         "(name, description, enabled, metric, operator, threshold, severity, "
         " min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
-        " recovery_alert, conditions, priority, escalation_policy_id, "
+        " recovery_alert, conditions, condition_logic, condition_tree, subject_type, "
+        " priority, escalation_policy_id, "
         " schedule_start, schedule_end, schedule_days, scope_tag, group_id, created_by) "
         "VALUES (:name, :description, :enabled, :metric, :operator, :threshold, :severity, "
         " :min_duration, :clear_duration, :cooldown, CAST(:notify_channels AS jsonb), :server_id, :target, "
-        " :recovery_alert, CAST(:conditions AS jsonb), :priority, :escalation_policy_id, "
+        " :recovery_alert, CAST(:conditions AS jsonb), :condition_logic, CAST(:condition_tree AS jsonb), "
+        " 'server', :priority, :escalation_policy_id, "
         " :schedule_start, :schedule_end, CAST(:schedule_days AS jsonb), :scope_tag, :group_id, :created_by) "
         f"RETURNING {_COLUMNS}"
     ), {
         "name": data.name, "description": data.description, "enabled": data.enabled,
-        "metric": data.metric, "operator": data.operator, "threshold": data.threshold,
+        "metric": combined["metric"], "operator": combined["operator"], "threshold": combined["threshold"],
         "severity": data.severity, "min_duration": data.min_duration,
         "clear_duration": data.clear_duration, "cooldown": data.cooldown,
         "notify_channels": _channels(data.notify_channels),
-        "server_id": data.server_id, "target": data.target,
-        "recovery_alert": data.recovery_alert, "conditions": conditions,
+        "server_id": data.server_id, "target": combined["target"],
+        "recovery_alert": data.recovery_alert, "conditions": combined["conditions"],
+        "condition_logic": combined["condition_logic"], "condition_tree": combined["condition_tree"],
         "priority": data.priority,
         "escalation_policy_id": await _policy_or_422(db, data.escalation_policy_id),
         "schedule_start": _clock(data.schedule_start), "schedule_end": _clock(data.schedule_end),
@@ -341,7 +387,8 @@ async def create_host_rule(
     })).first()
     await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
                           resource_id=str(row.id),
-                          metadata={"name": data.name, "metric": data.metric,
+                          metadata={"name": data.name, "metric": combined["metric"],
+                                    "combined": combined["condition_tree"] is not None,
                                     "server_id": str(data.server_id) if data.server_id else None})
     await db.commit()
     return _row(row)
@@ -377,24 +424,49 @@ async def update_host_rule(
                 "min_duration", "cooldown", "name", "severity"):
         if key in fields and fields[key] is None:
             del fields[key]
-    if any(k in fields for k in ("metric", "operator", "threshold")):
-        merged = {**before, **fields}
-        op, thr = _metric_rule(merged.get("metric"), merged.get("operator"), merged.get("threshold"),
-                               merged.get("target"))
-        if (op, thr) != (merged.get("operator"), merged.get("threshold")):
-            fields["operator"], fields["threshold"] = op, thr
-    # The reset level lives in the rule's condition; rebuild it whenever the
-    # trigger or the reset changes (a reset left on the wrong side is a 422).
-    if any(k in fields for k in ("metric", "operator", "threshold", "reset_threshold")):
-        merged = {**before, **fields}
-        if "reset_threshold" in fields:
-            reset = fields.pop("reset_threshold")
-        else:
-            reset = _reset_of(before.get("conditions"), before.get("metric"))
-            if merged.get("metric") not in _PCT_METRICS:
-                reset = None   # a stored reset does not follow the rule to a non-threshold metric
-        fields["conditions"] = _condition_json(merged.get("metric"), merged.get("operator"),
-                                               merged.get("threshold"), reset)
+    was_combined = rc.parse(before.get("condition_tree")) is not None
+    tree_given = "condition_tree" in fields
+    new_tree = fields.pop("condition_tree", None)
+    if new_tree is not None:
+        # A combined rule: the tree builds every condition column.
+        if fields.get("reset_threshold") is not None:
+            raise HTTPException(422, "A combined rule keeps each condition's clear level on the condition")
+        for key in ("metric", "operator", "threshold", "target", "reset_threshold"):
+            fields.pop(key, None)
+        fields.update(_tree_columns(_tree_or_422(new_tree)))
+        fields["subject_type"] = "server"
+    else:
+        if tree_given and was_combined:
+            # Back to one condition: the first one, unless the request names another.
+            first = rc.leaves(rc.parse(before.get("condition_tree")))[0]
+            fields.setdefault("metric", first["metric"])
+            fields.setdefault("operator", first["operator"])
+            fields.setdefault("threshold", first["threshold"])
+            fields.setdefault("target", first.get("target"))
+            fields.setdefault("reset_threshold", first.get("reset_threshold"))
+            fields["condition_tree"] = None
+            fields["condition_logic"] = "AND"
+        elif was_combined and any(k in fields for k in ("metric", "operator", "threshold", "target",
+                                                           "reset_threshold")):
+            raise HTTPException(422, "This rule combines conditions: change them through condition_tree")
+        if any(k in fields for k in ("metric", "operator", "threshold")):
+            merged = {**before, **fields}
+            op, thr = _metric_rule(merged.get("metric"), merged.get("operator"), merged.get("threshold"),
+                                   merged.get("target"))
+            if (op, thr) != (merged.get("operator"), merged.get("threshold")):
+                fields["operator"], fields["threshold"] = op, thr
+        # The reset level lives in the rule's condition; rebuild it whenever the
+        # trigger or the reset changes (a reset left on the wrong side is a 422).
+        if any(k in fields for k in ("metric", "operator", "threshold", "reset_threshold")):
+            merged = {**before, **fields}
+            if "reset_threshold" in fields:
+                reset = fields.pop("reset_threshold")
+            else:
+                reset = _reset_of(before.get("conditions"), before.get("metric"))
+                if merged.get("metric") not in _PCT_METRICS:
+                    reset = None   # a stored reset does not follow the rule to a non-threshold metric
+            fields["conditions"] = _condition_json(merged.get("metric"), merged.get("operator"),
+                                                   merged.get("threshold"), reset)
     if not fields:
         raise HTTPException(400, "no fields to update")
     sets, params = [], {"id": rule_id}
@@ -402,9 +474,9 @@ async def update_host_rule(
         if k == "notify_channels":
             sets.append("notify_channels = CAST(:notify_channels AS jsonb)")
             params["notify_channels"] = _channels(v)
-        elif k == "conditions":
-            sets.append("conditions = CAST(:conditions AS jsonb)")
-            params["conditions"] = v
+        elif k in ("conditions", "condition_tree"):
+            sets.append(f"{k} = CAST(:{k} AS jsonb)")
+            params[k] = v
         elif k == "escalation_policy_id":
             sets.append("escalation_policy_id = :escalation_policy_id")
             params[k] = await _policy_or_422(db, v)

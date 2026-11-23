@@ -116,6 +116,8 @@ export function metricLabel(metric: string): string {
 }
 
 export function ruleCondition(r: HostRule): string {
+  // A combined rule (several conditions): its conditions in words.
+  if ((r as any).condition_tree) return serverRuleCondition(r as any)
   const m = HOST_METRICS.find((x) => x.value === r.metric)
   if (m?.kind === 'svc') return `Service ${r.target || '?'} stopped`
   if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
@@ -595,7 +597,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                 <Td className="max-w-[240px] truncate py-2 font-medium" title={r.name}>{r.name}</Td>
                 <Td className="py-2">
                   <div className="truncate text-text2" title={ruleCondition(r)}>{ruleCondition(r)}</div>
-                  {HOST_METRICS.find((m) => m.value === r.metric)?.kind === 'pct' && (
+                  {HOST_METRICS.find((m) => m.value === r.metric)?.kind === 'pct' && !(r as any).condition_tree && (
                     <div className="text-xs text-muted">
                       {fmtDuration(r.min_duration)} · {ruleClearing(r)}{r.recovery_alert ? ' · recovery notice' : ''}
                     </div>

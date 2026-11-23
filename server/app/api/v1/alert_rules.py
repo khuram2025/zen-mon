@@ -30,6 +30,7 @@ from app.services import service_metric_alert_service as sma
 from app.services import appliance_alert_service as apl
 from app.services import virtualization_alert_service as vma
 from app.services import monitoring_gap_alert_service as gap
+from app.services import rule_conditions as rc
 from app.core import scoping
 
 
@@ -58,6 +59,7 @@ def _validate_network_contract(metric, conditions, existing=None):
     from app.services.network_conditions import (supported, UNMAPPED_METRICS, validate_conditions,
                                                  refuse_new_metrics)
     items = conditions or [dict(metric=metric, operator='>', threshold=0)]
+    _refuse_ignored_conditions(conditions, existing)
     if any(apl.is_appliance_metric(c.get('metric')) for c in items) or apl.is_appliance_metric(metric):
         _validate_appliance_conditions(metric, items if conditions else None)
         return
@@ -73,6 +75,30 @@ def _validate_network_contract(metric, conditions, existing=None):
             validate_conditions(items)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# Sources whose evaluators judge only a rule's first condition: a second one
+# would be stored and silently ignored, so it is refused (multi-condition
+# rules phase 1, docs/multi-condition-rules.md). Server rules combine
+# conditions through /host-alert-rules condition_tree instead.
+_SINGLE_CONDITION_SOURCES = (
+    ("apm_", "APM and browser (RUM) rules take a single condition"),
+    ("udt_", "Device Tracker rules take a single condition"),
+    ("netpath_", "NetPath rules take a single condition"),
+    ("service_status", "Service status rules take a single condition"),
+)
+
+
+def _refuse_ignored_conditions(conditions, existing=None) -> None:
+    if not conditions or len(conditions) < 2:
+        return
+    if existing is not None and len(_json_value(existing.get('conditions')) or []) > 1:
+        return      # stored before this check: stays editable
+    for c in conditions:
+        metric = str(c.get('metric') or '')
+        for prefix, message in _SINGLE_CONDITION_SOURCES:
+            if metric.startswith(prefix):
+                raise HTTPException(status_code=422, detail=message)
 
 
 _SERVICE_METRIC_DEVICE_SCOPES = ("group_id", "device_type", "location", "profile_id", "if_role")
@@ -689,7 +715,7 @@ _RULE_COLUMNS = (
     "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
-    "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
+    "conditions, condition_logic, condition_tree, trap_oid, target, flow_scope, flow_params, "
     "server_id, created_at, updated_at, created_by, "
     "profile_id, pack_key, pack_accepted, if_role"
 )
@@ -744,6 +770,8 @@ def _row_to_dict(row) -> dict:
         "recovery_sms_template": row.recovery_sms_template,
         "conditions": getattr(row, "conditions", None) or None,
         "condition_logic": getattr(row, "condition_logic", None) or "AND",
+        # Combined server rules (migrate-211): the conditions as a tree.
+        "condition_tree": rc.parse(getattr(row, "condition_tree", None)),
         "profile_id": str(row.profile_id) if getattr(row, "profile_id", None) else None,
         "pack_key": getattr(row, "pack_key", None),
         "pack_accepted": getattr(row, "pack_accepted", None),

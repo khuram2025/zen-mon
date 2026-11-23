@@ -33,6 +33,11 @@ ${wiz.slice(start, end)}
 export { ruleToState };`)
 const S = await load(`export * from './src/components/forms/serverAlertRule'`)
 
+const S_DRAFT = () => ({ name: 'x', description: '', enabled: true, severity: 'warning', priority: '', escalation_mode: 'default',
+  escalation_policy_id: '', conditions: [{ metric: 'host_cpu_pct', operator: '>', threshold: 90 }], target: '', server_id: '',
+  min_duration: 0, clear_duration: null, reset_mode: 'auto', notify_channels: [], cooldown: 300, schedule_start: '',
+  schedule_end: '', schedule_days: [] })
+
 // The seeded Agent offline rule (migrate-168): warning, gt 0, no hold, recovery on.
 const seeded = {
   id: 'r1', name: 'Agent offline', metric: 'host_agent_offline', operator: 'gt', threshold: 0, severity: 'warning',
@@ -177,6 +182,43 @@ assert.equal(S.downRuleCoversServers({ metric: 'ping_status', trigger_on: 'any',
 assert.equal(S.downRuleCoversServers({ metric: 'ping_status', trigger_on: 'any', conditions: [
   { metric: 'ping_status', operator: '==', threshold: 0 }, { metric: 'rtt', operator: '>', threshold: 100 }] }), false)
 
+// Combined rules (migrate-211): a saved tree opens as a tree, saves as condition_tree, lists in words.
+const tree = { logic: 'OR', items: [
+  { logic: 'AND', items: [{ id: 'c1', metric: 'host_cpu_pct', operator: '>', threshold: 90 }, { id: 'c2', metric: 'host_memory_pct', operator: '>', threshold: 90 }] },
+  { id: 'c3', metric: 'host_service_down', operator: '>', threshold: 0, target: 'nginx' },
+] }
+const combined = { ...seeded, id: 'r9', name: 'Server under pressure', metric: 'host_cpu_pct', operator: '>', threshold: 90,
+  min_duration: 300, condition_tree: tree }
+const cst = W.ruleToState(combined)
+assert.equal(cst.source, 'server')
+assert.deepEqual(cst.condition_tree, tree, 'a combined rule opens with its tree')
+const cbody = S.serverRulePayload({ ...cst, name: 'Server under pressure' })
+assert.equal(cbody.condition_tree.logic, 'OR')
+assert.equal(cbody.condition_tree.items[1].target, 'nginx')
+assert(!('metric' in cbody) && !('reset_threshold' in cbody), 'a combined rule sends its conditions only in the tree')
+assert.equal(cbody.min_duration, 300)
+assert.equal(S.serverRuleCondition({ metric: 'host_cpu_pct', condition_tree: tree }),
+  '(CPU usage > 90% and Memory usage > 90%) or Service nginx stopped')
+assert.deepEqual(S.serverRuleCopy({ ...combined, recovery_alert: true }).condition_tree, tree, 'Duplicate keeps the tree')
+// A single rule always sends condition_tree: null, so an edit back to one condition turns a combined rule single.
+assert.equal(S.serverRulePayload({ ...S_DRAFT(), conditions: [{ metric: 'host_cpu_pct', operator: '>', threshold: 90 }] }).condition_tree, null)
+// Add condition: the current condition plus a second one; Use one condition: back to the first.
+const grown = S.treeFromDraft({ conditions: [{ metric: 'host_service_down', operator: '>', threshold: 0 }], target: 'sshd' })
+assert.equal(grown.items.length, 2)
+assert.equal(grown.items[0].target, 'sshd')
+assert.deepEqual(S.singleFromTree(grown), { conditions: [{ metric: 'host_service_down', operator: '>', threshold: 0, reset_threshold: null }], target: 'sshd' })
+// What stops a save (rule_conditions.validate_tree).
+assert.match(S.serverTreeProblem({ logic: 'AND', items: [tree.items[1]] }), /at least two/)
+assert.match(S.serverTreeProblem({ logic: 'AND', items: [tree.items[0], { metric: 'host_service_down', operator: '>', threshold: 0, target: ' ' }] }), /service name/)
+assert.match(S.serverTreeProblem({ logic: 'AND', items: [tree.items[1], { logic: 'OR', items: [tree.items[1]] }] }), /group holds at least two/)
+assert.match(S.serverTreeProblem({ logic: 'AND', items: [tree.items[1], { metric: 'host_cpu_pct', operator: '>', threshold: 120 }] }), /0 to 100/)
+assert.match(S.serverTreeProblem({ logic: 'AND', items: [tree.items[1], { metric: 'host_cpu_pct', operator: '>', threshold: 90, reset_threshold: 95 }] }), /healthy side/)
+assert.match(S.serverTreeProblem({ logic: 'AND', items: Array(11).fill(tree.items[1]) }), /at most 10/)
+assert.equal(S.serverTreeProblem(tree), null)
+assert(!S.COMBINABLE_SERVER_METRICS.some((m) => ['host_restart', 'host_shutdown', 'host_agent_offline'].includes(m.value)),
+  'events and agent offline stand alone')
+assert.equal(S.serverDraftProblem({ ...S_DRAFT(), condition_tree: { logic: 'AND', items: [tree.items[1]] } }).step, 'trigger')
+
 // Wording: no third-party product names in the wizard.
 assert(!/solarwinds/i.test(wiz), 'the wizard names no other product')
 assert(wiz.includes("disabled={isEdit && (src === 'server') !== editingServerRule}"), 'a saved rule cannot switch between server and device families')
@@ -185,4 +227,4 @@ const page = fs.readFileSync('src/pages/AlertRulesPage.tsx', 'utf8')
 assert(page.includes("api.post('/host-alert-rules', serverRuleCopy(rule))"), 'Duplicate sends a server rule to the server API')
 assert(page.includes('serverScopeLabel(r, {'), 'the Alert Rules list names a server rule\'s tag / group scope')
 
-console.log('Server alert rules: wizard opens host_* rules on the Server tab, saves through /host-alert-rules (scope, schedule, reset, policy), validates names and scope, lists them in words; Device Down covers servers as on the server.')
+console.log('Server alert rules: wizard opens host_* rules on the Server tab, saves through /host-alert-rules (scope, schedule, reset, policy), validates names and scope, lists them in words; combined rules open, save and list as condition trees; Device Down covers servers as on the server.')

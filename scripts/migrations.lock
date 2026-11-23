@@ -194,3 +194,4 @@ df76f542e45a14b05ca93396668e767ce86120197133e380be2c75bfc0fbf2aa  migrate-202-mo
 f78dca2f7541a44ec638f07833de61286df6151c14bb7a0440dd70f3d9e8b4c5  migrate-208-server-depth-alerts.sql
 80fae8463a6883fd6d8812045ca58a6a981927312e8bedbc4e9103d73bbaa7d1  migrate-209-optional-ldap-email.sql
 6db2ace0d75a906ac30f3e657a6011d8e539cd4f95adc63254767d57dc66d7fc  migrate-210-ldap-username-rule.sql
+d0a45da7003b50a756fc4ecbde48174e6e3a5e960355e6eff0d49e44b7dcc0a6  migrate-211-condition-tree.sql

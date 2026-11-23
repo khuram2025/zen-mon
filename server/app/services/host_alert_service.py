@@ -30,6 +30,14 @@ API worker at a time (``alert_worker_lock``).
 A rule with ``server_id IS NULL`` applies to every agent server; a rule with a
 ``server_id`` applies only to that one.
 
+Combined rules (``condition_tree``, migrate-211, ``rule_conditions``): two to
+ten conditions joined by AND/OR, judged once a pass on each condition's
+current reading (the newest fresh sample, the service and process
+inventories, the automatic-service and filesystem-forecast snapshots). One
+incident per rule + server; the breach and clear holds count passes and live
+in ``service_metric_alert_state`` (``host:<server>:#tree``). Combined rules
+hold every sample (no rolling average). See docs/multi-condition-rules.md.
+
 Availability (server_availability): ``host_agent_offline`` rules, and the
 device-wide "Device Down" rules (``ping_status`` triggered on down), are
 judged here against each server's agent heartbeat and linked ping device, so
@@ -62,6 +70,7 @@ from app.services.server_health_service import (
 from app.services.filesystem_monitoring import ch_capacity_filter
 from app.services.host_metric_service import telemetry_freshness_seconds
 from app.services import host_depth_metrics as hdm
+from app.services import rule_conditions as rc
 
 logger = logging.getLogger("zenplus.host_alerts")
 
@@ -831,7 +840,8 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
                        duration: str = "", alert_id=None, first_seen=None,
                        event: str | None = None, ip_address: str = "",
                        context: dict | None = None, branding=None,
-                       lifecycle: str | None = None, dimension: str | None = None) -> int:
+                       lifecycle: str | None = None, dimension: str | None = None,
+                       combined: dict | None = None) -> int:
     """Send a host metric alert, or its all-clear, in the shared house style.
     Returns how many channels accepted it. ``context`` carries a restart or
     shutdown's own facts; ``lifecycle`` "changed" announces a further event
@@ -861,6 +871,19 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
                          value=value if numeric else None, value_context=context,
                          asset_type="Server", branding=branding, now=now,
                          status_detail=status_detail, noun=noun)
+    if combined:
+        # A combined rule says which conditions made it true, with readings:
+        # "Server web-01 (10.0.0.5): host CPU 94% (limit 90%) and host memory 92% (limit 90%)."
+        who = v.get("asset") or label
+        words = (detail or "").rstrip(".")
+        if is_recovery:
+            v["event_sentence"] = (f"{who} is back within the rule's limits: {words[:1].lower() + words[1:]}."
+                                   if words else f"{who} is back within the rule's limits.")
+        else:
+            v["event_sentence"] = f"{who}: {words[:1].lower() + words[1:]}." if words else f"{who}."
+        v["matched_conditions"] = words
+        sentence = (combined.get("label") or v.get("condition_label") or "").rstrip(".")
+        v["condition_sentence"] = v["recovery_sentence"] = f"{sentence}." if sentence else ""
     if dimension:
         # "[WARNING] ALERT: Disk space — D: on srv-a (10.0.0.5)"
         v["host_suffix"] = f" — {dimension} on {label}"
@@ -1010,7 +1033,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
                        availability_now: float | None = None, ip_address: str = "",
                        branding=None, message: str | None = None,
                        context: dict | None = None, now: float | None = None,
-                       suppressed: dict | None = None) -> None:
+                       suppressed: dict | None = None, combined: dict | None = None,
+                       recovery_detail: str | None = None) -> None:
     """Raise, continue or resolve one rule/server/dimension incident.
 
     ``opened`` is the open incident the pass read (None = none). A new one is
@@ -1025,7 +1049,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
     """
     dedupe = _dedupe(rule, dimension)
     now = datetime.now(timezone.utc).timestamp() if now is None else now
-    say = dict(ip_address=ip_address, branding=branding, context=context, dimension=dimension)
+    say = dict(ip_address=ip_address, branding=branding, context=context, dimension=dimension,
+               combined=combined)
     if breach:
         if opened is None:
             await _lock(db, rule, sid, dimension)
@@ -1112,7 +1137,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
     # An all-clear for a page nobody received is noise; it follows the
     # trigger's fate, and says how long the host sat over the threshold.
     if n and ns.flag_means_notified(opened.notified) and getattr(rule, "recovery_alert", False):
-        await _notify_rule(db, rule, hostname, value=value, detail=detail,
+        await _notify_rule(db, rule, hostname, value=value,
+                           detail=recovery_detail if recovery_detail is not None else detail,
                            is_recovery=True, duration=ap.duration_between(opened.triggered_at),
                            alert_id=opened.id, first_seen=opened.triggered_at, **say)
 
@@ -1136,7 +1162,7 @@ async def _adopt_legacy_mount_incident(db: AsyncSession, rule, sid: str,
 
 _RULES_SQL = (
     "SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, cooldown, "
-    "notify_channels, server_id, target, recovery_alert, conditions, condition_logic, "
+    "notify_channels, server_id, target, recovery_alert, conditions, condition_logic, condition_tree, "
     "schedule_start, schedule_end, schedule_days, {prio}, "
     "trigger_on, device_id, group_id, device_type, location, scope_tag, "
     "service_check_id, service_check_group_id "
@@ -1497,6 +1523,164 @@ async def _resolve_unwatched(db: AsyncSession, rule, sid: str, dim: str, current
                           detail={"rule_id": str(rule.id), "server_id": sid, "dimension": dim})
 
 
+async def _load_history(db: AsyncSession, metric: str, lookback: float, now: float, cache: dict,
+                        *, rule_id=None) -> dict | None:
+    """{server: {dimension: series}} for a threshold metric, read once per
+    pass and lookback; None when it cannot be read (alerts are preserved)."""
+    key = (metric, lookback)
+    if key not in cache:
+        try:
+            if metric == hdm.CLOCK_SKEW:
+                async with db.begin_nested():
+                    cache[key] = await hdm.fetch_clock_skew_history(db, now - lookback, now)
+            else:
+                cache[key] = await asyncio.to_thread(fetch_host_history, metric, now - lookback, now)
+            if metric == hdm.DISK_LATENCY and cache[key]:
+                # The Windows agent's disk times are whole seconds: not usable.
+                windows = await hdm.windows_server_ids(db)
+                cache[key] = {sid: dims for sid, dims in cache[key].items() if sid not in windows}
+        except Exception:
+            logger.exception("host rule %s history unavailable for %s; preserving alerts", rule_id, metric)
+            cache[key] = None
+    return cache[key]
+
+
+# ── Combined rules (condition_tree, rule_conditions) ─────────────────────────
+
+TREE_HOLD_KEY = "#tree"
+
+
+def _latest(series: list, now: float, fresh: float) -> float | None:
+    """The newest sample at or before now, if it is fresh; else unknown."""
+    for ts, value in reversed(series or []):
+        if ts > now:
+            continue
+        if value is None or not math.isfinite(value) or now - ts >= fresh:
+            return None
+        return value
+    return None
+
+
+async def _tree_readings(db: AsyncSession, tree: dict, targets: list[str], *, now: float, budgets: dict,
+                         default_budget: int, max_budget: int, history_cache: dict,
+                         snapshot_cache: dict) -> dict[str, dict[str, rc.LeafReading]] | None:
+    """{server: {condition id: LeafReading}} for every condition of a
+    combined rule, each source read once per pass. None when a source cannot
+    be read at all (the caller then leaves every incident as it is)."""
+    out: dict[str, dict[str, rc.LeafReading]] = {sid: {} for sid in targets}
+    lookback = max(2 * min(max_budget, MAX_LOOKBACK_BUDGET_S), MIN_LOOKBACK_S)
+    for c in rc.leaves(tree):
+        cid, metric, target = c["id"], c["metric"], c.get("target")
+        spec = rc.SERVER_METRICS[metric]
+        if metric in THRESHOLD_METRICS:
+            history = await _load_history(db, metric, lookback, now, history_cache)
+            if history is None:
+                return None
+            for sid in targets:
+                fresh = budgets.get(sid, default_budget)
+                dims = history.get(sid)
+                if not dims:
+                    out[sid][cid] = rc.LeafReading(known=False)       # no samples: unknown
+                    continue
+                if spec.instance is None:
+                    out[sid][cid] = rc.LeafReading({"": _latest(dims.get("", []), now, fresh)})
+                elif target:
+                    out[sid][cid] = rc.LeafReading({target: _latest(dims.get(target, []), now, fresh)})
+                else:
+                    out[sid][cid] = rc.LeafReading({d: _latest(s, now, fresh) for d, s in dims.items()})
+        elif metric in SNAPSHOT_METRICS:
+            try:
+                snaps = await _snapshot_readings(
+                    db, SimpleNamespace(metric=metric, target=target if spec.target == "exclude" else None),
+                    now, budgets, default_budget, snapshot_cache)
+            except Exception:
+                logger.exception("combined rule readings unavailable for %s; preserving alerts", metric)
+                return None
+            for sid in targets:
+                per = snaps.get(sid)
+                if per is None:
+                    out[sid][cid] = rc.LeafReading(known=False)
+                    continue
+                per = {d: v for d, v in per.items() if v.state != hdm.GONE}
+                if target and spec.target == "optional":
+                    per = {target: per.get(target, hdm.Snap(None, state="no_data"))}
+                out[sid][cid] = rc.LeafReading({d: v.value for d, v in per.items()},
+                                               details={d: v.detail for d, v in per.items() if v.detail})
+        else:
+            # Service / process state from the inventories (one reading now).
+            probe = SimpleNamespace(metric=metric, target=target)
+            for sid in targets:
+                res = await _current_value(db, probe, sid)
+                if res is None:
+                    out[sid][cid] = rc.LeafReading(known=False)
+                    continue
+                breach, _value, _detail = res
+                out[sid][cid] = rc.LeafReading({target: 1.0 if breach else 0.0})
+    return out
+
+
+async def _evaluate_tree(db: AsyncSession, rule, tree: dict, targets: list[str], readings: dict,
+                         opened: dict, *, now: float, allowed: bool, counts: dict, servers: dict,
+                         ips: dict, branding, overrides, server_groups: dict, parents: dict) -> None:
+    """Raise, continue or resolve each server's incident of a combined rule.
+
+    The tree is judged on this pass's readings (rule_conditions.judge); the
+    breach hold (min_duration) and clear hold (clear_duration) count passes in
+    service_metric_alert_state. An unknown result changes nothing and
+    restarts both holds, as for every other rule."""
+    from app.services import service_metric_alert_service as smas
+    from app.services import alert_rule_overrides as ovr
+    from app.services.network_conditions import clear_hold_seconds
+    at = datetime.fromtimestamp(now, timezone.utc)
+    holds = {r[0]: (smas._aware(r[1]), smas._aware(r[2])) for r in (await db.execute(text(
+        "SELECT asset_key, breach_since, clear_since FROM service_metric_alert_state"
+        " WHERE rule_id = :rid AND asset_key LIKE 'host:%'"), {"rid": str(rule.id)})).all()}
+    label = rc.tree_label(tree)
+    for sid in targets:
+        key = f"host:{sid}:{TREE_HOLD_KEY}"
+        current = opened.get((sid, _dedupe(rule, None)))
+        override = overrides.find(rule.id, server_id=sid, groups=server_groups.get(sid),
+                                  instance=None) if overrides else None
+        e_rule = ovr.apply(rule, override) if override is not None else rule
+        e_tree = rc.apply_override(tree, override)
+        per = readings.get(sid, {})
+        result = rc.judge(e_tree, per, active=current is not None)
+        breach_since, clear_since = holds.get(key, (None, None))
+        if current is None and breach_since is None and result.state is not True:
+            continue        # healthy or unknown, nothing open, no hold running
+        st = rc.step(result.state, open_incident=current is not None, breach_since=breach_since,
+                     clear_since=clear_since, hold_s=int(e_rule.min_duration or 0),
+                     clear_hold_s=clear_hold_seconds(getattr(e_rule, "clear_duration", None)), now=at)
+        if (st.breach_since, st.clear_since) != (breach_since, clear_since):
+            await smas._save_state(db, rule.id, key, st.breach_since, st.clear_since, None, at)
+        hostname = servers.get(sid, "server")
+        say = dict(allowed=allowed, counts=counts, ip_address=ips.get(sid, ""), branding=branding,
+                   now=now, combined={"label": label})
+        extra = {"combined": True, "data_state": "current",
+                 "matched": rc.matched_metadata(e_tree, result),
+                 "condition_states": rc.states_metadata(result),
+                 **({"override": override.summary()} if override else {})}
+        if st.action == "raise":
+            await _apply_state(db, e_rule, sid, hostname, None, True, None, rc.describe(e_tree, result, per),
+                               opened=None, extra=extra, suppressed=parents.get(sid), **say)
+        elif st.action == "resolve":
+            await _apply_state(db, e_rule, sid, hostname, None, False, None, rc.describe(e_tree, result, per),
+                               opened=current,
+                               recovery_detail=rc.describe(e_tree, result, per, matched_only=False), **say)
+        elif st.action == "continue":
+            await _apply_state(db, e_rule, sid, hostname, None, True, None, rc.describe(e_tree, result, per),
+                               opened=current, extra=extra, suppressed=parents.get(sid), **say)
+        elif current is not None:
+            if result.state is None:
+                await _stamp_state(db, current.id, {"data_state": "no_data",
+                                                    "condition_states": rc.states_metadata(result)})
+            elif st.clear_since is not None:
+                await _stamp_state(db, current.id, {
+                    "data_state": "pending_clear", "condition_states": rc.states_metadata(result),
+                    "cleared_seconds": round((at - st.clear_since).total_seconds())})
+        await db.commit()
+
+
 async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
     rules = await _load_rules(db)
     if not rules:
@@ -1562,6 +1746,25 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
             targets = [sid for sid in targets if sid not in maintained]
 
         opened = await _open_incidents(db, rule)
+
+        tree = rc.parse(getattr(rule, "condition_tree", None))
+        if tree is not None:
+            try:
+                tree = rc.validate_tree(tree, "server")
+            except rc.TreeError as exc:
+                logger.error("host rule %s skipped: %s", rule.id, exc)
+                continue
+            readings = await _tree_readings(db, tree, targets, now=now, budgets=budgets,
+                                            default_budget=default_budget, max_budget=max_budget,
+                                            history_cache=history_cache, snapshot_cache=snapshot_cache)
+            if readings is None:
+                await db.rollback()
+                continue        # a source could not be read: every incident stays as it is
+            await _evaluate_tree(db, rule, tree, targets, readings, opened, now=now, allowed=allowed,
+                                 counts=counts, servers=servers, ips=ips, branding=branding,
+                                 overrides=overrides, server_groups=server_groups, parents=parents)
+            await db.commit()
+            continue
 
         if rule.metric in {"host_restart", "host_shutdown"}:
             if lifecycle is None:
@@ -1639,24 +1842,7 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         lookback = max(max(window, o_hold if averaged else 0)
                        + max(hold, clear_hold, 0 if averaged else o_hold, o_clear)
                        + 2 * min(max_budget, MAX_LOOKBACK_BUDGET_S), MIN_LOOKBACK_S)
-        cache_key = (rule.metric, lookback)
-        if cache_key not in history_cache:
-            try:
-                if rule.metric == hdm.CLOCK_SKEW:
-                    async with db.begin_nested():
-                        history_cache[cache_key] = await hdm.fetch_clock_skew_history(db, now - lookback, now)
-                else:
-                    history_cache[cache_key] = await asyncio.to_thread(
-                        fetch_host_history, rule.metric, now - lookback, now)
-                if rule.metric == hdm.DISK_LATENCY and history_cache[cache_key]:
-                    # The Windows agent's disk times are whole seconds: not usable.
-                    windows = await hdm.windows_server_ids(db)
-                    history_cache[cache_key] = {sid: dims for sid, dims in history_cache[cache_key].items()
-                                                if sid not in windows}
-            except Exception:
-                logger.exception("host rule %s history unavailable; preserving alerts", rule.id)
-                history_cache[cache_key] = None
-        history = history_cache[cache_key]
+        history = await _load_history(db, rule.metric, lookback, now, history_cache, rule_id=rule.id)
         if history is None:
             continue
 

@@ -88,6 +88,12 @@ id and delivery event (see [ncm-change-detection.md](ncm-change-detection.md)).
 
 Server (agent) rules follow the lifecycle above. In addition:
 
+* **Combined rules** (migrate-211, see
+  [multi-condition-rules.md](multi-condition-rules.md)): a rule with a
+  `condition_tree` joins 2-10 conditions with AND/OR and raises one incident
+  per server naming the matched conditions; its holds count evaluation passes
+  and it judges every sample (no rolling average).
+
 * **Maintenance** (alerting plan 2.7, see
   [maintenance-windows.md](maintenance-windows.md)): a server in a maintenance
   window in force — its own server, server group or server tag window, or the
