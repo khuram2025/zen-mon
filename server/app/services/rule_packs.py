@@ -81,6 +81,15 @@ def validate_pack(items: Any) -> Optional[list[dict]]:
         if not key or len(key) > 80 or ":" in key or key in seen:
             raise PackError(f"recommendation {n}: key is required, unique, at most 80 characters, no ':'")
         seen.add(key)
+        tree = None
+        if it.get("condition_tree") is not None:
+            # A combined device rule (multi-condition rules): the tree is the condition.
+            from app.services import rule_conditions as rc
+            try:
+                tree = rc.validate_tree(it["condition_tree"], "device")
+            except rc.TreeError as exc:
+                raise PackError(f"recommendation {key}: {exc}") from None
+            it = {**it, "metric": rc.COMBINED_METRIC, "operator": ">", "threshold": 0}
         metric = str(it.get("metric") or "")
         if not metric:
             raise PackError(f"recommendation {key}: metric is required")
@@ -107,6 +116,7 @@ def validate_pack(items: Any) -> Optional[list[dict]]:
             "min_duration": int(it.get("min_duration") or 0),
             "clear_duration": int(it["clear_duration"]) if it.get("clear_duration") is not None else None,
             "severity": sev, "priority": prio, "if_role": role,
+            **({"condition_tree": tree} if tree else {}),
         })
     return out
 
@@ -172,6 +182,9 @@ def values(item_or_rule: dict) -> dict:
         out[f] = v
     if item_or_rule.get("states") is not None:
         out["states"] = [int(c) for c in item_or_rule["states"]]
+    if isinstance(item_or_rule.get("condition_tree"), dict):
+        # A combined recommendation: a changed tree is a changed recommendation.
+        out["condition_tree"] = item_or_rule["condition_tree"]
     return out
 
 
@@ -239,6 +252,11 @@ def find(items: list[dict], key: str) -> Optional[dict]:
 def rule_fields(item: dict) -> dict:
     """The alert rule columns an accepted recommendation sets. A state
     recommendation brings its own AND-combined conditions on the one metric."""
+    if item.get("condition_tree"):
+        return {"metric": "combined", "operator": ">", "threshold": 0.0, "conditions": [],
+                "condition_tree": item["condition_tree"], "subject_type": "device",
+                "min_duration": int(item.get("min_duration") or 0), "clear_duration": item.get("clear_duration"),
+                "severity": item.get("severity") or "warning", "priority": item.get("priority"), "if_role": None}
     if item.get("conditions"):
         conds = [{"metric": c["metric"], "operator": c["operator"], "threshold": float(c["threshold"])}
                  for c in item["conditions"]]

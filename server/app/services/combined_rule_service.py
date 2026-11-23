@@ -44,8 +44,8 @@ logger = logging.getLogger("zenplus.combined_rules")
 
 EVAL_INTERVAL_S = 60
 SOURCE = "combined_rule"
-SUBJECTS = ("device", "service_check")
-_ASSET_TYPE = {"device": "Device", "service_check": "Service check"}
+SUBJECTS = ("device", "service_check", "apm_service", "virtualization", "appliance")
+_ASSET_TYPE = {"device": "Device", "service_check": "Service check", "apm_service": "APM service"}
 
 
 @dataclass
@@ -59,7 +59,7 @@ class Subject:
     server_id: Optional[str] = None
     link_device: Optional[str] = None
     link_server: Optional[str] = None
-
+    connector: Optional[dict] = None        # a virtualisation source
     @property
     def label(self) -> str:
         return ap.host_label(self.name, self.ip)
@@ -87,8 +87,33 @@ _RULES_SQL = (
 
 # ── Subjects in scope ────────────────────────────────────────────────────────
 
-async def _subjects(db: AsyncSession, rule, cache: dict) -> dict[str, Subject]:
+async def _subjects(db: AsyncSession, rule, cache: dict, *, now: float = 0.0,
+                    opened_keys: tuple = ()) -> dict[str, Subject]:
     """Every subject the rule covers, maintenance and exclusions not yet applied."""
+    if rule.subject_type == "appliance":
+        return {"appliance": Subject("appliance", "appliance", "ZenPlus appliance")}
+    if rule.subject_type == "apm_service":
+        # Services with traffic, plus those with an open incident (no traffic
+        # now is no reading: the incident stays open, it is not out of scope).
+        if "apm" not in cache:
+            cache["apm"] = await cr.apm_readings([])        # the services with traffic
+        target = (getattr(rule, "target", None) or "").strip()
+        names = set(cache["apm"][1]) | {k.split(":", 1)[1] for k in opened_keys if k.startswith("apm:")}
+        return {f"apm:{n}": Subject(f"apm:{n}", "apm_service", n) for n in sorted(names)
+                if not target or n == target}
+    if rule.subject_type == "virtualization":
+        from app.services import virtualization_alert_service as vas
+        if "connectors" not in cache:
+            cache["connectors"] = await vas.load_connectors(db)
+        out = {}
+        for c in cache["connectors"]:
+            if not c.get("enabled") or not vas.rule_covers(rule, c):
+                continue
+            linked = c.get("linked") or {}
+            key = f"vc:{c['id']}"
+            out[key] = Subject(key, "virtualization", vas.source_label(c), linked.get("ip") or "",
+                               device_id=linked.get("id"), link_device=linked.get("id"), connector=c)
+        return out
     if rule.subject_type == "device":
         from app.services.network_alert_service import _device_in_scope
         if "devices" not in cache:
@@ -138,7 +163,20 @@ async def _readings(db: AsyncSession, rule, tree: dict, subjects: dict[str, Subj
     out: dict[str, dict] = {k: {} for k in subjects}
     try:
         own = parts.get("self", [])
-        if own and rule.subject_type == "device":
+        if own and rule.subject_type == "apm_service":
+            # Read fresh for this rule's own conditions (the cache holds the first rule's).
+            per, _names = await cr.apm_readings(own)
+            for k, s in subjects.items():
+                out[k].update(per.get(s.name) or {c["id"]: rc.LeafReading(known=False, asset=s.name) for c in own})
+        elif own and rule.subject_type == "virtualization":
+            at = datetime.fromtimestamp(now, timezone.utc)
+            for k, s in subjects.items():
+                out[k].update(cr.virtualization_readings(s.connector, own, at))
+        elif own and rule.subject_type == "appliance":
+            per = await cr.appliance_readings(db, own, now)
+            for k in subjects:
+                out[k].update(per)
+        elif own and rule.subject_type == "device":
             devices = {s.device_id: cache["devices"][s.device_id] for s in subjects.values()}
             per = await cr.device_readings(db, devices, own, now=now)
             for k, s in subjects.items():
@@ -341,17 +379,19 @@ async def _evaluate_rule(db: AsyncSession, rule, *, now: float, cache: dict, cou
         return
     allowed = notifications_allowed(getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
                                     getattr(rule, "schedule_days", None), tz)
-    subjects = await _subjects(db, rule, cache)
+    opened = await _open_incidents(db, rule)
+    subjects = await _subjects(db, rule, cache, now=now, opened_keys=tuple(opened))
     if rule.subject_type == "device" and excluded:
         subjects = {k: s for k, s in subjects.items() if not excluded.device(rule.id, s.device_id)}
-    opened = await _open_incidents(db, rule)
     await _resolve_unwatched(db, rule, opened, set(subjects), counts)
     # Not judged: a subject in maintenance (its incident stays open and quiet).
     judged = {k: s for k, s in subjects.items()
               if not (s.kind == "device" and (s.device_id in maintained_devices
                                               or cache["devices"][s.device_id].status == "maintenance"))
               and not (s.kind == "service_check" and (s.service_check_id in maintained_checks
-                                                      or (s.device_id and s.device_id in maintained_devices)))}
+                                                      or (s.device_id and s.device_id in maintained_devices)))
+              # A virtualisation source pauses while its linked device is in maintenance.
+              and not (s.kind == "virtualization" and s.device_id and s.device_id in maintained_devices)}
     if not judged:
         return
     await _links(db, rule, judged, cache)

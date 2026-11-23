@@ -130,6 +130,23 @@ CATALOGUE: list[dict[str, Any]] = [
      "metric": "syslog", "operator": "<=", "threshold": 2, "trigger_on": "any",
      "min_duration": 0, "clear_duration": None, "severity": "critical", "priority": "P2",
      "recovery_alert": False, "cooldown": 900},
+    # Combined rules (multi-condition rules phase 3): one alert naming both readings.
+    {"key": "server_under_pressure", "family": "server", "name": "Server under pressure",
+     "description": "CPU and memory both above 90% for 5 minutes on a server: one alert naming both readings.",
+     "metric": "host_cpu_pct", "operator": ">", "threshold": 90, "trigger_on": "any",
+     "min_duration": 300, "clear_duration": None, "severity": "warning", "priority": "P3",
+     "recovery_alert": True, "cooldown": 0, "subject_type": "server",
+     "condition_tree": {"logic": "AND", "items": [
+         {"metric": "host_cpu_pct", "operator": ">", "threshold": 90},
+         {"metric": "host_memory_pct", "operator": ">", "threshold": 90}]}},
+    {"key": "device_overloaded", "family": "device", "name": "Device overloaded",
+     "description": "A device's CPU and memory both above 85% for 10 minutes: one alert naming both readings.",
+     "metric": "combined", "operator": ">", "threshold": 0, "trigger_on": "any",
+     "min_duration": 600, "clear_duration": None, "severity": "warning", "priority": "P3",
+     "recovery_alert": True, "cooldown": 0, "subject_type": "device",
+     "condition_tree": {"logic": "AND", "items": [
+         {"metric": "cpu", "operator": ">", "threshold": 85},
+         {"metric": "memory", "operator": ">", "threshold": 85}]}},
 ]
 
 _LEVELLED_METRICS = frozenset({"service_tls_days", "cpu", "memory"})
@@ -160,6 +177,8 @@ def _norm_op(op: Optional[str]) -> str:
 def covers(rule: dict, item: dict) -> bool:
     """Does an existing enabled, unscoped rule already watch this recommendation's
     condition? Thresholds do not have to match: the operator chose theirs."""
+    if item.get("condition_tree"):
+        return False        # a combined recommendation is only ever accepted, never covered
     if not rule.get("enabled") or not _unscoped(rule) or rule.get("metric") != item["metric"]:
         return False
     if item["metric"] in ("service_status", "ping_status"):
@@ -205,5 +224,6 @@ async def state(db: AsyncSession) -> list[dict]:
 
 def accepted_record(item: dict) -> str:
     keep = ("metric", "operator", "threshold", "trigger_on", "trap_oid", "min_duration",
-            "clear_duration", "severity", "priority", "recovery_alert", "cooldown")
+            "clear_duration", "severity", "priority", "recovery_alert", "cooldown", "condition_tree",
+            "subject_type")
     return json.dumps({k: item.get(k) for k in keep})

@@ -4,7 +4,9 @@ One rule can watch several conditions and raise one incident when they are
 true together (AND) or when any of them is (OR). Network-device SNMP rules
 have flat combined conditions since migrate-021. Condition trees add groups,
 states, linked assets and per-condition holds: **phase 1 (migrate-211)** for
-server rules, **phase 2 (migrate-212)** for devices and service checks. The
+server rules, **phase 2 (migrate-212)** for devices and service checks,
+**phase 3** for APM services, virtualisation sources and the appliance, with
+event counts, combined recommendations and a replay over history. The
 full design, with the later phases and the decisions, is in
 [plans/multi-condition-rules-plan.md](plans/multi-condition-rules-plan.md).
 
@@ -13,6 +15,9 @@ full design, with the later phases and the decisions, is in
 | Server | `/host-alert-rules` | its first condition on the server (`host_*`) | `host_alert_service._evaluate_tree` |
 | Device | `/alert-rules` (`subject_type: device`) | `combined` | `combined_rule_service` |
 | Service check | `/alert-rules` (`subject_type: service_check`) | `combined` | `combined_rule_service` |
+| APM service | `/alert-rules` (`subject_type: apm_service`, `target` = service) | `combined` | `combined_rule_service` |
+| Virtualisation source | `/alert-rules` (`subject_type: virtualization`, `target` = connector) | `combined` | `combined_rule_service` |
+| Appliance | `/alert-rules` (`subject_type: appliance`) | `combined` | `combined_rule_service` |
 
 `metric = 'combined'` (allowed by migrate-212) means no single-condition
 evaluator ever loads the rule; the device and service status paths of
@@ -46,6 +51,21 @@ evaluator ever loads the rule; the device and service status paths of
   - *Service check*: down, degraded (states); response time of the last run,
     certificate days left (levels). A paused, stale or never-run check is
     unknown.
+  - *Device events in a window* (levels, `window_s` 60-86400 s): traps
+    received (`target` = an OID prefix; default 5 min), syslog messages of
+    severity error or worse (`target` = text the message contains; default
+    5 min), configuration changes (a new normalised configuration; default
+    1 h). No event is 0, not unknown.
+  - *APM service*: p95 and p99 latency, error rate, throughput, Apdex over the
+    last 5 minutes (`apm_alert_service`); a service without requests is
+    unknown, and its open incident stays open.
+  - *Virtualisation source*: host disconnected (state), datastore usage,
+    platform alarm level (per host / datastore / alarm, any or named); a stale
+    snapshot is unknown; the source's linked device pauses it in maintenance
+    and can be read with `on: device`.
+  - *Appliance*: data disk, databases, backups, updates, licence days, clock,
+    failed deliveries, remote sensors (`appliance_alert_service` sources;
+    sign-in, administrative and report events stay single rules).
 - **Linked assets** (`on`): a server's device (`servers.device_id` or the same
   address), a device's server (the reverse), a service check's device
   (`service_checks.device_id`) and server (`service_checks.server_id`,
@@ -125,10 +145,31 @@ words ("(Host CPU above 90% and host memory above 90%) or service nginx
 stopped") everywhere a rule's condition is shown (escalation, incident
 detail); `{matched_conditions}` is a template variable.
 
+## Recommendations and template packs
+
+The recommended default rules include combined rules (*Server under
+pressure*: CPU and memory above 90 % for 5 min; *Device overloaded*: CPU and
+memory above 85 % for 10 min). A combined recommendation is never "covered" by
+another rule, only accepted. A device template's `rule_pack` item may carry a
+`condition_tree` (device subject); accepting it creates a combined rule scoped
+to the template, and a changed tree shows as a changed recommendation.
+
+## Replay ("Test against the last 7 days")
+
+`POST /alert-rules/combined/replay` (`app.services.combined_replay`, read only,
+`alerts.view`) judges a draft tree with the real engine (holds, clear levels,
+per-condition holds) at every 5-minute bucket of the last 1-14 days for up to
+200 subjects in the draft's scope, and returns the episodes it would have
+raised. History: server CPU, memory and filesystem; device CPU and memory
+(bucket averages) and down/degraded (status log); service-check response time
+(5-minute rollup) and down/degraded (status log). Any other condition reads
+as unknown and is named in `not_replayed_labels`.
+
 ## API
 
-`/alert-rules` accepts `condition_tree` with `subject_type` `device` or
-`service_check` (the stored metric is `combined`); scope fields of the other
+`/alert-rules` accepts `condition_tree` with `subject_type` `device`,
+`service_check`, `apm_service`, `virtualization` or `appliance` (the stored
+metric is `combined`); scope fields of the other
 subject are refused, a combined rule stays combined (`condition_tree: null`
 is a 422) and keeps its subject. Rows return `condition_tree` and
 `subject_type`. Service checks accept an optional `server_id`.
@@ -150,6 +191,8 @@ The builder (`ServerConditionTree.tsx`, model `conditionTree.ts`): an All/Any
 switch, conditions with *Reads* (the subject or a linked asset), *For* (the
 condition's own hold), *Add group* (one level) and a read-back sentence.
 Server source: **Add condition** turns a rule into a combined rule and *Use
-one condition* turns it back. Device and Service Check sources: **Combine
-conditions** on a new rule. Lists show combined rules as "Combined
+one condition* turns it back. Device, Service Check, APM & RUM, Virtualisation
+and ZenPlus appliance sources: **Combine conditions** on a new rule. Event
+conditions show their filter and window (*In*). Under the builder, *Test
+against the last 7 days* runs the replay. Lists show combined rules as "Combined
 conditions" with the tree in words.

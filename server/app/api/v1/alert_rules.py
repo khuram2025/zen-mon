@@ -92,6 +92,10 @@ _SINGLE_CONDITION_SOURCES = (
 _COMBINED_SCOPE = {
     "device": ("device_id", "group_id", "device_type", "location", "scope_tag", "profile_id"),
     "service_check": ("service_check_id", "service_check_group_id", "scope_tag"),
+    # target = the service name (APM) or the connector id (virtualisation).
+    "apm_service": (),
+    "virtualization": ("device_id", "scope_tag"),
+    "appliance": (),
 }
 _SCOPE_FIELDS = ("device_id", "group_id", "device_type", "location", "profile_id", "if_role",
                  "service_check_id", "service_check_group_id", "server_id")
@@ -471,7 +475,7 @@ _NETFLOW_METRICS = nfa.METRIC_PATTERN
 _SERVICE_LEVEL_METRICS = "service_tls_days|service_response_ms|f5_cert_days"
 # Subjects of combined rules saved through /alert-rules (server rules go
 # through /host-alert-rules), see combined_rule_service.
-_COMBINED_SUBJECTS = "device|service_check"
+_COMBINED_SUBJECTS = "device|service_check|apm_service|virtualization|appliance"
 # ZenPlus appliance health (migrate-198 CHECK), evaluated by
 # appliance_alert_service. Not tied to a device or server: one incident per
 # rule + dimension (channel for delivery failures, sensor for sensor offline,

@@ -30,7 +30,7 @@ rules keep firing exactly as before.
 | --- | --- | --- |
 | 1 | Engine, migrate-211, server rules (levels, services, processes, automatic services, forecasts), editor builder, refusal of ignored extra conditions on APM/RUM, Device Tracker, NetPath and service status | Built (this PR) |
 | 2 | Device and service-check subjects (`combined_rule_service`, migrate-212), linked-asset conditions (device ↔ server, check → device/server, optional `service_checks.server_id`), status + SNMP in one device rule, per-condition hold. A failed workflow step is not a separate condition: it already makes the check down or degraded | Built |
-| 3 | APM, virtualisation, appliance; event-in-window conditions; combined rules in rule packs; "test against the last 7 days" | Planned |
+| 3 | APM service, virtualisation source and appliance subjects; trap / syslog / configuration-change counts in a window on devices; combined recommended rules and template rule-pack items; replay over stored history (`combined_replay`) | Built |
 
 ## Decisions (recommended answers taken for phase 1)
 

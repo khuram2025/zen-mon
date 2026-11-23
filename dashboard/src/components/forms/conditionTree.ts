@@ -5,7 +5,7 @@
  */
 import { OP_SYMBOL, SERVER_METRICS, serverMetric, type ServerMetric } from './serverMetrics'
 
-export type TreeSubject = 'server' | 'device' | 'service_check'
+export type TreeSubject = 'server' | 'device' | 'service_check' | 'apm_service' | 'virtualization' | 'appliance'
 /** pct: a reading against a limit; state: true while bad; svc/proc: a named service/process; auto: automatic services. */
 export type CondKind = 'pct' | 'state' | 'svc' | 'proc' | 'auto'
 export type CatalogMetric = {
@@ -18,6 +18,12 @@ export type CatalogMetric = {
   min?: number
   max?: number
   hint?: string
+  /** An event count: the default window in seconds it counts over. */
+  window?: number
+  /** What `target` filters, for an event count ("Trap OID prefix"). */
+  filter?: string
+  /** What `target` names for an instance metric ("datastore"); empty = any. */
+  instance?: string
 }
 
 /** One condition. `on` reads a linked asset; `target` names an instance (or services to leave out); `for_s` is its own hold. */
@@ -30,6 +36,8 @@ export type TreeCondition = {
   reset_threshold?: number | null
   target?: string
   for_s?: number | null
+  /** Event counts: the window in seconds (60-86400). */
+  window_s?: number | null
 }
 export type TreeGroup = { logic: 'AND' | 'OR'; items: TreeCondition[] }
 export type ConditionTree = { logic: 'AND' | 'OR'; items: Array<TreeCondition | TreeGroup> }
@@ -51,6 +59,36 @@ export const DEVICE_CONDITIONS: ReadonlyArray<CatalogMetric> = [
   { value: 'memory', label: 'Memory usage (%)', kind: 'pct', unit: '%', defaultThreshold: 85, min: 0, max: 100 },
   { value: 'snmp_unreachable', label: 'SNMP unanswered (minutes)', kind: 'pct', unit: ' min', operators: ['>', '>='], defaultThreshold: 15, min: 0,
     hint: 'Minutes SNMP polls have gone unanswered while the device answers ping.' },
+  { value: 'trap_count', label: 'Traps received', kind: 'pct', operators: ['>=', '>'], defaultThreshold: 1, min: 0, window: 300,
+    filter: 'Trap OID prefix' },
+  { value: 'syslog_count', label: 'Syslog errors (severity 0-3)', kind: 'pct', operators: ['>=', '>'], defaultThreshold: 1, min: 0,
+    window: 300, filter: 'Message contains' },
+  { value: 'config_changes', label: 'Configuration changes', kind: 'pct', operators: ['>=', '>'], defaultThreshold: 1, min: 0, window: 3600 },
+]
+
+export const APM_CONDITIONS: ReadonlyArray<CatalogMetric> = [
+  { value: 'apm_latency_p95', label: 'P95 latency (ms)', kind: 'pct', unit: ' ms', defaultThreshold: 1000, min: 0 },
+  { value: 'apm_latency_p99', label: 'P99 latency (ms)', kind: 'pct', unit: ' ms', defaultThreshold: 2000, min: 0 },
+  { value: 'apm_error_rate', label: 'Error rate (0-1)', kind: 'pct', defaultThreshold: 0.05, min: 0, max: 1 },
+  { value: 'apm_throughput', label: 'Throughput (requests/s)', kind: 'pct', operators: ['<', '<=', '>', '>='], defaultThreshold: 1, min: 0 },
+  { value: 'apm_apdex', label: 'Apdex (0-1)', kind: 'pct', operators: ['<', '<='], defaultThreshold: 0.8, min: 0, max: 1 },
+]
+
+export const VIRTUALIZATION_CONDITIONS: ReadonlyArray<CatalogMetric> = [
+  { value: 'vm_host_disconnected', label: 'Host disconnected', kind: 'state', instance: 'host' },
+  { value: 'vm_datastore_pct', label: 'Datastore usage (%)', kind: 'pct', unit: '%', defaultThreshold: 90, min: 0, max: 100, instance: 'datastore' },
+  { value: 'vm_alarm', label: 'Platform alarm (1 warning, 2 critical)', kind: 'pct', operators: ['>='], defaultThreshold: 1, min: 0, max: 2 },
+]
+
+export const APPLIANCE_CONDITIONS: ReadonlyArray<CatalogMetric> = [
+  { value: 'appliance_disk_pct', label: 'Data disk used (%)', kind: 'pct', unit: '%', defaultThreshold: 85, min: 0, max: 100 },
+  { value: 'appliance_db_down', label: 'A database not answering', kind: 'state' },
+  { value: 'appliance_backup_failed', label: 'Scheduled backup failed or overdue', kind: 'state' },
+  { value: 'appliance_update_failed', label: 'Update failed', kind: 'state' },
+  { value: 'appliance_license_days', label: 'Licence days left', kind: 'pct', unit: ' days', operators: ['<', '<='], defaultThreshold: 14, min: 0 },
+  { value: 'appliance_time_unsynced', label: 'Clock not synchronised', kind: 'state' },
+  { value: 'appliance_delivery_failures', label: 'Failed deliveries in the last hour', kind: 'pct', operators: ['>=', '>'], defaultThreshold: 3, min: 0 },
+  { value: 'appliance_sensor_offline', label: 'A remote sensor offline', kind: 'state' },
 ]
 
 export const CHECK_CONDITIONS: ReadonlyArray<CatalogMetric> = [
@@ -66,6 +104,9 @@ const CATALOGS: Record<TreeSubject, ReadonlyArray<CatalogMetric>> = {
   server: SERVER_CONDITIONS,
   device: DEVICE_CONDITIONS,
   service_check: CHECK_CONDITIONS,
+  apm_service: APM_CONDITIONS,
+  virtualization: VIRTUALIZATION_CONDITIONS,
+  appliance: APPLIANCE_CONDITIONS,
 }
 
 /** What a condition may read besides the rule's subject (rule_conditions.LINKS). */
@@ -76,8 +117,14 @@ export const TREE_LINKS: Record<TreeSubject, ReadonlyArray<{ on: string; label: 
     { on: 'device', label: 'Its device', subject: 'device' },
     { on: 'server', label: 'Its server', subject: 'server' },
   ],
+  apm_service: [],
+  virtualization: [{ on: 'device', label: 'Its device', subject: 'device' }],
+  appliance: [],
 }
-export const SELF_LABEL: Record<TreeSubject, string> = { server: 'This server', device: 'This device', service_check: 'This check' }
+export const SELF_LABEL: Record<TreeSubject, string> = {
+  server: 'This server', device: 'This device', service_check: 'This check', apm_service: 'This service',
+  virtualization: 'This source', appliance: 'The appliance',
+}
 const LINK_WORDS: Record<string, string> = { device: 'Linked device', server: 'Linked server' }
 
 /** Metrics with instances, and the noun of one. */
@@ -86,6 +133,8 @@ export const TREE_INSTANCE: Record<string, string> = {
   host_fs_days_left: 'filesystem (mount)',
   host_disk_latency_ms: 'disk',
   host_nic_errors: 'network interface',
+  vm_host_disconnected: 'host',
+  vm_datastore_pct: 'datastore',
 }
 
 /** The subject a condition reads: the rule's own, or the linked one. */
@@ -142,7 +191,11 @@ function conditionWords(subject: TreeSubject, c: TreeCondition): string {
   if (kind === 'svc') words = `Service ${target || '?'} stopped`
   else if (kind === 'proc') words = `Process ${target || '?'} not running`
   else if (kind === 'auto') words = target ? `An automatic service stopped (except ${target})` : 'An automatic service stopped'
-  else if (kind === 'state') {
+  else if (spec?.window) {
+    const op = OP_SYMBOL[String(c.operator || '')] || c.operator || '>='
+    const win = Number(c.window_s) > 0 ? Number(c.window_s) : spec.window
+    words = `${spec.label.replace(/ \([^)]*\)$/, '')} ${op} ${c.threshold ?? 0} in ${holdWords(win)}${target ? ` (${target})` : ''}`
+  } else if (kind === 'state') {
     // "Device is down" -> "Linked device is down".
     words = link ? `${link} ${(spec?.label || c.metric).replace(/^\S+\s+/, '')}` : spec?.label || c.metric
     return words + hold
@@ -181,6 +234,10 @@ export function treeProblem(subject: TreeSubject, tree: ConditionTree): string |
     if (spec.kind === 'proc' && !target) return 'Enter the process name.'
     const hold = c.for_s == null || String(c.for_s) === '' ? 0 : Number(c.for_s)
     if (!Number.isFinite(hold) || hold < 0 || hold > MAX_FOR_S) return 'A condition’s hold is 0 to 86400 seconds.'
+    if (spec.window && c.window_s != null && String(c.window_s) !== '') {
+      const w = Number(c.window_s)
+      if (!(w >= 60 && w <= 86400)) return `${spec.label}: the window is 1 minute to 24 hours.`
+    }
     if (spec.kind !== 'pct') continue
     const thr = Number(c.threshold)
     if (!Number.isFinite(thr)) return `${spec.label}: enter the limit.`
@@ -211,6 +268,7 @@ export function conditionTreePayload(subject: TreeSubject, tree: ConditionTree):
       ...(kind === 'pct' && c.reset_threshold != null && String(c.reset_threshold) !== '' ? { reset_threshold: Number(c.reset_threshold) } : {}),
       ...(target ? { target } : {}),
       ...(hold ? { for_s: hold } : {}),
+      ...(catalogMetric(subject, c)?.window ? { window_s: Number(c.window_s) > 0 ? Math.round(Number(c.window_s)) : catalogMetric(subject, c)!.window } : {}),
     }
   }
   return { logic: tree.logic, items: tree.items.map((i) => (isTreeGroup(i) ? { logic: i.logic, items: i.items.map(cond) } : cond(i))) }
@@ -220,6 +278,9 @@ export function conditionTreePayload(subject: TreeSubject, tree: ConditionTree):
 export function starterTree(subject: TreeSubject): ConditionTree {
   if (subject === 'service_check') return { logic: 'AND', items: [newCondition('service_check', 'service_response_ms'), newCondition('service_check', 'host_cpu_pct', 'server')] }
   if (subject === 'device') return { logic: 'AND', items: [newCondition('device', 'cpu'), newCondition('device', 'memory')] }
+  if (subject === 'apm_service') return { logic: 'AND', items: [newCondition('apm_service', 'apm_latency_p95'), newCondition('apm_service', 'apm_error_rate')] }
+  if (subject === 'virtualization') return { logic: 'AND', items: [newCondition('virtualization', 'vm_datastore_pct'), newCondition('virtualization', 'vm_alarm')] }
+  if (subject === 'appliance') return { logic: 'OR', items: [newCondition('appliance', 'appliance_disk_pct'), newCondition('appliance', 'appliance_backup_failed')] }
   return { logic: 'AND', items: [newCondition('server', 'host_cpu_pct'), newCondition('server', 'host_memory_pct')] }
 }
 

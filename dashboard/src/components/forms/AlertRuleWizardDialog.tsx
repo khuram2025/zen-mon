@@ -53,6 +53,7 @@ import { AlertWizardFooter, isExplicitWizardSave } from './AlertWizardFooter'
 import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 import { NetflowConditionFields, NetflowDryRun, NetflowScopeFields } from './NetflowAlertFields'
 import { ConditionTreeBuilder, ServerConditionTree } from './ServerConditionTree'
+import { CombinedReplay } from './CombinedReplay'
 import { conditionTreePayload, starterTree, treeLabel, treeProblem, type ConditionTree, type TreeSubject } from './conditionTree'
 import {
   defaultNetflowForm,
@@ -387,9 +388,17 @@ function interfaceRoleApplies(conds: Cond[]): boolean {
   return conds.length > 0 && conds.every((c) => INTERFACE_METRICS.has(c.metric))
 }
 
+/** Editor sources that can hold a combined rule through /alert-rules, and their rule subject. */
+const COMBINED_SOURCES: Record<string, TreeSubject> = {
+  device: 'device', service: 'service_check', apm: 'apm_service', virtualization: 'virtualization', appliance: 'appliance',
+}
+const SUBJECT_SOURCE: Record<string, RuleSource> = {
+  service_check: 'service', apm_service: 'apm', virtualization: 'virtualization', appliance: 'appliance', server: 'server',
+}
+
 function ruleToState(rule: any): WizardState {
   const source =
-    rule.metric === 'combined' ? (rule.subject_type === 'service_check' ? 'service' : 'device')
+    rule.metric === 'combined' ? (SUBJECT_SOURCE[rule.subject_type] || 'device')
       : isNetflowMetric(rule.metric) ? 'netflow' : rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
       ? 'trap'
       : String(rule.metric || '').startsWith('apm_')
@@ -482,7 +491,7 @@ function ruleToState(rule: any): WizardState {
     ...templateState(rule.effective_templates || rule),
     nf: isNetflowMetric(rule.metric) ? formFromRule(rule) : defaultNetflowForm(),
     // A combined server rule (self-contained, like the fields above).
-    condition_tree: ['server', 'device', 'service'].includes(source) && rule.condition_tree && Array.isArray(rule.condition_tree.items)
+    condition_tree: (source === 'server' || source in COMBINED_SOURCES) && rule.condition_tree && Array.isArray(rule.condition_tree.items)
       ? rule.condition_tree : null,
   }
 }
@@ -627,8 +636,7 @@ export function AlertRuleWizardDialog({
   const familySource = !s.condition_tree && (['gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(s.source)
     || (s.source === 'service' && !!first0 && first0.metric !== 'service_status'))
   // A combined device or service-check rule (rule_conditions subject); servers keep their own block.
-  const combinedSubject: TreeSubject | null = s.condition_tree
-    ? (s.source === 'device' ? 'device' : s.source === 'service' ? 'service_check' : null) : null
+  const combinedSubject: TreeSubject | null = s.condition_tree ? COMBINED_SOURCES[s.source] ?? null : null
   // Which timer fields this rule's evaluator honours; the others are hidden or explained.
   const timers = ruleTimers({ metric: first0?.metric, conditions: s.source === 'device' ? s.conditions : null })
   // Events that never recover on their own: traps, syslog, Device Tracker events (they expire) and route changes.
@@ -823,18 +831,23 @@ export function AlertRuleWizardDialog({
    * and for a new rule the percent defaults (clear 5 points below the limit after 900 s, plan step 2.2).
    */
   const buildPayload = (st: WizardState) => {
-    if (st.condition_tree && (st.source === 'device' || st.source === 'service')) {
+    if (st.condition_tree && COMBINED_SOURCES[st.source]) {
       // A combined rule: the tree is the condition; the flat columns say 'combined' (migrate-212).
-      const subject: TreeSubject = st.source === 'device' ? 'device' : 'service_check'
+      const subject = COMBINED_SOURCES[st.source]
       const base = stateToPayload(st, tplDefaults)
+      const noDevice = { device_id: null, group_id: null, device_type: null, location: null, profile_id: null }
+      const noCheck = { service_check_id: null, service_check_group_id: null }
       return {
         ...base, metric: 'combined', operator: '>', threshold: 0, conditions: null, trigger_on: 'any',
         condition_tree: conditionTreePayload(subject, st.condition_tree), subject_type: subject,
-        target: null, if_role: null, trap_oid: null, notify_while_flapping: false,
+        // target: the APM service or the virtualisation source the rule watches (empty = every one).
+        target: subject === 'apm_service' || subject === 'virtualization' ? st.target.trim() || null : null,
+        if_role: null, trap_oid: null, notify_while_flapping: false,
         min_duration: st.min_duration, clear_duration: st.clear_duration,
-        ...(subject === 'device'
-          ? { service_check_id: null, service_check_group_id: null }
-          : { device_id: null, group_id: null, device_type: null, location: null, profile_id: null }),
+        ...(subject === 'device' ? noCheck
+          : subject === 'service_check' ? noDevice
+          : subject === 'virtualization' ? { ...noCheck, group_id: null, device_type: null, location: null, profile_id: null }
+          : { ...noCheck, ...noDevice, scope_tag: null }),
       }
     }
     const draft = !isEdit && st.source === 'device' ? { ...st, ...withNewPercentDefaults(st.conditions, st.clear_duration) } : st
@@ -1391,20 +1404,37 @@ export function AlertRuleWizardDialog({
                   <ConditionTreeBuilder subject={combinedSubject} tree={s.condition_tree}
                     onChange={(tree) => setS((st) => ({ ...st, condition_tree: tree }))} />
                 )}
-                {(s.source === 'device' || s.source === 'service') && !s.condition_tree && !isEdit && (
+                {s.condition_tree && (combinedSubject || isServer) && (
+                  <CombinedReplay disabled={!!treeProblem(combinedSubject || 'server', s.condition_tree)} body={() => {
+                    const subject = combinedSubject || 'server'
+                    const p: any = subject === 'server' ? serverRulePayload(s) : buildPayload(s)
+                    return {
+                      subject_type: subject, condition_tree: p.condition_tree, min_duration: p.min_duration ?? 0,
+                      clear_duration: p.clear_duration ?? null, server_id: p.server_id ?? null, device_id: p.device_id ?? null,
+                      group_id: p.group_id ?? null, device_type: p.device_type ?? null, location: p.location ?? null,
+                      scope_tag: p.scope_tag ?? null, profile_id: p.profile_id ?? null, service_check_id: p.service_check_id ?? null,
+                      service_check_group_id: p.service_check_group_id ?? null, target: p.target ?? null,
+                    }
+                  }} />
+                )}
+                {COMBINED_SOURCES[s.source] && !s.condition_tree && !isEdit && (
                   <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border p-3">
                     <Button type="button" variant="outline" size="sm"
                       onClick={() => setS((st) => ({
-                        ...st, condition_tree: starterTree(st.source === 'device' ? 'device' : 'service_check'), trigger_on: 'any',
+                        ...st, condition_tree: starterTree(COMBINED_SOURCES[st.source]), trigger_on: 'any',
                         // Placeholder single condition so the hold and clear fields read as a level rule.
                         conditions: st.source === 'device' ? [{ metric: 'cpu', operator: '>', threshold: 85, reset_threshold: null }] : st.conditions,
                         min_duration: st.min_duration || 300, reset_mode: 'auto', recovery_alert: true }))}>
                       <Plus className="h-3.5 w-3.5" /> Combine conditions
                     </Button>
                     <span className="text-xs text-muted">
-                      {s.source === 'device'
-                        ? 'Combine status, latency, CPU, memory and SNMP with conditions on the device\u2019s server, in one rule.'
-                        : 'Combine the check\u2019s status, response time and certificate with its device or server, in one rule.'}
+                      {({
+                        device: 'Combine status, latency, CPU, memory, SNMP and recent traps, syslog errors or configuration changes with conditions on the device\u2019s server, in one rule.',
+                        service: 'Combine the check\u2019s status, response time and certificate with its device or server, in one rule.',
+                        apm: 'Combine latency, error rate, throughput and Apdex of a service in one rule.',
+                        virtualization: 'Combine host, datastore and platform alarm conditions with the source\u2019s device, in one rule.',
+                        appliance: 'Combine the appliance\u2019s disk, databases, backups, updates, licence, clock, deliveries and sensors in one rule.',
+                      } as Record<string, string>)[s.source]}
                     </span>
                   </div>
                 )}
@@ -1638,7 +1668,7 @@ export function AlertRuleWizardDialog({
                   )
                 })()}
 
-                {s.source === 'apm' && (
+                {s.source === 'apm' && !s.condition_tree && (
                   <div className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
                     <div className={cn('grid flex-1 gap-2', apmEvent ? 'grid-cols-1' : 'grid-cols-3')}>
                       <FormField label="Trigger / metric">

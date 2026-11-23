@@ -28,6 +28,9 @@ FRESH_INTERVALS = 3
 MIN_FRESH_S = 180
 DEVICE_METRICS = set(rc.DEVICE_METRICS)
 CHECK_METRICS = set(rc.SERVICE_CHECK_METRICS)
+EVENT_METRICS = {"trap_count", "syslog_count", "config_changes"}
+# Syslog severities counted as errors: emergency .. error.
+SYSLOG_ERROR_MAX = 3
 
 
 # ── Assets ───────────────────────────────────────────────────────────────────
@@ -134,6 +137,7 @@ async def device_readings(db: AsyncSession, devices: dict[str, Device], conditio
     if keys:
         since = datetime.fromtimestamp(now - 3 * 3600, timezone.utc)
         snmp = await asyncio.to_thread(_latest_snmp, list(devices), keys, since)
+    events = await event_counts(db, list(devices), [c for c in conditions if c["metric"] in EVENT_METRICS], now=now)
     poll = {}
     if any(c["metric"] == "snmp_unreachable" for c in conditions):
         rows = (await db.execute(text(
@@ -159,6 +163,8 @@ async def device_readings(db: AsyncSession, devices: dict[str, Device], conditio
                 sample = snmp.get((did, metric))
                 if sample and math.isfinite(sample[0]) and now - sample[1] < _fresh(dev, dev.poll_interval):
                     value = sample[0]
+            elif metric in EVENT_METRICS:
+                value = float(events.get(cid, {}).get(did, 0))
             elif metric == "snmp_unreachable":
                 state = poll.get(did)
                 if state is None or not dev.snmp:
@@ -305,3 +311,108 @@ async def save_state(db: AsyncSession, rule_id, key: str, state: HoldState, at: 
         "clear_since = EXCLUDED.clear_since, leaf_since = EXCLUDED.leaf_since, updated_at = EXCLUDED.updated_at"),
         {"rid": str(rule_id), "k": key, "b": state.breach_since, "c": state.clear_since,
          "l": json.dumps(state.leaf_since or {}), "at": at})
+
+
+
+# ── Events in a window (phase 3) ─────────────────────────────────────────────
+
+def _trap_counts(device_ids: list[str], prefix: str, since: datetime) -> dict[str, int]:
+    from app.core.database import get_clickhouse_client
+    rows = get_clickhouse_client().query(
+        """SELECT toString(device_id), count() FROM zenplus.snmp_traps
+           WHERE timestamp >= %(since)s AND toString(device_id) IN %(ids)s
+             AND (%(p)s = '' OR startsWith(trap_oid, %(p)s))
+           GROUP BY device_id""",
+        parameters={"since": since, "ids": device_ids, "p": prefix}).result_rows
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+async def event_counts(db: AsyncSession, device_ids: list[str], conditions: list[dict], *,
+                       now: float) -> dict[str, dict[str, int]]:
+    """{condition id: {device: events in the condition's window}}: traps (an
+    OID prefix as target), syslog messages of severity error or worse (text
+    the message contains as target), configuration changes (a new normalised
+    configuration of the same type)."""
+    import asyncio
+    out: dict[str, dict[str, int]] = {}
+    for c in conditions:
+        window = int(c.get("window_s") or rc.DEVICE_METRICS[c["metric"]].window_s)
+        since = datetime.fromtimestamp(now - window, timezone.utc)
+        target = (c.get("target") or "").strip()
+        if c["metric"] == "trap_count":
+            out[c["id"]] = await asyncio.to_thread(_trap_counts, device_ids, target, since)
+        elif c["metric"] == "syslog_count":
+            rows = (await db.execute(text(
+                "SELECT device_id::text, count(*) FROM network_events"
+                " WHERE device_id::text = ANY(CAST(:ids AS text[])) AND received_at >= :since"
+                " AND severity <= :sev AND (:q = '' OR message ILIKE '%' || :q || '%') GROUP BY 1"),
+                {"ids": device_ids, "since": since, "sev": SYSLOG_ERROR_MAX, "q": target})).all()
+            out[c["id"]] = {r[0]: int(r[1]) for r in rows}
+        else:
+            rows = (await db.execute(text(
+                """SELECT device_id::text, count(*) FROM (
+                       SELECT device_id, captured_at, COALESCE(norm_hash, content_hash) AS h,
+                              LAG(COALESCE(norm_hash, content_hash)) OVER (
+                                  PARTITION BY device_id, config_type ORDER BY captured_at) AS prev
+                         FROM device_configs
+                        WHERE device_id::text = ANY(CAST(:ids AS text[]))
+                          AND captured_at >= CAST(:since AS timestamptz) - interval '30 days') x
+                    WHERE captured_at >= CAST(:since AS timestamptz) AND prev IS NOT NULL AND prev <> h GROUP BY 1"""),
+                {"ids": device_ids, "since": since})).all()
+            out[c["id"]] = {r[0]: int(r[1]) for r in rows}
+    return out
+
+
+# ── APM services, virtualisation sources, the appliance (phase 3) ────────────
+
+APM_WINDOW_S = 300
+
+
+async def apm_readings(conditions: list[dict]) -> tuple[dict[str, dict[str, rc.LeafReading]], set[str]]:
+    """({service: {condition id: LeafReading}}, services with traffic). A
+    service without requests in the window has no reading (unknown)."""
+    import asyncio
+    from app.services.apm_alert_service import _service_fleet
+    fleet = await asyncio.to_thread(_service_fleet, APM_WINDOW_S)
+    out = {svc: {c["id"]: rc.LeafReading({"": values.get(c["metric"])}, asset=svc) for c in conditions}
+           for svc, values in fleet.items()}
+    return out, set(fleet)
+
+
+def virtualization_readings(connector: dict, conditions: list[dict], now: datetime) -> dict[str, rc.LeafReading]:
+    """One connector's conditions: per host / datastore / alarm; a stale
+    snapshot reads as unknown (virtualization_alert_service.readings_for)."""
+    from app.services import virtualization_alert_service as vas
+    out: dict[str, rc.LeafReading] = {}
+    current = vas.snapshot_current(connector, now)
+    for c in conditions:
+        if not current:
+            out[c["id"]] = rc.LeafReading(known=False, asset=vas.source_label(connector))
+            continue
+        target = (c.get("target") or "").strip()
+        values, details = {}, {}
+        for r in vas.readings_for(c["metric"], connector, now, {}):
+            dim = r.dimension or r.key
+            if target and target not in (dim, r.resource):
+                continue
+            values[dim] = r.value
+            details[dim] = r.alarm if c["metric"] == "vm_alarm" else (r.resource or dim)
+        out[c["id"]] = rc.LeafReading(values, details=details, asset=vas.source_label(connector))
+    return out
+
+
+async def appliance_readings(db: AsyncSession, conditions: list[dict], now: float) -> dict[str, rc.LeafReading]:
+    """The appliance's own health per condition (appliance_alert_service sources);
+    a source that failed this pass reads as unknown."""
+    from app.services import appliance_alert_service as aas
+    got = await aas.collect(db, {c["metric"] for c in conditions}, now, aas.Sources())
+    out: dict[str, rc.LeafReading] = {}
+    for c in conditions:
+        readings = got.get(c["metric"])
+        if readings is None:
+            out[c["id"]] = rc.LeafReading(known=False, asset="ZenPlus appliance")
+            continue
+        values = {r.dimension or "": r.value for r in readings}
+        details = {r.dimension or "": r.label for r in readings if r.label}
+        out[c["id"]] = rc.LeafReading(values, details=details, asset="ZenPlus appliance")
+    return out
