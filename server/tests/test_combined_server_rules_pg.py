@@ -23,7 +23,8 @@ MEM = {"metric": "host_memory_pct", "operator": ">", "threshold": 90}
 
 @pytest.fixture
 def world(pg_db, monkeypatch):
-    pg_db.execute("DELETE FROM alerts; DELETE FROM alert_rules; DELETE FROM service_metric_alert_state")
+    pg_db.execute("DELETE FROM alerts; DELETE FROM alert_rules; DELETE FROM service_metric_alert_state;"
+                  " DELETE FROM combined_rule_state")
     server = str(pg_db.scalar(
         "INSERT INTO servers (display_name, hostname, collection_mode, status, os_type)"
         " VALUES ('synthetic-a', 'srv-synthetic-a', 'agent', 'healthy', 'linux') RETURNING id"))
@@ -118,8 +119,7 @@ async def test_breach_hold_counts_passes(world):
     assert incidents(w) == []
     await tick(w, T0 + 120, host_cpu_pct=95, host_memory_pct=95)
     assert [s for _, s, _ in incidents(w)] == ["active"]
-    # A dip restarts the hold for the next episode.
-    hold = w.db.scalar("SELECT count(*) FROM service_metric_alert_state WHERE asset_key LIKE '%#tree'")
+    hold = w.db.scalar("SELECT count(*) FROM combined_rule_state WHERE subject_key = 'server:' || $1", w.server)
     assert hold == 1
 
 

@@ -52,7 +52,8 @@ import { toast } from '@/components/ui/Toast'
 import { AlertWizardFooter, isExplicitWizardSave } from './AlertWizardFooter'
 import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 import { NetflowConditionFields, NetflowDryRun, NetflowScopeFields } from './NetflowAlertFields'
-import { ServerConditionTree } from './ServerConditionTree'
+import { ConditionTreeBuilder, ServerConditionTree } from './ServerConditionTree'
+import { conditionTreePayload, starterTree, treeLabel, treeProblem, type ConditionTree, type TreeSubject } from './conditionTree'
 import {
   defaultNetflowForm,
   describeScopeDraft,
@@ -167,8 +168,9 @@ type WizardState = {
   recovery_sms_template: string
   /** NetFlow rules (source 'netflow'): condition, parameters and FlowFilter scope. */
   nf: NetflowRuleForm
-  /** Server rules: two or more conditions joined by AND/OR (migrate-211). null = one condition. */
-  condition_tree: ServerTree | null
+  /** Combined rules (server, device, service check): two or more conditions joined by AND/OR (migrate-211/212).
+   *  null = one condition. */
+  condition_tree: ServerTree | ConditionTree | null
 }
 
 const STEPS = [
@@ -387,7 +389,8 @@ function interfaceRoleApplies(conds: Cond[]): boolean {
 
 function ruleToState(rule: any): WizardState {
   const source =
-    isNetflowMetric(rule.metric) ? 'netflow' : rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
+    rule.metric === 'combined' ? (rule.subject_type === 'service_check' ? 'service' : 'device')
+      : isNetflowMetric(rule.metric) ? 'netflow' : rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
       ? 'trap'
       : String(rule.metric || '').startsWith('apm_')
       ? 'apm'
@@ -479,7 +482,8 @@ function ruleToState(rule: any): WizardState {
     ...templateState(rule.effective_templates || rule),
     nf: isNetflowMetric(rule.metric) ? formFromRule(rule) : defaultNetflowForm(),
     // A combined server rule (self-contained, like the fields above).
-    condition_tree: source === 'server' && rule.condition_tree && Array.isArray(rule.condition_tree.items) ? rule.condition_tree : null,
+    condition_tree: ['server', 'device', 'service'].includes(source) && rule.condition_tree && Array.isArray(rule.condition_tree.items)
+      ? rule.condition_tree : null,
   }
 }
 
@@ -620,8 +624,11 @@ export function AlertRuleWizardDialog({
   const flapRule = s.source === 'device' && s.conditions.some((c) => c.metric === 'if_flaps')
   const eventAutoClear = rebootRule || speedRule
   // Families with one condition and their own inputs (alertRuleCatalog / AlertRuleFamilyFields).
-  const familySource = ['gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(s.source)
-    || (s.source === 'service' && !!first0 && first0.metric !== 'service_status')
+  const familySource = !s.condition_tree && (['gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(s.source)
+    || (s.source === 'service' && !!first0 && first0.metric !== 'service_status'))
+  // A combined device or service-check rule (rule_conditions subject); servers keep their own block.
+  const combinedSubject: TreeSubject | null = s.condition_tree
+    ? (s.source === 'device' ? 'device' : s.source === 'service' ? 'service_check' : null) : null
   // Which timer fields this rule's evaluator honours; the others are hidden or explained.
   const timers = ruleTimers({ metric: first0?.metric, conditions: s.source === 'device' ? s.conditions : null })
   // Events that never recover on their own: traps, syslog, Device Tracker events (they expire) and route changes.
@@ -816,6 +823,20 @@ export function AlertRuleWizardDialog({
    * and for a new rule the percent defaults (clear 5 points below the limit after 900 s, plan step 2.2).
    */
   const buildPayload = (st: WizardState) => {
+    if (st.condition_tree && (st.source === 'device' || st.source === 'service')) {
+      // A combined rule: the tree is the condition; the flat columns say 'combined' (migrate-212).
+      const subject: TreeSubject = st.source === 'device' ? 'device' : 'service_check'
+      const base = stateToPayload(st, tplDefaults)
+      return {
+        ...base, metric: 'combined', operator: '>', threshold: 0, conditions: null, trigger_on: 'any',
+        condition_tree: conditionTreePayload(subject, st.condition_tree), subject_type: subject,
+        target: null, if_role: null, trap_oid: null, notify_while_flapping: false,
+        min_duration: st.min_duration, clear_duration: st.clear_duration,
+        ...(subject === 'device'
+          ? { service_check_id: null, service_check_group_id: null }
+          : { device_id: null, group_id: null, device_type: null, location: null, profile_id: null }),
+      }
+    }
     const draft = !isEdit && st.source === 'device' ? { ...st, ...withNewPercentDefaults(st.conditions, st.clear_duration) } : st
     return familyPayload(draft, stateToPayload(draft, tplDefaults))
   }
@@ -981,6 +1002,8 @@ export function AlertRuleWizardDialog({
     const condText =
       s.source === 'netflow'
         ? summarizeNetflowForm(s.nf)
+        : combinedSubject && s.condition_tree
+        ? treeLabel(combinedSubject, s.condition_tree)
         : s.source === 'server'
         ? serverRuleCondition({ ...first, target: s.target, min_duration: s.min_duration, condition_tree: s.condition_tree })
         : s.source === 'trap'
@@ -1048,6 +1071,14 @@ export function AlertRuleWizardDialog({
       if (scopeProblem) {
         toast.error('Scope incomplete', scopeProblem)
         setStep('scope')
+        return
+      }
+    }
+    if (combinedSubject && s.condition_tree) {
+      const problem = treeProblem(combinedSubject, s.condition_tree)
+      if (problem) {
+        toast.error('Conditions incomplete', problem)
+        setStep('trigger')
         return
       }
     }
@@ -1312,7 +1343,7 @@ export function AlertRuleWizardDialog({
                   ))}
                 </div>
 
-                {s.source === 'service' && (
+                {s.source === 'service' && !s.condition_tree && (
                   <FormField label="Watch" hint="A status change pages on the check's confirmed state; certificate and response-time rules compare a reading with a limit.">
                     <Select value={first0?.metric === 'service_status' ? 'service_status' : first0?.metric}
                       onValueChange={(v) => setS({ ...s, trigger_on: v === 'service_status' ? 'down' : 'any', device_id: '', scope_tag: '',
@@ -1328,7 +1359,7 @@ export function AlertRuleWizardDialog({
                 {familySource && (
                   <FamilyConditionFields s={s} newRule={!isEdit} hideWatch={s.source === 'service'} onChange={(patch) => setS((st) => ({ ...st, ...patch }))} />
                 )}
-                {s.source === 'service' && first0?.metric === 'service_status' && (
+                {s.source === 'service' && !s.condition_tree && first0?.metric === 'service_status' && (
                   <FormField label="Trigger on status" hint="Fires when a service check transitions to this state">
                     <Select value={s.trigger_on} onValueChange={(v: any) => setS({ ...s, trigger_on: v })}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1356,7 +1387,28 @@ export function AlertRuleWizardDialog({
                     </select><Input aria-label="Syslog severity threshold" type="number" min={0} max={7} value={s.conditions[0].threshold} onChange={e => setS({ ...s, conditions: [{ ...s.conditions[0], threshold: Number(e.target.value) }] })} /></div>
                   </FormField>
                 </div>}
-                {s.source === 'device' && (
+                {combinedSubject && s.condition_tree && (
+                  <ConditionTreeBuilder subject={combinedSubject} tree={s.condition_tree}
+                    onChange={(tree) => setS((st) => ({ ...st, condition_tree: tree }))} />
+                )}
+                {(s.source === 'device' || s.source === 'service') && !s.condition_tree && !isEdit && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border p-3">
+                    <Button type="button" variant="outline" size="sm"
+                      onClick={() => setS((st) => ({
+                        ...st, condition_tree: starterTree(st.source === 'device' ? 'device' : 'service_check'), trigger_on: 'any',
+                        // Placeholder single condition so the hold and clear fields read as a level rule.
+                        conditions: st.source === 'device' ? [{ metric: 'cpu', operator: '>', threshold: 85, reset_threshold: null }] : st.conditions,
+                        min_duration: st.min_duration || 300, reset_mode: 'auto', recovery_alert: true }))}>
+                      <Plus className="h-3.5 w-3.5" /> Combine conditions
+                    </Button>
+                    <span className="text-xs text-muted">
+                      {s.source === 'device'
+                        ? 'Combine status, latency, CPU, memory and SNMP with conditions on the device\u2019s server, in one rule.'
+                        : 'Combine the check\u2019s status, response time and certificate with its device or server, in one rule.'}
+                    </span>
+                  </div>
+                )}
+                {s.source === 'device' && !s.condition_tree && (
                   <>
                     {s.conditions.some((c) => c.metric === 'ping_status') && (
                       <FormField label="Status transition" hint="For ping/status rules — when device changes state">
@@ -1687,7 +1739,7 @@ export function AlertRuleWizardDialog({
                     </FormField>
                   )
                 })()}
-                {!eventAutoClear && (usesMetricLifecycle(s) || serverKind === 'pct' || serverKind === 'auto' || (familySource && timers.clear === 'clear')) && (() => {
+                {!eventAutoClear && (usesMetricLifecycle(s) || !!combinedSubject || serverKind === 'pct' || serverKind === 'auto' || (familySource && timers.clear === 'clear')) && (() => {
                   // A new percent rule clears after 900 s unless set (plan step 2.2); existing rules keep the 300 s default.
                   const freshPercent = !isEdit && s.conditions.some((c) => newPercentClearLevel({ ...c, reset_threshold: null }) != null)
                   const fallback = freshPercent ? NEW_PERCENT_CLEAR_S : DEFAULT_CLEAR_SECONDS

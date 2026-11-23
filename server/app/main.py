@@ -284,6 +284,9 @@ def create_app() -> FastAPI:
         # Monitoring gaps: SNMP unanswered while ping answers, agent heartbeats without metrics.
         from app.services.monitoring_gap_alert_service import monitoring_gap_alert_evaluator_loop
         app.state.monitoring_gap_alert_evaluator = asyncio.create_task(monitoring_gap_alert_evaluator_loop())
+        # Combined (multi-condition) rules on devices and service checks.
+        from app.services.combined_rule_service import combined_rule_evaluator_loop
+        app.state.combined_rule_evaluator = asyncio.create_task(combined_rule_evaluator_loop())
         # SLA escalation tiers: page the next on-call level for alerts that stay
         # active and unacknowledged past each level's deadline.
         from app.services.alert_escalation_service import escalation_sweeper_loop
@@ -384,7 +387,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "service_metric_alert_evaluator", "monitoring_gap_alert_evaluator", "virtualization_alert_evaluator", "appliance_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "appliance_health_sampler", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
+        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "service_metric_alert_evaluator", "monitoring_gap_alert_evaluator", "combined_rule_evaluator", "virtualization_alert_evaluator", "appliance_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "appliance_health_sampler", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

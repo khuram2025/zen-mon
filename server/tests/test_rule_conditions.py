@@ -51,8 +51,10 @@ def test_validate_refuses(items, message):
 
 
 def test_validate_refuses_other_subjects_and_bad_logic():
-    with pytest.raises(rc.TreeError, match="server rules"):
+    with pytest.raises(rc.TreeError, match="cannot be combined for a device"):
         rc.validate_tree({"logic": "AND", "items": [CPU, MEM]}, subject="device")
+    with pytest.raises(rc.TreeError, match="not available"):
+        rc.validate_tree({"logic": "AND", "items": [CPU, MEM]}, subject="netflow")
     with pytest.raises(rc.TreeError, match="Logic"):
         rc.validate_tree({"logic": "XOR", "items": [CPU, MEM]})
 
@@ -178,3 +180,63 @@ def test_labels_and_descriptions():
     assert words.count("(limit") == 2 and " and " in words
     meta = rc.matched_metadata(t, res)
     assert [m["id"] for m in meta] == ["c1", "c2"] and meta[0]["value"] == 94
+
+
+# ── Phase 2: subjects, linked assets, per-condition holds ───────────────────
+
+DOWN = {"metric": "service_down"}
+SLOW = {"metric": "service_response_ms", "operator": ">", "threshold": 2000}
+
+
+def test_service_check_and_device_trees_with_linked_conditions():
+    t = rc.validate_tree({"logic": "AND", "items": [SLOW, {**CPU, "on": "server"}]}, "service_check")
+    assert rc.leaves(t)[1]["on"] == "server"
+    rc.validate_tree({"logic": "AND", "items": [{"metric": "device_down"}, {**CPU, "on": "server"}]}, "device")
+    rc.validate_tree({"logic": "OR", "items": [CPU, {"metric": "device_down", "on": "device"}]}, "server")
+    with pytest.raises(rc.TreeError, match="cannot read a linked server"):
+        rc.validate_tree({"logic": "AND", "items": [CPU, {**MEM, "on": "server"}]}, "server")
+    with pytest.raises(rc.TreeError, match="linked device"):
+        rc.validate_tree({"logic": "AND", "items": [SLOW, {**CPU, "on": "device"}]}, "service_check")
+    with pytest.raises(rc.TreeError, match="on the server itself"):
+        rc.validate_tree({"logic": "AND", "items": [{"metric": "device_down", "on": "device"},
+                                                    {"metric": "cpu", "operator": ">", "threshold": 9, "on": "device"}]},
+                         "server")
+    with pytest.raises(rc.TreeError, match="below a number of days"):
+        rc.validate_tree({"logic": "AND", "items": [DOWN, {"metric": "service_tls_days", "operator": ">", "threshold": 7}]},
+                         "service_check")
+
+
+def test_mirror_stores_combined_for_non_server_subjects():
+    t = rc.validate_tree({"logic": "OR", "items": [DOWN, SLOW]}, "service_check")
+    m = rc.mirror(t, "service_check")
+    assert (m["metric"], m["conditions"], m["condition_logic"]) == ("combined", None, "OR")
+    s = rc.mirror(rc.validate_tree({"logic": "AND", "items": [{"metric": "device_down", "on": "device"}, CPU]}), "server")
+    assert s["metric"] == "host_cpu_pct" and [c["metric"] for c in s["conditions"]] == ["host_cpu_pct"]
+
+
+def test_per_condition_hold():
+    t = rc.validate_tree({"logic": "AND", "items": [{**SLOW, "for_s": 300}, DOWN]}, "service_check")
+    r = {"c1": R(**{"": 2500}), "c2": R(**{"": 1.0})}
+    first = rc.judge(t, r, active=False, now=1000.0)
+    assert first.state is False and first.leaves["c1"].waiting and first.leaf_since == {"c1": 1000.0}
+    later = rc.judge(t, r, active=False, leaf_since=first.leaf_since, now=1300.0)
+    assert later.state is True and later.leaf_since == {"c1": 1000.0}
+    # The condition stops being true: its hold restarts.
+    dip = rc.judge(t, {"c1": R(**{"": 100}), "c2": R(**{"": 1.0})}, active=False, leaf_since=later.leaf_since, now=1360.0)
+    assert dip.leaf_since == {}
+    # An open incident is judged on clear levels alone (response clears 10 % under the limit).
+    assert rc.judge(t, {"c1": R(**{"": 1900}), "c2": R(**{"": 1.0})}, active=True, now=1400.0).state is True
+    assert rc.judge(t, {"c1": R(**{"": 1700}), "c2": R(**{"": 1.0})}, active=True, now=1400.0).state is False
+    with pytest.raises(rc.TreeError, match="0 to 86400"):
+        rc.validate_tree({"logic": "AND", "items": [{**SLOW, "for_s": 90000}, DOWN]}, "service_check")
+
+
+def test_phase2_words():
+    t = rc.validate_tree({"logic": "AND", "items": [{**SLOW, "for_s": 300}, {**CPU, "on": "server"}]}, "service_check")
+    assert rc.tree_label(t) == "Response time above 2000 ms for 5 min and linked server: Host CPU above 90%"
+    res = rc.judge(t, {"c1": R(**{"": 2400}), "c2": rc.LeafReading({"": 95}, asset="web-01")}, active=False)
+    assert rc.describe(t, res, {"c2": rc.LeafReading({"": 95}, asset="web-01")}) == \
+        "Response time 2400 ms (limit 2000 ms) and linked server web-01 host CPU 95% (limit 90%)"
+    d = rc.validate_tree({"logic": "AND", "items": [{"metric": "device_down"},
+                                                    {"metric": "cpu", "operator": ">", "threshold": 85}]}, "device")
+    assert rc.tree_label(d) == "Device is down and CPU above 85%"

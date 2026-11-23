@@ -89,6 +89,31 @@ _SINGLE_CONDITION_SOURCES = (
 )
 
 
+_COMBINED_SCOPE = {
+    "device": ("device_id", "group_id", "device_type", "location", "scope_tag", "profile_id"),
+    "service_check": ("service_check_id", "service_check_group_id", "scope_tag"),
+}
+_SCOPE_FIELDS = ("device_id", "group_id", "device_type", "location", "profile_id", "if_role",
+                 "service_check_id", "service_check_group_id", "server_id")
+
+
+def _combined_or_422(tree, subject, rule: dict) -> dict:
+    """A combined rule's tree as stored; 422 for a subject, tree or scope
+    the combined evaluator cannot take."""
+    if not subject:
+        raise HTTPException(status_code=422, detail="A combined rule needs a subject_type")
+    try:
+        tree = rc.validate_tree(tree, subject)
+    except rc.TreeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    allowed = set(_COMBINED_SCOPE[subject])
+    stray = [f for f in _SCOPE_FIELDS if rule.get(f) and f not in allowed]
+    if stray:
+        raise HTTPException(status_code=422,
+                            detail=f"A combined {rc.SUBJECT_NOUNS[subject]} rule cannot be scoped by {stray[0]}")
+    return tree
+
+
 def _refuse_ignored_conditions(conditions, existing=None) -> None:
     if not conditions or len(conditions) < 2:
         return
@@ -444,6 +469,9 @@ _NETFLOW_METRICS = nfa.METRIC_PATTERN
 # expires, a service check's average response time (ms) and days until an F5
 # inventory certificate expires. One condition per rule.
 _SERVICE_LEVEL_METRICS = "service_tls_days|service_response_ms|f5_cert_days"
+# Subjects of combined rules saved through /alert-rules (server rules go
+# through /host-alert-rules), see combined_rule_service.
+_COMBINED_SUBJECTS = "device|service_check"
 # ZenPlus appliance health (migrate-198 CHECK), evaluated by
 # appliance_alert_service. Not tied to a device or server: one incident per
 # rule + dimension (channel for delivery failures, sensor for sensor offline,
@@ -514,7 +542,7 @@ class AlertRuleCreate(BaseModel):
     description: Optional[str] = None
     enabled: bool = True
 
-    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap|syslog)$")
+    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap|syslog|combined)$")
     operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
     threshold: float = Field(..., allow_inf_nan=False)
 
@@ -530,6 +558,10 @@ class AlertRuleCreate(BaseModel):
     # above are kept in sync with conditions[0] for backward compatibility.
     conditions: Optional[list[ConditionItem]] = None
     condition_logic: str = Field(default="AND", pattern="^(AND|OR)$")
+    # Combined rules (migrate-211/212, rule_conditions): the conditions as a
+    # tree and what the rule watches. Server rules use /host-alert-rules.
+    condition_tree: Optional[dict] = None
+    subject_type: Optional[str] = Field(default=None, pattern=f"^({_COMBINED_SUBJECTS})$")
 
     trigger_on: str = Field(default="any", pattern="^(any|down|up|degraded)$")
     recovery_alert: bool = False
@@ -590,7 +622,7 @@ class AlertRuleUpdate(BaseModel):
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
-    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap|syslog)$")
+    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap|syslog|combined)$")
     operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
     threshold: Optional[float] = Field(None, allow_inf_nan=False)
     trap_oid: Optional[str] = None
@@ -598,6 +630,8 @@ class AlertRuleUpdate(BaseModel):
 
     conditions: Optional[list[ConditionItem]] = None
     condition_logic: Optional[str] = Field(None, pattern="^(AND|OR)$")
+    condition_tree: Optional[dict] = None
+    subject_type: Optional[str] = Field(None, pattern=f"^({_COMBINED_SUBJECTS})$")
 
     trigger_on: Optional[str] = Field(None, pattern="^(any|down|up|degraded)$")
     recovery_alert: Optional[bool] = None
@@ -715,7 +749,7 @@ _RULE_COLUMNS = (
     "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
-    "conditions, condition_logic, condition_tree, trap_oid, target, flow_scope, flow_params, "
+    "conditions, condition_logic, condition_tree, subject_type, trap_oid, target, flow_scope, flow_params, "
     "server_id, created_at, updated_at, created_by, "
     "profile_id, pack_key, pack_accepted, if_role"
 )
@@ -772,6 +806,7 @@ def _row_to_dict(row) -> dict:
         "condition_logic": getattr(row, "condition_logic", None) or "AND",
         # Combined server rules (migrate-211): the conditions as a tree.
         "condition_tree": rc.parse(getattr(row, "condition_tree", None)),
+        "subject_type": getattr(row, "subject_type", None),
         "profile_id": str(row.profile_id) if getattr(row, "profile_id", None) else None,
         "pack_key": getattr(row, "pack_key", None),
         "pack_accepted": getattr(row, "pack_accepted", None),
@@ -1347,20 +1382,29 @@ async def create_alert_rule(
         operator = conditions[0]["operator"]
         threshold = conditions[0]["threshold"]
 
-    _validate_network_contract(metric, conditions)
-    _validate_service_metric({**data.model_dump(), "metric": metric, "operator": operator,
-                              "threshold": threshold, "conditions": conditions})
-    await _validate_virtualization_metric(db, {**data.model_dump(), "metric": metric, "operator": operator,
-                                               "threshold": threshold, "conditions": conditions})
-    _validate_monitoring_gap({**data.model_dump(), "metric": metric, "operator": operator,
-                              "threshold": threshold, "conditions": conditions})
-    await _validate_template_scope(db, metric, conditions, data.profile_id, data.if_role)
-    await _validate_template_states(db, conditions or [dict(metric=metric, operator=operator, threshold=threshold)])
-    if metric == 'syslog':
-        _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
-    _validate_apm_event({**data.model_dump(), 'metric': metric, 'operator': operator,
-                         'threshold': threshold, 'conditions': conditions})
-    await _validate_apm_event_target(db, {**data.model_dump(), 'metric': metric})
+    tree = None
+    if data.condition_tree is not None or metric == rc.COMBINED_METRIC:
+        if data.condition_tree is None:
+            raise HTTPException(status_code=422, detail="A combined rule needs its conditions (condition_tree)")
+        tree = _combined_or_422(data.condition_tree, data.subject_type, data.model_dump())
+        m = rc.mirror(tree, data.subject_type)
+        metric, operator, threshold, conditions = m["metric"], m["operator"], m["threshold"], None
+        data.condition_logic = m["condition_logic"]
+    else:
+        _validate_network_contract(metric, conditions)
+        _validate_service_metric({**data.model_dump(), "metric": metric, "operator": operator,
+                                  "threshold": threshold, "conditions": conditions})
+        await _validate_virtualization_metric(db, {**data.model_dump(), "metric": metric, "operator": operator,
+                                                   "threshold": threshold, "conditions": conditions})
+        _validate_monitoring_gap({**data.model_dump(), "metric": metric, "operator": operator,
+                                  "threshold": threshold, "conditions": conditions})
+        await _validate_template_scope(db, metric, conditions, data.profile_id, data.if_role)
+        await _validate_template_states(db, conditions or [dict(metric=metric, operator=operator, threshold=threshold)])
+        if metric == 'syslog':
+            _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
+        _validate_apm_event({**data.model_dump(), 'metric': metric, 'operator': operator,
+                             'threshold': threshold, 'conditions': conditions})
+        await _validate_apm_event_target(db, {**data.model_dump(), 'metric': metric})
     await _validate_template_placeholders(
         db, {f: getattr(data, f, None) for f in _TEMPLATE_FIELDS},
         {**data.model_dump(), "metric": metric, "operator": operator, "threshold": threshold,
@@ -1389,6 +1433,8 @@ async def create_alert_rule(
         "threshold": threshold,
         "conditions": json.dumps(conditions) if conditions else None,
         "condition_logic": data.condition_logic or "AND",
+        "condition_tree": json.dumps(tree) if tree else None,
+        "subject_type": data.subject_type if tree else None,
         "trap_oid": (data.trap_oid or None),
         "target": (data.target or None),
         "flow_scope": json.dumps(flow_scope) if flow_scope is not None else None,
@@ -1434,14 +1480,15 @@ async def create_alert_rule(
     }
     for key in cleared:
         params[key] = None
-    if cleared:
+    if cleared or tree:
         params["trigger_on"] = "any"
 
     result = await db.execute(
         text(
             "INSERT INTO alert_rules "
             "(name, description, enabled, metric, operator, threshold, duration, "
-            "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
+            "conditions, condition_logic, condition_tree, subject_type, "
+            "trap_oid, target, flow_scope, flow_params, "
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
             "device_type, location, scope_tag, trigger_on, recovery_alert, "
@@ -1453,7 +1500,8 @@ async def create_alert_rule(
             "created_at, updated_at, created_by, profile_id, if_role) "
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
-            "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
+            "CAST(:conditions AS jsonb), :condition_logic, CAST(:condition_tree AS jsonb), :subject_type, "
+            ":trap_oid, :target, "
             "CAST(:flow_scope AS jsonb), CAST(:flow_params AS jsonb), "
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
@@ -1516,15 +1564,39 @@ async def update_alert_rule(
         raise HTTPException(status_code=404, detail="Alert rule not found")
     await rs.guard_rule_change(db, user, before, {**before, **fields})
 
+    # Combined rules (rule_conditions): the tree is the rule; the flat
+    # condition columns never change on their own.
+    combined = rc.parse(before.get("condition_tree")) is not None or fields.get("condition_tree") is not None
+    if combined:
+        if "condition_tree" in fields and fields["condition_tree"] is None:
+            raise HTTPException(status_code=422, detail="A combined rule stays combined; create a new rule "
+                                                        "for a single condition")
+        if any(k in fields for k in ("metric", "operator", "threshold", "conditions")) \
+                and fields.get("metric", rc.COMBINED_METRIC) != rc.COMBINED_METRIC:
+            raise HTTPException(status_code=422, detail="This rule combines conditions: change them through "
+                                                        "condition_tree")
+        for k in ("metric", "operator", "threshold", "conditions"):
+            fields.pop(k, None)
+        subject = fields.get("subject_type") or before.get("subject_type")
+        if before.get("subject_type") and subject != before.get("subject_type"):
+            raise HTTPException(status_code=422, detail="A combined rule keeps its subject")
+        if "condition_tree" in fields or any(k in fields for k in _SCOPE_FIELDS + ("scope_tag",)):
+            tree = _combined_or_422(fields.get("condition_tree") or rc.parse(before.get("condition_tree")),
+                                    subject, {**before, **fields})
+            m = rc.mirror(tree, subject)
+            fields.update(condition_tree=tree, subject_type=subject, metric=m["metric"],
+                          operator=m["operator"], threshold=m["threshold"], conditions=None,
+                          condition_logic=m["condition_logic"], trigger_on="any")
+
     # E1: keep flat metric/operator/threshold mirrored to conditions[0] when a
     # non-empty conditions array is supplied (empty array reverts to legacy).
-    if fields.get("conditions"):
+    if not combined and fields.get("conditions"):
         c0 = fields["conditions"][0]
         fields["metric"] = c0["metric"]
         fields["operator"] = c0["operator"]
         fields["threshold"] = c0["threshold"]
 
-    if any(k in fields for k in ('metric', 'operator', 'threshold', 'conditions')):
+    if not combined and any(k in fields for k in ('metric', 'operator', 'threshold', 'conditions')):
         current_rule = (await db.execute(text(
             'SELECT metric, operator, threshold, conditions FROM alert_rules WHERE id = :id'),
             {'id': rule_id})).mappings().first()
@@ -1532,16 +1604,17 @@ async def update_alert_rule(
             raise HTTPException(status_code=404, detail='Alert rule not found')
         fields = _merge_condition_update(current_rule, fields)
 
-    _validate_apm_event({**before, **fields})
-    await _validate_apm_event_target(db, {**before, **fields})
-    _validate_service_metric({**before, **fields})
-    await _validate_virtualization_metric(db, {**before, **fields})
-    _validate_monitoring_gap({**before, **fields})
-    if any(k in fields for k in ("profile_id", "if_role", "metric", "conditions")):
+    if not combined:
+        _validate_apm_event({**before, **fields})
+        await _validate_apm_event_target(db, {**before, **fields})
+        _validate_service_metric({**before, **fields})
+        await _validate_virtualization_metric(db, {**before, **fields})
+        _validate_monitoring_gap({**before, **fields})
+    if not combined and any(k in fields for k in ("profile_id", "if_role", "metric", "conditions")):
         merged = {**before, **fields}
         await _validate_template_scope(db, merged.get("metric"), _json_value(merged.get("conditions")),
                                        merged.get("profile_id"), merged.get("if_role"))
-    if any(k in fields for k in ("metric", "operator", "threshold", "conditions")):
+    if not combined and any(k in fields for k in ("metric", "operator", "threshold", "conditions")):
         merged = {**before, **fields}
         await _validate_template_states(db, _json_value(merged.get("conditions")) or [dict(
             metric=merged.get("metric"), operator=merged.get("operator"), threshold=merged.get("threshold"))])
@@ -1621,7 +1694,7 @@ async def update_alert_rule(
     params: dict = {"id": rule_id, "updated_at": datetime.now(timezone.utc)}
 
     # Special-case columns that need casts
-    _jsonb_cols = {"notify_channels", "schedule_days", "flow_scope", "flow_params"}
+    _jsonb_cols = {"notify_channels", "schedule_days", "flow_scope", "flow_params", "condition_tree"}
     _time_cols = {"schedule_start", "schedule_end"}
 
     for key, value in fields.items():

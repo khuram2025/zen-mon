@@ -1,6 +1,7 @@
 /**
- * The condition builder of a combined server rule (multi-condition rules phase 1, docs/multi-condition-rules.md):
- * conditions joined by All (AND) / Any (OR), with one level of groups.
+ * The condition builder of a combined rule (docs/multi-condition-rules.md): conditions joined by All (AND) / Any (OR),
+ * one level of groups, conditions on a linked asset and a per-condition hold. Used for server, device and
+ * service-check rules (conditionTree.ts).
  */
 import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
@@ -8,10 +9,10 @@ import { Input } from '@/components/ui/Input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { cn } from '@/lib/utils'
 import {
-  COMBINABLE_SERVER_METRICS, MAX_TREE_CONDITIONS, TREE_INSTANCE, isTreeGroup, newTreeCondition, serverMetric,
-  serverMetricKind, serverOperators, serverTreeLabel, treeConditions,
-  type ServerTree, type ServerTreeCondition, type ServerTreeGroup,
-} from './serverAlertRule'
+  MAX_TREE_CONDITIONS, SELF_LABEL, TREE_INSTANCE, TREE_LINKS, catalogMetric, conditionsFor, isTreeGroup, newCondition,
+  treeConditions, treeLabel,
+  type ConditionTree, type TreeCondition, type TreeGroup, type TreeSubject,
+} from './conditionTree'
 
 type Logic = 'AND' | 'OR'
 
@@ -28,32 +29,51 @@ function LogicSwitch({ value, onChange, label }: { value: Logic; onChange: (v: L
   )
 }
 
-function ConditionRow({ c, onChange, onRemove, canRemove }: {
-  c: ServerTreeCondition
-  onChange: (c: ServerTreeCondition) => void
+const FIELD = 'text-2xs font-medium uppercase tracking-wider text-muted'
+
+function ConditionRow({ subject, c, onChange, onRemove, canRemove }: {
+  subject: TreeSubject
+  c: TreeCondition
+  onChange: (c: TreeCondition) => void
   onRemove: () => void
   canRemove: boolean
 }) {
-  const kind = serverMetricKind(c.metric)
-  const spec = serverMetric(c.metric)
+  const spec = catalogMetric(subject, c)
+  const kind = spec?.kind ?? 'pct'
   const unit = spec?.unit?.trim()
   const instance = TREE_INSTANCE[c.metric]
-  const ops = serverOperators(c.metric)
+  const ops = spec?.operators || ['>', '>=', '<', '<=', '==', '!=']
+  const links = TREE_LINKS[subject]
+  const on = c.on && c.on !== 'self' ? c.on : 'self'
+  const metrics = conditionsFor(subject, on)
+  const holdMin = c.for_s ? Math.round(Number(c.for_s) / 60) : ''
   return (
     <div className="flex flex-wrap items-end gap-2 rounded-md border border-border/60 bg-surface p-2">
-      <label className="min-w-[200px] flex-1 space-y-1">
-        <span className="text-2xs font-medium uppercase tracking-wider text-muted">Watch</span>
-        <Select value={c.metric} onValueChange={(v) => onChange({ ...newTreeCondition(v), id: c.id })}>
+      {links.length > 0 && (
+        <label className="w-40 space-y-1">
+          <span className={FIELD}>Reads</span>
+          <Select value={on} onValueChange={(v) => onChange({ ...newCondition(subject, undefined, v), id: c.id })}>
+            <SelectTrigger aria-label="What the condition reads"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="self">{SELF_LABEL[subject]}</SelectItem>
+              {links.map((l) => <SelectItem key={l.on} value={l.on}>{l.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </label>
+      )}
+      <label className="min-w-[190px] flex-1 space-y-1">
+        <span className={FIELD}>Watch</span>
+        <Select value={c.metric} onValueChange={(v) => onChange({ ...newCondition(subject, v, on), id: c.id, for_s: c.for_s })}>
           <SelectTrigger aria-label="Condition metric"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {COMBINABLE_SERVER_METRICS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
+            {metrics.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
           </SelectContent>
         </Select>
       </label>
       {kind === 'pct' && (
         <>
           <label className="w-20 space-y-1">
-            <span className="text-2xs font-medium uppercase tracking-wider text-muted">Operator</span>
+            <span className={FIELD}>Operator</span>
             <Select value={c.operator} onValueChange={(v) => onChange({ ...c, operator: v })}>
               <SelectTrigger aria-label="Condition operator"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -61,39 +81,45 @@ function ConditionRow({ c, onChange, onRemove, canRemove }: {
               </SelectContent>
             </Select>
           </label>
-          <label className="w-28 space-y-1">
-            <span className="text-2xs font-medium uppercase tracking-wider text-muted">Limit{unit ? ` (${unit})` : ''}</span>
+          <label className="w-24 space-y-1">
+            <span className={FIELD}>Limit{unit ? ` (${unit})` : ''}</span>
             <Input type="number" step="any" min={spec?.min} max={spec?.max} aria-label="Condition limit" value={c.threshold}
               onChange={(e) => onChange({ ...c, threshold: Number(e.target.value) })} />
           </label>
-          <label className="w-28 space-y-1">
-            <span className="text-2xs font-medium uppercase tracking-wider text-muted">Clear at</span>
+          <label className="w-24 space-y-1">
+            <span className={FIELD}>Clear at</span>
             <Input type="number" step="any" aria-label="Condition clear level" placeholder="auto" value={c.reset_threshold ?? ''}
               onChange={(e) => onChange({ ...c, reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
           </label>
         </>
       )}
       {(kind === 'svc' || kind === 'proc') && (
-        <label className="min-w-[160px] flex-1 space-y-1">
-          <span className="text-2xs font-medium uppercase tracking-wider text-muted">{kind === 'svc' ? 'Service name' : 'Process name'}</span>
+        <label className="min-w-[150px] flex-1 space-y-1">
+          <span className={FIELD}>{kind === 'svc' ? 'Service name' : 'Process name'}</span>
           <Input value={c.target || ''} aria-label={kind === 'svc' ? 'Service name' : 'Process name'}
             placeholder={kind === 'svc' ? 'e.g. nginx' : 'e.g. nginx.exe'} onChange={(e) => onChange({ ...c, target: e.target.value })} />
         </label>
       )}
       {kind === 'auto' && (
-        <label className="min-w-[160px] flex-1 space-y-1">
-          <span className="text-2xs font-medium uppercase tracking-wider text-muted">Leave out (patterns)</span>
+        <label className="min-w-[150px] flex-1 space-y-1">
+          <span className={FIELD}>Leave out (patterns)</span>
           <Input value={c.target || ''} aria-label="Services to leave out" placeholder="gupdate*, edgeupdate*"
             onChange={(e) => onChange({ ...c, target: e.target.value })} />
         </label>
       )}
       {instance && (
-        <label className="w-36 space-y-1">
-          <span className="text-2xs font-medium uppercase tracking-wider text-muted">Only this {instance.split(' ')[0]}</span>
+        <label className="w-32 space-y-1">
+          <span className={FIELD}>Only this {instance.split(' ')[0]}</span>
           <Input value={c.target || ''} aria-label={`Only this ${instance}`} placeholder="any"
             onChange={(e) => onChange({ ...c, target: e.target.value })} />
         </label>
       )}
+      <label className="w-24 space-y-1">
+        <span className={FIELD}>For (min)</span>
+        <Input type="number" min={0} max={1440} step="any" aria-label="Condition hold in minutes" placeholder="0" value={holdMin}
+          title="This condition counts only after it has been true this long; empty = at once (the rule's own hold still applies)."
+          onChange={(e) => onChange({ ...c, for_s: e.target.value === '' ? null : Math.round(Number(e.target.value) * 60) })} />
+      </label>
       <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-muted hover:text-danger" disabled={!canRemove}
         onClick={onRemove} aria-label="Remove condition" title="Remove condition">
         <Trash2 className="h-4 w-4" />
@@ -102,17 +128,19 @@ function ConditionRow({ c, onChange, onRemove, canRemove }: {
   )
 }
 
-export function ServerConditionTree({ tree, onChange, onSingle }: {
-  tree: ServerTree
-  onChange: (tree: ServerTree) => void
-  /** Back to a single-condition rule (keeps the first condition). */
-  onSingle: () => void
+export function ConditionTreeBuilder({ subject, tree, onChange, onSingle }: {
+  subject: TreeSubject
+  tree: ConditionTree
+  onChange: (tree: ConditionTree) => void
+  /** Back to a single-condition rule (keeps the first condition); omitted where a rule cannot go back. */
+  onSingle?: () => void
 }) {
   const count = treeConditions(tree).length
   const full = count >= MAX_TREE_CONDITIONS
-  const setItem = (i: number, item: ServerTreeCondition | ServerTreeGroup) =>
+  const setItem = (i: number, item: TreeCondition | TreeGroup) =>
     onChange({ ...tree, items: tree.items.map((x, idx) => (idx === i ? item : x)) })
   const removeItem = (i: number) => onChange({ ...tree, items: tree.items.filter((_, idx) => idx !== i) })
+  const fresh = () => newCondition(subject)
 
   return (
     <div className="space-y-3 rounded-lg border border-border/60 bg-surface2/30 p-3">
@@ -134,43 +162,48 @@ export function ServerConditionTree({ tree, onChange, onSingle }: {
             </div>
           </div>
           {item.items.map((c, j) => (
-            <ConditionRow key={j} c={c} canRemove={item.items.length > 2}
+            <ConditionRow key={j} subject={subject} c={c} canRemove={item.items.length > 2}
               onChange={(next) => setItem(i, { ...item, items: item.items.map((x, k) => (k === j ? next : x)) })}
               onRemove={() => setItem(i, { ...item, items: item.items.filter((_, k) => k !== j) })} />
           ))}
           <Button type="button" variant="ghost" size="sm" disabled={full}
-            onClick={() => setItem(i, { ...item, items: [...item.items, newTreeCondition('host_memory_pct')] })}>
+            onClick={() => setItem(i, { ...item, items: [...item.items, fresh()] })}>
             <Plus className="h-3.5 w-3.5" /> Add to group
           </Button>
         </div>
       ) : (
-        <ConditionRow key={i} c={item} canRemove={count > 2}
+        <ConditionRow key={i} subject={subject} c={item} canRemove={count > 2}
           onChange={(next) => setItem(i, next)} onRemove={() => removeItem(i)} />
       ))}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" variant="outline" size="sm" disabled={full}
-          onClick={() => onChange({ ...tree, items: [...tree.items, newTreeCondition('host_memory_pct')] })}>
+          onClick={() => onChange({ ...tree, items: [...tree.items, fresh()] })}>
           <Plus className="h-3.5 w-3.5" /> Add condition
         </Button>
         <Button type="button" variant="outline" size="sm" disabled={count + 2 > MAX_TREE_CONDITIONS}
           onClick={() => onChange({ ...tree, items: [...tree.items, {
-            logic: tree.logic === 'AND' ? 'OR' : 'AND',
-            items: [newTreeCondition('host_cpu_pct'), newTreeCondition('host_memory_pct')],
+            logic: tree.logic === 'AND' ? 'OR' : 'AND', items: [fresh(), fresh()],
           }] })}>
           <Plus className="h-3.5 w-3.5" /> Add group
         </Button>
-        <Button type="button" variant="ghost" size="sm" onClick={onSingle}>Use one condition</Button>
+        {onSingle && <Button type="button" variant="ghost" size="sm" onClick={onSingle}>Use one condition</Button>}
       </div>
 
       <p className="text-xs text-text2">
-        <span className="font-medium">Reads:</span> {serverTreeLabel(tree)}
+        <span className="font-medium">Reads:</span> {treeLabel(subject, tree)}
       </p>
       <p className="text-xs text-muted">
-        One alert per server, naming the conditions that matched. Each condition is judged on its current reading once a
-        minute; an unknown reading never raises or clears the alert. Restart, shutdown and agent offline need a rule of
-        their own. Instance conditions (filesystem, disk, network interface) without a name are true when any instance is.
+        One alert per {subject === 'service_check' ? 'service check' : subject}, naming the conditions that matched. Each
+        condition is judged on its current reading once a minute; an unknown reading (or a linked asset that is missing or
+        in maintenance) never raises or clears the alert. &ldquo;For&rdquo; makes one condition wait before it counts.
+        {subject === 'server' && ' Restart, shutdown and agent offline need a rule of their own.'}
       </p>
     </div>
   )
+}
+
+/** The builder for a server rule (kept for the server editor's imports). */
+export function ServerConditionTree(props: { tree: ConditionTree; onChange: (tree: ConditionTree) => void; onSingle: () => void }) {
+  return <ConditionTreeBuilder subject="server" {...props} />
 }

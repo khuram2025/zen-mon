@@ -12,6 +12,7 @@
  * No React and no '@/' imports, so scripts/test-alert-rule-catalog.mjs runs it on its own.
  */
 import { serverMetricLabel, serverRuleCondition } from './serverAlertRule'
+import { treeLabel } from './conditionTree'
 import { APM_EVENT_TRIGGERS } from './apmEventTriggers'
 
 // ── Families (the wizard's sources) ──────────────────────────────────────────
@@ -44,8 +45,10 @@ const VIRT_METRICS = new Set(['vm_host_disconnected', 'vm_datastore_pct', 'vm_al
 const GAP_METRICS = new Set(['snmp_unreachable', 'agent_no_metrics'])
 
 /** The family a stored rule belongs to (the wizard source it opens on; the rule list's filter). */
-export function ruleSource(r: { metric?: string | null; service_check_id?: string | null; service_check_group_id?: string | null }): RuleSource {
+export function ruleSource(r: { metric?: string | null; service_check_id?: string | null; service_check_group_id?: string | null; subject_type?: string | null }): RuleSource {
   const m = String(r.metric || '')
+  // A combined rule (migrate-212) belongs to its subject's family.
+  if (m === 'combined') return r.subject_type === 'service_check' ? 'service' : r.subject_type === 'server' ? 'server' : 'device'
   if (m.startsWith('netflow_')) return 'netflow'
   if (m === 'syslog') return 'syslog'
   if (m === 'trap') return 'trap'
@@ -587,6 +590,9 @@ export function triggerSummary(r: any, idx?: TemplateIndex): { title: string; de
   const first = conds[0]
   if (source === 'trap') return { title: 'SNMP trap', detail: r.trap_oid ? `Trap OID ${r.trap_oid}` : 'Any trap' }
   if (source === 'server') return { title: r.condition_tree ? 'Combined conditions' : serverMetricLabel(r.metric), detail: serverRuleCondition(r) }
+  if (r.metric === 'combined' && r.condition_tree && Array.isArray(r.condition_tree.items)) {
+    return { title: 'Combined conditions', detail: treeLabel(r.subject_type === 'service_check' ? 'service_check' : 'device', r.condition_tree) }
+  }
   if (source === 'apm') {
     const ev = APM_EVENT_TRIGGERS.find((x) => x.value === r.metric)
     if (ev) return { title: ev.label, detail: r.metric === 'apm_synthetic_down' ? 'After configured retries' : 'Multi-window error-budget burn' }

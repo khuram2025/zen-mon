@@ -29,7 +29,7 @@ rules keep firing exactly as before.
 | Phase | Scope | State |
 | --- | --- | --- |
 | 1 | Engine, migrate-211, server rules (levels, services, processes, automatic services, forecasts), editor builder, refusal of ignored extra conditions on APM/RUM, Device Tracker, NetPath and service status | Built (this PR) |
-| 2 | Service-check subject (status, response time, certificate, workflow step), linked-asset conditions (device ↔ server, check → device/server, optional `service_checks.server_id`), status + SNMP in one device rule, per-condition hold | Planned |
+| 2 | Device and service-check subjects (`combined_rule_service`, migrate-212), linked-asset conditions (device ↔ server, check → device/server, optional `service_checks.server_id`), status + SNMP in one device rule, per-condition hold. A failed workflow step is not a separate condition: it already makes the check down or degraded | Built |
 | 3 | APM, virtualisation, appliance; event-in-window conditions; combined rules in rule packs; "test against the last 7 days" | Planned |
 
 ## Decisions (recommended answers taken for phase 1)
@@ -37,10 +37,10 @@ rules keep firing exactly as before.
 | # | Question | Phase 1 |
 | --- | --- | --- |
 | D1 | Incident per subject or per instance | Per subject (server), listing matched instances |
-| D2 | Rule-wide hold or per-condition hold | Rule-wide; per-condition in phase 2 |
+| D2 | Rule-wide hold or per-condition hold | Rule-wide (phase 1) plus an optional per-condition hold (phase 2) |
 | D3 | Nesting depth | One level of groups |
 | D4 | Server CPU/memory averaging in combined rules | No average: each pass judges the newest fresh sample; holds count passes |
-| D5 | Linked asset in maintenance / out of scope | Unknown, never a breach (phase 2) |
+| D5 | Linked asset in maintenance / out of scope | Unknown, never a breach |
 | D6 | OR rule, a second branch becomes true while open | Recorded on the incident (`matched`, `condition_states`), no new page |
 | D7 | Sources that accept and ignore extra conditions | Refused at the API; stored rules stay editable |
-| D8 | Optional server link on service checks | Phase 2 |
+| D8 | Optional server link on service checks | `service_checks.server_id` (API), else the server linked to the check's device |
