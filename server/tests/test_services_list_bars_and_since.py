@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from app.core import database
 from app.services import service_availability, service_check_service as svc, service_maintenance
 
@@ -55,7 +57,8 @@ def test_finished_days_are_scanned_once_and_today_every_time(monkeypatch):
     assert len(scans) == 3 and scans[-1][0] == today_start   # only today again
     rows = first["checks"]["a"]
     assert len(rows) == 30 and [r["date"] for r in rows] == sorted(r["date"] for r in rows)
-    assert all(r["uptime_pct"] == 100 for r in rows)
+    # summarize() divides float seconds: 100 % can come back as 99.99999999999999.
+    assert [r["uptime_pct"] for r in rows] == pytest.approx([100.0] * 30)
     assert [r["date"] for r in second["checks"]["a"]] == [r["date"] for r in rows]
     svc.clear_fleet_cache()
 
