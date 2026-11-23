@@ -259,6 +259,29 @@ assert.equal(C.ruleSource({ metric: 'combined', subject_type: 'device' }), 'devi
 assert.deepEqual(C.triggerSummary(dev), { title: 'Combined conditions', detail: 'CPU usage > 85% and Memory usage > 85%' })
 assert(wiz.includes("metric: 'combined', operator: '>', threshold: 0, conditions: null"), 'a combined device/service rule saves as metric combined with its tree')
 
+// Phase 3: APM services, virtualisation sources, the appliance, events in a window, replay.
+const ev = { logic: 'AND', items: [
+  { metric: 'trap_count', operator: '>=', threshold: 1, target: '1.3.6.1.6.3.1.1.5.3' },
+  { metric: 'device_down', operator: '>', threshold: 0 },
+] }
+assert.equal(T.treeLabel('device', ev), 'Traps received >= 1 in 5 min (1.3.6.1.6.3.1.1.5.3) and Device is down')
+assert.deepEqual(T.conditionTreePayload('device', ev).items[0],
+  { metric: 'trap_count', operator: '>=', threshold: 1, target: '1.3.6.1.6.3.1.1.5.3', window_s: 300 })
+assert.match(T.treeProblem('device', { logic: 'AND', items: [{ ...ev.items[0], window_s: 30 }, ev.items[1]] }), /1 minute to 24 hours/)
+assert.equal(T.treeProblem('apm_service', T.starterTree('apm_service')), null)
+assert.equal(T.treeProblem('virtualization', T.starterTree('virtualization')), null)
+assert.equal(T.treeProblem('appliance', T.starterTree('appliance')), null)
+assert.equal(T.treeLabel('appliance', T.starterTree('appliance')), 'Data disk used > 85% or Scheduled backup failed or overdue')
+assert.deepEqual(T.TREE_LINKS.virtualization.map((l) => l.on), ['device'])
+assert.equal(T.TREE_LINKS.appliance.length, 0)
+for (const [subject, source] of [['apm_service', 'apm'], ['virtualization', 'virtualization'], ['appliance', 'appliance']]) {
+  assert.equal(C.ruleSource({ metric: 'combined', subject_type: subject }), source)
+  assert.equal(W.ruleToState({ ...dev, subject_type: subject, condition_tree: T.starterTree(subject) }).source, source)
+}
+assert(wiz.includes("subject === 'apm_service' || subject === 'virtualization' ? st.target.trim() || null : null"),
+  'APM and virtualisation combined rules keep their service / source scope')
+assert(wiz.includes('<CombinedReplay'), 'the builder offers a replay over stored history')
+
 // Wording: no third-party product names in the wizard.
 assert(!/solarwinds/i.test(wiz), 'the wizard names no other product')
 assert(wiz.includes("disabled={isEdit && (src === 'server') !== editingServerRule}"), 'a saved rule cannot switch between server and device families')

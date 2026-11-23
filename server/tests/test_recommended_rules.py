@@ -20,8 +20,14 @@ def test_catalogue_keys_are_unique_and_complete():
         assert it["family"] in ("service", "device", "server", "trap", "syslog")
     from app.api.v1.alert_rules import _CONDITION_METRICS
     import re
+    from app.services import rule_conditions as rc
     for it in rec.CATALOGUE:
-        if it["family"] not in ("server", "trap", "syslog"):
+        if it.get("condition_tree"):
+            # A combined recommendation: a valid tree for its subject, stored as the API stores it.
+            tree = rc.validate_tree(it["condition_tree"], it["subject_type"])
+            assert it["metric"] == rc.mirror(tree, it["subject_type"])["metric"]
+            assert not rec.covers(_rule(metric=it["metric"], trigger_on="any"), it)
+        elif it["family"] not in ("server", "trap", "syslog"):
             assert re.fullmatch(f"({_CONDITION_METRICS})", it["metric"]), it["metric"]
 
 

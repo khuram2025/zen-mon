@@ -41,7 +41,7 @@ function ConditionRow({ subject, c, onChange, onRemove, canRemove }: {
   const spec = catalogMetric(subject, c)
   const kind = spec?.kind ?? 'pct'
   const unit = spec?.unit?.trim()
-  const instance = TREE_INSTANCE[c.metric]
+  const instance = TREE_INSTANCE[c.metric] || spec?.instance
   const ops = spec?.operators || ['>', '>=', '<', '<=', '==', '!=']
   const links = TREE_LINKS[subject]
   const on = c.on && c.on !== 'self' ? c.on : 'self'
@@ -112,6 +112,21 @@ function ConditionRow({ subject, c, onChange, onRemove, canRemove }: {
           <span className={FIELD}>Only this {instance.split(' ')[0]}</span>
           <Input value={c.target || ''} aria-label={`Only this ${instance}`} placeholder="any"
             onChange={(e) => onChange({ ...c, target: e.target.value })} />
+        </label>
+      )}
+      {spec?.filter && (
+        <label className="min-w-[150px] flex-1 space-y-1">
+          <span className={FIELD}>{spec.filter}</span>
+          <Input value={c.target || ''} aria-label={spec.filter} placeholder="any"
+            onChange={(e) => onChange({ ...c, target: e.target.value })} />
+        </label>
+      )}
+      {spec?.window && (
+        <label className="w-24 space-y-1">
+          <span className={FIELD}>In (min)</span>
+          <Input type="number" min={1} max={1440} step="any" aria-label="Event window in minutes"
+            value={c.window_s ? Math.round(Number(c.window_s) / 60) : Math.round(spec.window / 60)}
+            onChange={(e) => onChange({ ...c, window_s: e.target.value === '' ? null : Math.round(Number(e.target.value) * 60) })} />
         </label>
       )}
       <label className="w-24 space-y-1">
@@ -194,7 +209,7 @@ export function ConditionTreeBuilder({ subject, tree, onChange, onSingle }: {
         <span className="font-medium">Reads:</span> {treeLabel(subject, tree)}
       </p>
       <p className="text-xs text-muted">
-        One alert per {subject === 'service_check' ? 'service check' : subject}, naming the conditions that matched. Each
+        One alert per {({ service_check: 'service check', apm_service: 'APM service', virtualization: 'virtualisation source', appliance: 'appliance' } as Record<string, string>)[subject] || subject}, naming the conditions that matched. Each
         condition is judged on its current reading once a minute; an unknown reading (or a linked asset that is missing or
         in maintenance) never raises or clears the alert. &ldquo;For&rdquo; makes one condition wait before it counts.
         {subject === 'server' && ' Restart, shutdown and agent offline need a rule of their own.'}

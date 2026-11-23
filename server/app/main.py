@@ -21,6 +21,7 @@ from app.api.v1 import virtualization
 from app.api.v1 import notification_grouping as notification_grouping_api
 from app.api.v1 import alert_storm as alert_storm_api
 from app.api.v1 import alert_rule_recommendations as alert_rule_recommendations_api
+from app.api.v1 import combined_rules as combined_rules_api
 from app.api.v1 import alert_event_expiry as alert_event_expiry_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
@@ -131,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router, prefix="/api/v1", dependencies=[policy("settings", allow_public=True)])
     # Before alert_rules: "/alert-rules/recommended" must not reach "/alert-rules/{rule_id}".
     app.include_router(alert_rule_recommendations_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(combined_rules_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(host_alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_engine.router, prefix="/api/v1")

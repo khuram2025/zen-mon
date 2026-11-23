@@ -55,7 +55,8 @@ async def accept_recommended(key: str, data: AcceptBody, db: AsyncSession = Depe
             severity=item["severity"], min_duration=item["min_duration"],
             clear_duration=item["clear_duration"], recovery_alert=item["recovery_alert"],
             cooldown=item["cooldown"], notify_channels=data.notify_channels,
-            priority=item["priority"], escalation_policy_id=data.escalation_policy_id)
+            priority=item["priority"], escalation_policy_id=data.escalation_policy_id,
+            condition_tree=item.get("condition_tree"))
         created = await host_api.create_host_rule(body, db, user)
     else:
         from app.api.v1 import alert_rules as rules_api
@@ -66,7 +67,8 @@ async def accept_recommended(key: str, data: AcceptBody, db: AsyncSession = Depe
             recovery_alert=item["recovery_alert"], severity=item["severity"],
             notify_channels=data.notify_channels, cooldown=item["cooldown"],
             min_duration=item["min_duration"], clear_duration=item["clear_duration"],
-            priority=item["priority"], escalation_policy_id=data.escalation_policy_id)
+            priority=item["priority"], escalation_policy_id=data.escalation_policy_id,
+            condition_tree=item.get("condition_tree"), subject_type=item.get("subject_type"))
         created = await rules_api.create_alert_rule(body, db, user)
     rule = created.get("data", created) if isinstance(created, dict) else created
     rule_id = rule.get("id") if isinstance(rule, dict) else None

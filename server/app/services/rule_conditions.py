@@ -56,6 +56,7 @@ class MetricSpec:
     target: str = "none"       # "none" | "optional" (instance) | "required" | "exclude"
     noun: str = ""             # words for a level ("Device CPU"); a state's phrase ("is down")
     low_only: bool = False     # fires below a limit (days until full, certificate days)
+    window_s: int = 0          # an event count: the default window it counts over (seconds)
 
 
 SERVER_METRICS: dict[str, MetricSpec] = {
@@ -79,6 +80,11 @@ DEVICE_METRICS: dict[str, MetricSpec] = {
     "cpu": MetricSpec("level", None, noun="CPU"),
     "memory": MetricSpec("level", None, noun="Memory"),
     "snmp_unreachable": MetricSpec("level", None, noun="SNMP unanswered (minutes)"),
+    # Events counted over a window (phase 3): ``target`` filters them (a trap
+    # OID prefix, text a syslog message contains); ``window_s`` sets the window.
+    "trap_count": MetricSpec("level", None, "filter", noun="Traps", window_s=300),
+    "syslog_count": MetricSpec("level", None, "filter", noun="Syslog errors", window_s=300),
+    "config_changes": MetricSpec("level", None, noun="Configuration changes", window_s=3600),
 }
 SERVICE_CHECK_METRICS: dict[str, MetricSpec] = {
     "service_down": MetricSpec("state", None, noun="is down"),
@@ -86,18 +92,48 @@ SERVICE_CHECK_METRICS: dict[str, MetricSpec] = {
     "service_response_ms": MetricSpec("level", None, noun="Response time"),
     "service_tls_days": MetricSpec("level", None, noun="Certificate days left", low_only=True),
 }
+APM_METRICS: dict[str, MetricSpec] = {
+    "apm_latency_p95": MetricSpec("level", None),
+    "apm_latency_p99": MetricSpec("level", None),
+    "apm_error_rate": MetricSpec("level", None),
+    "apm_throughput": MetricSpec("level", None),
+    "apm_apdex": MetricSpec("level", None),
+}
+VIRTUALIZATION_METRICS: dict[str, MetricSpec] = {
+    "vm_host_disconnected": MetricSpec("state", "host", "optional", noun="disconnected"),
+    "vm_datastore_pct": MetricSpec("level", "datastore", "optional", noun="Datastore usage"),
+    # 2 = red / critical, 1 = yellow / warning (virtualization_alert_service).
+    "vm_alarm": MetricSpec("level", "alarm", noun="Platform alarm level"),
+}
+APPLIANCE_METRICS: dict[str, MetricSpec] = {
+    "appliance_disk_pct": MetricSpec("level", None),
+    "appliance_db_down": MetricSpec("state", "database"),
+    "appliance_backup_failed": MetricSpec("state", None),
+    "appliance_update_failed": MetricSpec("state", None),
+    "appliance_license_days": MetricSpec("level", None, low_only=True),
+    "appliance_time_unsynced": MetricSpec("state", None),
+    "appliance_delivery_failures": MetricSpec("level", "channel"),
+    "appliance_sensor_offline": MetricSpec("state", "sensor"),
+}
 SUBJECT_METRICS: dict[str, dict[str, MetricSpec]] = {
     "server": SERVER_METRICS,
     "device": DEVICE_METRICS,
     "service_check": SERVICE_CHECK_METRICS,
+    "apm_service": APM_METRICS,
+    "virtualization": VIRTUALIZATION_METRICS,
+    "appliance": APPLIANCE_METRICS,
 }
 # What a condition may read besides its subject: {subject: {on: linked subject}}.
 LINKS: dict[str, dict[str, str]] = {
     "server": {"device": "device"},
     "service_check": {"device": "device", "server": "server"},
     "device": {"server": "server"},
+    "virtualization": {"device": "device"},
 }
-SUBJECT_NOUNS = {"server": "server", "device": "device", "service_check": "service check"}
+SUBJECT_NOUNS = {"server": "server", "device": "device", "service_check": "service check",
+                 "apm_service": "APM service", "virtualization": "virtualisation source",
+                 "appliance": "appliance"}
+MIN_WINDOW_S, MAX_WINDOW_S = 60, 86400
 MAX_FOR_S = 86400
 # Events and availability stand alone: a restart is not "true for a while",
 # and Down / agent offline have their own signal and paging rules.
@@ -191,6 +227,11 @@ def _normalize_leaf(c: dict, used: set[str], n: int, subject: str) -> dict:
         raise TreeError(f"Name the {spec.instance} this condition watches")
     if spec.target == "none":
         target = None
+    if spec.window_s:
+        window = c.get("window_s")
+        window = spec.window_s if window in (None, "", 0) else _number(window, "The window")
+        if not MIN_WINDOW_S <= window <= MAX_WINDOW_S:
+            raise TreeError("An event window is 60 to 86400 seconds")
     out = {"id": cid, "metric": metric}
     if on != "self":
         out["on"] = on
@@ -218,6 +259,8 @@ def _normalize_leaf(c: dict, used: set[str], n: int, subject: str) -> dict:
             out["reset_threshold"] = reset
     if target:
         out["target"] = target[:255]
+    if spec.window_s:
+        out["window_s"] = int(window)
     for_s = c.get("for_s")
     if for_s not in (None, "", 0):
         for_s = _number(for_s, "A condition's hold")
@@ -297,13 +340,25 @@ def check_subject_rules(tree: dict, subject: str) -> None:
 # ── Words ────────────────────────────────────────────────────────────────────
 
 _UNITS = {"rtt": " ms", "service_response_ms": " ms", "service_tls_days": " days",
-          "snmp_unreachable": " min", "cpu": "%", "memory": "%"}
+          "snmp_unreachable": " min", "cpu": "%", "memory": "%",
+          "trap_count": "", "syslog_count": "", "config_changes": "",
+          "vm_datastore_pct": "%", "vm_alarm": ""}
+_EVENT_WORDS = {"trap_count": "trap", "syslog_count": "syslog error", "config_changes": "configuration change"}
+# Instances whose reading carries a display label in LeafReading.details.
+_LABELLED = {"appliance_delivery_failures", "appliance_db_down", "appliance_sensor_offline", "vm_alarm",
+             "vm_host_disconnected", "vm_datastore_pct"}
 _STATE_WORDS = {
     # metric: (subject noun, bad words, good words)
     "device_down": ("Device", "is down", "is up"),
     "device_degraded": ("Device", "is degraded", "is not degraded"),
     "service_down": ("Check", "is down", "is up"),
     "service_degraded": ("Check", "is degraded", "is not degraded"),
+    "vm_host_disconnected": ("Host", "disconnected", "connected"),
+    "appliance_db_down": ("Database", "not answering", "answering"),
+    "appliance_backup_failed": ("Scheduled backup", "failed or overdue", "succeeded"),
+    "appliance_update_failed": ("Update", "failed", "succeeded"),
+    "appliance_time_unsynced": ("Appliance clock", "not synchronised", "synchronised"),
+    "appliance_sensor_offline": ("Remote sensor", "offline", "online"),
 }
 _ON_WORDS = {"device": "linked device", "server": "linked server"}
 
@@ -340,8 +395,15 @@ def leaf_label(c: dict) -> str:
         noun, bad, _ = _STATE_WORDS[metric]
         if on in _ON_WORDS:
             return f"{_ON_WORDS[on].capitalize()} {bad}{hold}"
-        return f"{noun} {bad}{hold}"
+        return f"{noun}{f' {target}' if target else ''} {bad}{hold}"
     spec = any_spec(metric)
+    if metric in _EVENT_WORDS:
+        n = _number_text(metric, c.get("threshold"))
+        what = _EVENT_WORDS[metric] + ("s" if n != "1" else "")
+        flt = f" matching {target}" if target else ""
+        label = (f"{_op_words(c.get('operator')).capitalize()} {n} {what}{flt}"
+                 f" in {_duration(c.get('window_s') or spec.window_s)}")
+        return f"{prefix}{label}{hold}"
     if metric in _UNITS:
         label = f"{spec.noun if spec else metric} {_op_words(c.get('operator'))} {_number_text(metric, c.get('threshold'))}"
     else:
@@ -577,13 +639,22 @@ def _reading_words(c: dict, instance: str, value: Optional[float], reading: Opti
     if metric in _STATE_WORDS:
         noun, bad, good = _STATE_WORDS[metric]
         subject = who.strip() or noun.lower()
+        if instance:
+            label = (reading.details.get(instance) if reading else "") or ""
+            # A labelled instance ("Metrics database") names itself.
+            subject = (f"{who.strip()} {label}".strip() if label else f"{subject} {instance}")
         if value is None:
             return f"{subject}: no current reading"
         return f"{subject} {bad if value else good}"
+    if metric == "vm_alarm":
+        title = (reading.details.get(instance) if reading else "") or instance or "alarm"
+        level = {2: "critical", 1: "warning"}.get(int(value), "cleared") if value is not None else "unknown"
+        return f"{who}platform alarm {title} {level}"
     spec = any_spec(metric)
     noun = spec.noun if metric in _UNITS and spec else ap.metric_noun(metric)
     if instance:
-        noun = f"{noun} {instance}"
+        label = (reading.details.get(instance) if reading and metric in _LABELLED else "") or instance
+        noun = f"{noun} ({label})" if metric in _LABELLED else f"{noun} {label}"
     noun = f"{who}{noun[:1].lower() + noun[1:] if who else noun}"
     if value is None:
         return f"{noun}: no current reading"
@@ -591,6 +662,11 @@ def _reading_words(c: dict, instance: str, value: Optional[float], reading: Opti
     if metric == "host_fs_days_left" and (detail or not math.isfinite(value)):
         limit = ap.format_threshold(metric, c.get("threshold"), c.get("operator"))
         return f"{noun} {detail or 'not filling'}" + (f" (limit {limit})" if limit else "")
+    if metric in _EVENT_WORDS:
+        n = int(value)
+        return (f"{who}{n} {_EVENT_WORDS[metric]}{'s' if n != 1 else ''} in "
+                f"{_duration(c.get('window_s') or (spec.window_s if spec else 300))}"
+                f" (limit {_number_text(metric, c.get('threshold'))})")
     if metric in _UNITS:
         return f"{noun} {_number_text(metric, value)} (limit {_number_text(metric, c.get('threshold'))})"
     shown = ap.format_reading(metric, value, c.get("operator"), c.get("threshold"))

@@ -240,3 +240,30 @@ def test_phase2_words():
     d = rc.validate_tree({"logic": "AND", "items": [{"metric": "device_down"},
                                                     {"metric": "cpu", "operator": ">", "threshold": 85}]}, "device")
     assert rc.tree_label(d) == "Device is down and CPU above 85%"
+
+
+# ── Phase 3: APM, virtualisation, appliance, events in a window ─────────────
+
+def test_phase3_subjects_and_event_windows():
+    t = rc.validate_tree({"logic": "AND", "items": [
+        {"metric": "trap_count", "operator": ">=", "threshold": 1, "target": "1.3.6.1.6.3.1.1.5.3"},
+        {"metric": "config_changes", "operator": ">=", "threshold": 1}]}, "device")
+    assert [c.get("window_s") for c in rc.leaves(t)] == [300, 3600]          # defaults filled in
+    assert rc.tree_label(t) == ("At least 1 trap matching 1.3.6.1.6.3.1.1.5.3 in 5 min and at least 1 "
+                                "configuration change in 1 h")
+    with pytest.raises(rc.TreeError, match="60 to 86400"):
+        rc.validate_tree({"logic": "AND", "items": [{"metric": "trap_count", "operator": ">=", "threshold": 1,
+                                                     "window_s": 10}, {"metric": "device_down"}]}, "device")
+    rc.validate_tree({"logic": "AND", "items": [{"metric": "apm_latency_p95", "operator": ">", "threshold": 1},
+                                                {"metric": "apm_error_rate", "operator": ">", "threshold": 0.1}]},
+                     "apm_service")
+    v = rc.validate_tree({"logic": "AND", "items": [{"metric": "vm_datastore_pct", "operator": ">", "threshold": 90},
+                                                    {"metric": "device_down", "on": "device"}]}, "virtualization")
+    assert rc.mirror(v, "virtualization")["metric"] == "combined"
+    with pytest.raises(rc.TreeError, match="cannot read a linked device"):
+        rc.validate_tree({"logic": "AND", "items": [{"metric": "appliance_db_down"},
+                                                    {"metric": "device_down", "on": "device"}]}, "appliance")
+    with pytest.raises(rc.TreeError, match="below a number of days"):
+        rc.validate_tree({"logic": "AND", "items": [{"metric": "appliance_db_down"},
+                                                    {"metric": "appliance_license_days", "operator": ">", "threshold": 9}]},
+                         "appliance")

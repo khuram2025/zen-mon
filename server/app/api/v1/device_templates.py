@@ -703,7 +703,8 @@ async def accept_recommended_rule(profile_id: uuid.UUID, key: str, data: PackAcc
         name=f"{row['name']}: {item['name']}"[:255],
         description=(item.get("description") or "") + " Accepted from the template's recommended rules.",
         enabled=data.enabled, metric=f["metric"], operator=f["operator"], threshold=f["threshold"],
-        conditions=[rules_api.ConditionItem(**c) for c in f["conditions"]],
+        conditions=[rules_api.ConditionItem(**c) for c in f["conditions"]] or None,
+        condition_tree=f.get("condition_tree"), subject_type=f.get("subject_type"),
         min_duration=f["min_duration"], clear_duration=f["clear_duration"], severity=f["severity"],
         priority=f["priority"], if_role=f["if_role"], profile_id=profile_id, group_id=data.group_id,
         notify_channels=data.notify_channels, recovery_alert=True,
@@ -740,11 +741,16 @@ async def apply_recommended_change(profile_id: uuid.UUID, key: str, db: AsyncSes
     _, item, _ = await _pack_item(db, profile_id, key)
     rule_id = await _accepted_rule(item)
     f = rule_packs.rule_fields(item)
-    upd = rules_api.AlertRuleUpdate(
-        operator=f["operator"], threshold=f["threshold"],
-        conditions=[rules_api.ConditionItem(**c) for c in f["conditions"]],
-        min_duration=f["min_duration"], clear_duration=f["clear_duration"], severity=f["severity"],
-        priority=f["priority"], if_role=f["if_role"])
+    if f.get("condition_tree"):
+        upd = rules_api.AlertRuleUpdate(
+            condition_tree=f["condition_tree"], min_duration=f["min_duration"],
+            clear_duration=f["clear_duration"], severity=f["severity"], priority=f["priority"])
+    else:
+        upd = rules_api.AlertRuleUpdate(
+            operator=f["operator"], threshold=f["threshold"],
+            conditions=[rules_api.ConditionItem(**c) for c in f["conditions"]],
+            min_duration=f["min_duration"], clear_duration=f["clear_duration"], severity=f["severity"],
+            priority=f["priority"], if_role=f["if_role"])
     out = await rules_api.update_alert_rule(uuid.UUID(rule_id), upd, db, user)
     await db.execute(text("UPDATE alert_rules SET pack_accepted = CAST(:acc AS jsonb) WHERE id = :id"),
                      {"acc": rule_packs.accepted_record(item), "id": rule_id})
