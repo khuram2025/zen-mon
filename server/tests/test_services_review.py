@@ -873,16 +873,17 @@ def test_summary_adds_paused_stale_and_maintenance(monkeypatch):
         async def execute(self, stmt, params=None):
             calls.append(stmt)
             if len(calls) == 1:
-                return Res([("up", 3), ("warning", 1), ("degraded", 1)])
-            if len(calls) == 2:
-                return Res([(2, 1)])
+                return Res([(True, "up", 3), (True, "warning", 1), (True, "degraded", 1),
+                            (False, "down", 2)])
             return Res([1])
 
     async def active(db):
         return {uuid4()}
     monkeypatch.setattr(service_check_service, "active_maintenance_check_ids", active)
     out = asyncio.run(service_check_service.get_service_check_summary(DB(), visible_tags=["team-a"]))
-    assert (out.total, out.warning, out.degraded, out.paused, out.stale, out.in_maintenance) == (5, 1, 1, 2, 1, 1)
+    assert (out.total, out.warning, out.degraded, out.paused, out.stale, out.in_maintenance) == (7, 1, 1, 2, 1, 1)
+    # A paused monitor's stored status is history: it is not counted as Down.
+    assert (out.active, out.up, out.down) == (5, 3, 0)
     assert out.server_time is not None
 
 

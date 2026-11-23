@@ -326,6 +326,8 @@ class ServiceCheckResponse(BaseModel):
     # result is older than 3x the effective interval + timeout + 60 s.
     stale: bool = False
     evidence_age_sec: Optional[float] = None
+    # When an enabled check entered its current down/warning state (list only).
+    status_since: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -334,6 +336,8 @@ class ServiceCheckResponse(BaseModel):
 
 class ServiceCheckSummary(BaseModel):
     total: int
+    # Enabled monitors; up/down/warning/degraded/unknown count only these.
+    active: Optional[int] = None
     up: int
     down: int
     warning: int

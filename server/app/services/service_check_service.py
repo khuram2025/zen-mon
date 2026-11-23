@@ -1,3 +1,4 @@
+import logging
 import math
 from uuid import UUID
 from urllib.parse import urlsplit
@@ -289,19 +290,69 @@ async def get_service_checks(
         )).all()
         parent_names = {r[0]: r[1] for r in rows}
 
+    data = [
+        _to_response(
+            sc,
+            in_maintenance=sc.id in maint_ids,
+            parent_name=parent_names.get(sc.parent_check_id),
+            now=now,
+        )
+        for sc in checks
+    ]
+    since = await status_since_for(checks, now)
+    for row in data:
+        row.status_since = since.get(str(row.id))
     return {
-        "data": [
-            _to_response(
-                sc,
-                in_maintenance=sc.id in maint_ids,
-                parent_name=parent_names.get(sc.parent_check_id),
-                now=now,
-            )
-            for sc in checks
-        ],
+        "data": data,
         "meta": {"total": total, "skip": skip, "limit": limit, "sort": sort,
                  "server_time": now.isoformat()},
     }
+
+
+STATUS_SINCE_LOOKBACK_DAYS = 90
+
+
+def status_since_from_rows(checks, rows) -> dict[str, datetime]:
+    """{check id: when it entered its current failing state} from the latest
+    status-log transition per check. Only when that transition matches the
+    stored status class (down / warning); anything else is left unknown."""
+    from app.services.service_incidents import _aware, kind_of
+    current = {str(sc.id): kind_of(sc.status) for sc in checks}
+    out = {}
+    for cid, status, ts in rows:
+        cid = str(cid)
+        if cid in current and ts is not None and kind_of(status) == current[cid]:
+            out[cid] = _aware(ts)
+    return out
+
+
+async def status_since_for(checks, now: datetime) -> dict[str, datetime]:
+    """When each enabled, failing check on this page entered its current state
+    (service_status_log). Best effort: the list never fails because of it."""
+    import asyncio
+    from app.services.service_incidents import kind_of
+    failing = [sc for sc in checks if sc.enabled and kind_of(sc.status) in ("down", "warning")]
+    if not failing:
+        return {}
+
+    def query():
+        from app.core.database import get_clickhouse_client
+        return get_clickhouse_client().query("""
+            SELECT service_check_id, argMax(new_status, timestamp), max(timestamp)
+            FROM zenplus.service_status_log
+            WHERE service_check_id IN %(ids)s AND timestamp >= %(f)s
+            GROUP BY service_check_id
+        """, parameters={
+            "ids": [str(sc.id) for sc in failing],
+            "f": (now - timedelta(days=STATUS_SINCE_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M:%S"),
+        }).result_rows
+
+    try:
+        rows = await asyncio.to_thread(query)
+    except Exception:
+        logging.getLogger(__name__).warning("service status-since lookup failed", exc_info=True)
+        return {}
+    return status_since_from_rows(failing, rows)
 
 
 async def get_visible_check(db: AsyncSession, check_id: UUID, visible_tags: list[str] | None) -> ServiceCheck | None:
@@ -769,22 +820,28 @@ async def get_service_check_summary(
     db: AsyncSession, visible_tags: list[str] | None = None,
 ) -> ServiceCheckSummary:
     now = _utcnow()
+    # Status counts cover monitors that are probing: a paused monitor keeps its
+    # last stored status, which is history, not a current Down/Up. Paused ones
+    # are counted on their own and still belong to `total`.
     query = _scope_where(
-        select(ServiceCheck.status, func.count(ServiceCheck.id)).group_by(ServiceCheck.status),
+        select(ServiceCheck.enabled, ServiceCheck.status, func.count(ServiceCheck.id))
+        .group_by(ServiceCheck.enabled, ServiceCheck.status),
         visible_tags,
     )
     result = await db.execute(query)
-    counts = {row[0]: row[1] for row in result.all()}
-    total = sum(counts.values())
-    paused = stale = in_maint = 0
+    counts: dict = {}
+    active = paused = 0
+    for enabled, status, n in result.all():
+        if enabled is False:
+            paused += n
+            continue
+        counts[status] = counts.get(status, 0) + n
+        active += n
+    stale = in_maint = 0
     try:
-        from sqlalchemy import case
-        extra = (await db.execute(_scope_where(select(
-            func.count(case((ServiceCheck.enabled.is_(False), 1))),
-            func.count(case((_stale_sql(now), 1))),
-        ), visible_tags))).first()
-        if extra:
-            paused, stale = int(extra[0] or 0), int(extra[1] or 0)
+        stale = (await db.execute(_scope_where(
+            select(func.count(ServiceCheck.id)).where(_stale_sql(now)), visible_tags,
+        ))).scalar() or 0
         maint_ids = await active_maintenance_check_ids(db)
         if maint_ids:
             in_maint = (await db.execute(_scope_where(
@@ -795,14 +852,15 @@ async def get_service_check_summary(
         import logging
         logging.getLogger(__name__).exception("service summary freshness counts failed")
     return ServiceCheckSummary(
-        total=total,
+        total=active + paused,
+        active=active,
         up=counts.get("up", 0),
         down=counts.get("down", 0),
         warning=counts.get("warning", 0),
         degraded=counts.get("degraded", 0),
         unknown=counts.get("unknown", 0) + counts.get(None, 0),
         paused=paused,
-        stale=stale,
+        stale=int(stale),
         in_maintenance=int(in_maint),
         server_time=now,
     )
@@ -1537,6 +1595,7 @@ def _fleet_cache_put(key, value):
 
 def clear_fleet_cache() -> None:
     _fleet_cache.clear()
+    _closed_days_cache.clear()
 
 
 async def _scoped_check_rows(db: AsyncSession, visible_tags: list[str] | None):
@@ -1560,9 +1619,7 @@ async def get_confirmed_uptime_all(
     (maintenance excluded the same way)."""
     import asyncio
     from zoneinfo import ZoneInfo
-    from app.core.database import get_clickhouse_client
     from app.services import service_maintenance
-    from app.services.service_availability import read_fleet_segments, summarize, daily_summaries
 
     zone = ZoneInfo(tz_name)
     end = datetime.now(timezone.utc)
@@ -1578,28 +1635,110 @@ async def get_confirmed_uptime_all(
                  - timedelta(days=days - 1)).astimezone(timezone.utc)
     rows = await _scoped_check_rows(db, visible_tags)
     checks = {str(r["id"]): (r["created_at"], r["check_interval"]) for r in rows}
-    maintenance = {}
-    if rows:
-        maintenance = await service_maintenance.intervals_for_checks(db, rows, start, end)
 
-    def collect():
-        # Keep the history scan off the API event loop; clients are thread-local.
-        values = {}
-        for cid, segments, _, observed_start in read_fleet_segments(get_clickhouse_client(), checks, start, end):
-            excluded = maintenance.get(cid)
-            if days is None:
-                values[cid] = _finite(summarize(segments, observed_start, end, excluded)["uptime_pct"])
-            else:
-                values[cid] = daily_summaries(segments, observed_start, end, zone, excluded)
-        return values
+    async def maintenance_in(lo, hi):
+        return await service_maintenance.intervals_for_checks(db, rows, lo, hi) if rows else {}
 
-    values = await asyncio.to_thread(collect)
+    if days is None:
+        maintenance = await maintenance_in(start, end)
+        values = await asyncio.to_thread(_collect_confirmed, checks, maintenance, start, end, None)
+    else:
+        # Finished calendar days do not change, so they are scanned once and
+        # kept (_closed_days); only today is read on every request.
+        today = end.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        today_maint = await maintenance_in(today, end)
+        today_values = await asyncio.to_thread(_collect_confirmed, checks, today_maint, today, end, zone)
+        closed = {}
+        if start < today:
+            closed = await _closed_days(
+                (cache_key[0], days, tz_name, today.isoformat(), _checks_fingerprint(checks)),
+                checks, lambda: maintenance_in(start, today), start, today, zone, use_cache)
+        values = {cid: closed.get(cid, []) + today_values.get(cid, []) for cid in checks}
+
     out = {"hours": hours, "days": days, "from": start.isoformat(), "to": end.isoformat(),
            "availability_basis": "confirmed", "timezone": tz_name, "checks": values,
            "maintenance_excluded": True, "server_time": end.isoformat()}
     if use_cache:
         _fleet_cache_put(cache_key, out)
     return out
+
+
+def _collect_confirmed(checks, maintenance, start, end, zone):
+    """Confirmed availability per check over [start, end): a percentage, or
+    per-day rows when `zone` is given. Runs off the event loop (history scan)."""
+    from app.core.database import get_clickhouse_client
+    from app.services.service_availability import read_fleet_segments, summarize, daily_summaries
+    values = {}
+    for cid, segments, _, observed_start in read_fleet_segments(get_clickhouse_client(), checks, start, end):
+        excluded = maintenance.get(cid)
+        if zone is None:
+            values[cid] = _finite(summarize(segments, observed_start, end, excluded)["uptime_pct"])
+        else:
+            values[cid] = daily_summaries(segments, observed_start, end, zone, excluded)
+    return values
+
+
+def _checks_fingerprint(checks: dict) -> int:
+    """Changes when a check is added, removed or re-timed, so cached days
+    never miss a monitor."""
+    return hash(tuple(sorted((cid, str(created), interval) for cid, (created, interval) in checks.items())))
+
+
+# Finished days for the list's 30-day bars. A finished day only changes when
+# evidence arrives late or a past maintenance window is edited, so an entry is
+# served for CLOSED_DAYS_FRESH_SEC and then refreshed in the background while
+# the previous copy is still served (until CLOSED_DAYS_MAX_SEC). The key holds
+# the local date, so midnight starts a new entry.
+CLOSED_DAYS_FRESH_SEC = 600.0
+CLOSED_DAYS_MAX_SEC = 3600.0
+_closed_days_cache: dict = {}
+_closed_days_refreshing: set = set()
+
+
+async def _closed_days(key, checks, maintenance_for, start, end, zone, use_cache=True):
+    import asyncio
+    import time
+
+    async def compute():
+        maintenance = await maintenance_for()
+        return await asyncio.to_thread(_collect_confirmed, checks, maintenance, start, end, zone)
+
+    if not use_cache:
+        return await compute()
+    now = time.monotonic()
+    hit = _closed_days_cache.get(key)
+    if hit and now - hit[0] < CLOSED_DAYS_FRESH_SEC:
+        return hit[1]
+    if hit and now - hit[0] < CLOSED_DAYS_MAX_SEC:
+        if key not in _closed_days_refreshing:
+            # The maintenance read needs this request's session: take it now,
+            # then rescan history in the background.
+            maintenance = await maintenance_for()
+            _closed_days_refreshing.add(key)
+
+            def refresh():
+                try:
+                    _closed_days_put(key, _collect_confirmed(checks, maintenance, start, end, zone))
+                except Exception:
+                    logging.getLogger(__name__).warning("30-day bar refresh failed", exc_info=True)
+                finally:
+                    _closed_days_refreshing.discard(key)
+
+            asyncio.get_running_loop().run_in_executor(None, refresh)
+        return hit[1]
+    value = await compute()
+    _closed_days_put(key, value)
+    return value
+
+
+def _closed_days_put(key, value):
+    import time
+    now = time.monotonic()
+    for k in [k for k, (t, _v) in _closed_days_cache.items() if now - t >= CLOSED_DAYS_MAX_SEC]:
+        _closed_days_cache.pop(k, None)
+    if len(_closed_days_cache) > 64:
+        _closed_days_cache.clear()
+    _closed_days_cache[key] = (now, value)
 
 
 def _service_maintenance_sql(maintenance: dict, id_col: str = "service_check_id") -> tuple[str, dict]:

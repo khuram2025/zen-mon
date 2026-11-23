@@ -1,12 +1,12 @@
 import {
   ClockAlert, Copy, FlaskConical, Globe, Loader2, LockKeyhole, Network, Pause, Pencil, Plug, Radar, ShieldCheck, Trash2, Wrench,
 } from 'lucide-react'
-import { cn, relativeTime } from '@/lib/utils'
+import { cn, formatDuration, relativeTime } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import {
   BAND_TEXT, PulseDot, UptimeBars, buildDaySeries, dayTitle, pulseStatusOf, uptimeBand,
 } from '@/components/services/uptime'
-import { LEVEL_META, formatExact, type DailyRow, type ListRow } from './model'
+import { LEVEL_META, formatExact, parseUtc, type DailyRow, type ListRow } from './model'
 
 export const BAR_DAYS = 30
 
@@ -72,6 +72,14 @@ export function MonitorRow({
         : c.status === 'unknown' ? 'text-muted'
           : 'text-warning'
   }
+
+  // A live failure says how long it has lasted and why, not just when it was probed.
+  const failing = c.enabled && !stale && (c.status === 'down' || c.status === 'warning' || c.status === 'degraded')
+  const sinceMs = failing ? parseUtc(c.status_since) : null
+  const failingFor = sinceMs != null && nowMs >= sinceMs ? formatDuration((nowMs - sinceMs) / 1000) : null
+  if (failingFor) statusText = `${statusText} for ${failingFor}`
+  const reason = failing ? c.last_error?.trim() || null : null
+  const liveDown = c.enabled && !stale && c.status === 'down'
 
   const lastExact = formatExact(c.last_check_at)
   const expected = c.status === 'down' && c.down_check_interval ? c.down_check_interval : c.check_interval
@@ -149,14 +157,27 @@ export function MonitorRow({
             )}
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs">
-            <span className={cn('shrink-0 font-medium', statusTone)} title={stale ? staleTitle : undefined}>{statusText}</span>
+            <span
+              className={cn('shrink-0 font-medium', statusTone)}
+              title={stale ? staleTitle : sinceMs != null ? `Since ${formatExact(c.status_since)}` : undefined}
+            >
+              {statusText}
+            </span>
             <span className="text-border-strong">·</span>
             <span className={cn('shrink-0 tabular-nums', stale ? 'text-warning' : 'text-muted')} title={`Last result: ${lastExact}`}>
-              {neverChecked ? 'never checked' : relativeTime(c.last_check_at)}
+              {neverChecked ? 'never checked' : failingFor ? `checked ${relativeTime(c.last_check_at)}` : relativeTime(c.last_check_at)}
             </span>
             <span className="text-border-strong">·</span>
             <span className="min-w-0 truncate font-mono text-muted" title={target}>{target}</span>
           </div>
+          {reason && (
+            <div
+              className={cn('mt-0.5 min-w-0 truncate text-xs', c.status === 'down' ? 'text-danger/90' : 'text-warning')}
+              title={reason}
+            >
+              {reason}
+            </div>
+          )}
         </div>
       </div>
 
@@ -178,8 +199,11 @@ export function MonitorRow({
         </span>
 
         {/* Response */}
-        <span className="w-[64px] shrink-0 text-right font-mono text-xs tabular-nums text-text2" title="Last response time">
-          {c.last_response_ms != null ? `${c.last_response_ms.toFixed(0)} ms` : '—'}
+        <span
+          className="w-[64px] shrink-0 text-right font-mono text-xs tabular-nums text-text2"
+          title={liveDown ? 'The last probe failed, so there is no response time to show' : 'Last response time'}
+        >
+          {!liveDown && c.last_response_ms != null ? `${c.last_response_ms.toFixed(0)} ms` : '—'}
         </span>
 
         {/* Interval */}
@@ -208,3 +232,4 @@ export function MonitorRow({
     </div>
   )
 }
+
