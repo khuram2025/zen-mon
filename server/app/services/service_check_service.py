@@ -45,7 +45,8 @@ from app.schemas.service_check import (
 
 # Fields that do not change how the check probes: editing them must not
 # restart an in-progress confirmation.
-_OBJECTIVE_FIELDS = {"sla_target_pct", "criticality", "business_owner", "owner_team", "runbook_url", "description"}
+_OBJECTIVE_FIELDS = {"sla_target_pct", "criticality", "business_owner", "owner_team", "runbook_url", "description",
+                     "server_id"}
 
 TYPE_LABELS = {"http": "HTTP", "tcp": "TCP", "tls": "TLS", "icmp": "ICMP", "dns": "DNS"}
 
@@ -123,6 +124,7 @@ def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: st
     return ServiceCheckResponse(
         id=sc.id,
         device_id=sc.device_id,
+        server_id=getattr(sc, "server_id", None),
         device_hostname=sc.device.hostname if sc.device else None,
         group_id=sc.group_id,
         group_name=sc.group.name if getattr(sc, "group", None) else None,
@@ -618,6 +620,7 @@ async def create_service_check(db: AsyncSession, data: ServiceCheckCreate, user_
     )
     _check_scope_tags(data.tags, visible_tags)
     await _validate_parent(db, None, data.name, data.parent_check_id, visible_tags)
+    await _validate_server(db, data.server_id)
     payload = data.model_dump()
     # The server owns the level: the client value is ignored (journey level).
     payload["level"] = derive_level(data.check_type, data.workflow_steps)
@@ -637,6 +640,13 @@ async def create_service_check(db: AsyncSession, data: ServiceCheckCreate, user_
     await db.commit()
     await db.refresh(sc)
     return _to_response(sc)
+
+
+async def _validate_server(db: AsyncSession, server_id) -> None:
+    """A check's server (combined rules) must exist."""
+    if server_id and not (await db.execute(sql_text("SELECT 1 FROM servers WHERE id = :id"),
+                                           {"id": server_id})).first():
+        raise ValueError("Server not found")
 
 
 async def update_service_check(db: AsyncSession, check_id: UUID, data: ServiceCheckUpdate,
@@ -685,6 +695,8 @@ async def update_service_check(db: AsyncSession, check_id: UUID, data: ServiceCh
     if "parent_check_id" in update_data:
         await _validate_parent(db, sc.id, update_data.get("name") or sc.name,
                                update_data["parent_check_id"], visible_tags)
+    if update_data.get("server_id"):
+        await _validate_server(db, update_data["server_id"])
     new_level = derive_level(effective_type, effective_steps)
     if (sc.level or None) != new_level:
         update_data["level"] = new_level

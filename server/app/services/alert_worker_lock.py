@@ -40,6 +40,7 @@ SERVICE_METRIC_ALERT_PASS = "zenplus:service_metric_alert_pass"
 APPLIANCE_ALERT_PASS = "zenplus:appliance_alert_pass"
 VIRTUALIZATION_ALERT_PASS = "zenplus:virtualization_alert_pass"
 MONITORING_GAP_ALERT_PASS = "zenplus:monitoring_gap_alert_pass"
+COMBINED_RULE_PASS = "zenplus:combined_rule_pass"
 
 
 @contextlib.asynccontextmanager

@@ -219,6 +219,46 @@ assert(!S.COMBINABLE_SERVER_METRICS.some((m) => ['host_restart', 'host_shutdown'
   'events and agent offline stand alone')
 assert.equal(S.serverDraftProblem({ ...S_DRAFT(), condition_tree: { logic: 'AND', items: [tree.items[1]] } }).step, 'trigger')
 
+// Phase 2: device and service-check combined rules, linked assets, per-condition holds.
+const T = await load(`export * from './src/components/forms/conditionTree'`)
+const C = await load(`export * from './src/components/forms/alertRuleCatalog'`)
+const checkTree = { logic: 'AND', items: [
+  { metric: 'service_response_ms', operator: '>', threshold: 2000, for_s: 300 },
+  { on: 'server', metric: 'host_cpu_pct', operator: '>', threshold: 90 },
+] }
+assert.equal(T.treeLabel('service_check', checkTree), 'Response time > 2000 ms for 5 min and Linked server: CPU usage > 90%')
+assert.equal(T.treeLabel('device', { logic: 'OR', items: [{ metric: 'device_down', operator: '>', threshold: 0 },
+  { on: 'server', metric: 'host_service_down', operator: '>', threshold: 0, target: 'sshd' }] }),
+  'Device is down or Linked server: Service sshd stopped')
+assert.equal(T.treeLabel('server', { logic: 'AND', items: [{ metric: 'host_cpu_pct', operator: '>', threshold: 90 },
+  { on: 'device', metric: 'device_down', operator: '>', threshold: 0 }] }), 'CPU usage > 90% and Linked device is down')
+assert.equal(T.treeProblem('service_check', checkTree), null)
+assert.match(T.treeProblem('device', { logic: 'AND', items: [{ metric: 'cpu', operator: '>', threshold: 9 },
+  { metric: 'service_down', operator: '>', threshold: 0 }] }), /cannot be combined here/)
+assert.match(T.treeProblem('server', { logic: 'AND', items: [{ on: 'device', metric: 'device_down', operator: '>', threshold: 0 },
+  { on: 'device', metric: 'cpu', operator: '>', threshold: 9 }] }), /on the server itself/)
+assert.match(T.treeProblem('service_check', { logic: 'AND', items: [checkTree.items[1], { metric: 'service_tls_days', operator: '>', threshold: 7 }] }), /use < or <=/)
+assert.match(T.treeProblem('service_check', { logic: 'AND', items: [checkTree.items[1], { ...checkTree.items[0], for_s: 90000 }] }), /0 to 86400/)
+assert.deepEqual(T.conditionTreePayload('service_check', checkTree).items, [
+  { metric: 'service_response_ms', operator: '>', threshold: 2000, for_s: 300 },
+  { on: 'server', metric: 'host_cpu_pct', operator: '>', threshold: 90 },
+])
+assert.deepEqual(T.conditionTreePayload('device', { logic: 'AND', items: [{ metric: 'device_down', operator: '==', threshold: 5, target: '' },
+  { metric: 'rtt', operator: '>', threshold: 200 }] }).items[0], { metric: 'device_down', operator: '>', threshold: 0 })
+assert.deepEqual(T.conditionsFor('service_check', 'device').map((m) => m.value), T.DEVICE_CONDITIONS.map((m) => m.value))
+assert.equal(T.readSubject('device', 'device'), null, 'a device has no linked device')
+// A stored combined device / service rule opens on its family with its tree and lists in words.
+const dev = { ...seeded, id: 'r10', name: 'Firewall overloaded', metric: 'combined', subject_type: 'device', operator: '>', threshold: 0,
+  condition_tree: { logic: 'AND', items: [{ id: 'c1', metric: 'cpu', operator: '>', threshold: 85 }, { id: 'c2', metric: 'memory', operator: '>', threshold: 85 }] } }
+const dst = W.ruleToState(dev)
+assert.equal(dst.source, 'device')
+assert.equal(dst.condition_tree.items.length, 2)
+assert.equal(W.ruleToState({ ...dev, subject_type: 'service_check' }).source, 'service')
+assert.equal(C.ruleSource({ metric: 'combined', subject_type: 'service_check' }), 'service')
+assert.equal(C.ruleSource({ metric: 'combined', subject_type: 'device' }), 'device')
+assert.deepEqual(C.triggerSummary(dev), { title: 'Combined conditions', detail: 'CPU usage > 85% and Memory usage > 85%' })
+assert(wiz.includes("metric: 'combined', operator: '>', threshold: 0, conditions: null"), 'a combined device/service rule saves as metric combined with its tree')
+
 // Wording: no third-party product names in the wizard.
 assert(!/solarwinds/i.test(wiz), 'the wizard names no other product')
 assert(wiz.includes("disabled={isEdit && (src === 'server') !== editingServerRule}"), 'a saved rule cannot switch between server and device families')
@@ -227,4 +267,4 @@ const page = fs.readFileSync('src/pages/AlertRulesPage.tsx', 'utf8')
 assert(page.includes("api.post('/host-alert-rules', serverRuleCopy(rule))"), 'Duplicate sends a server rule to the server API')
 assert(page.includes('serverScopeLabel(r, {'), 'the Alert Rules list names a server rule\'s tag / group scope')
 
-console.log('Server alert rules: wizard opens host_* rules on the Server tab, saves through /host-alert-rules (scope, schedule, reset, policy), validates names and scope, lists them in words; combined rules open, save and list as condition trees; Device Down covers servers as on the server.')
+console.log('Server alert rules: wizard opens host_* rules on the Server tab, saves through /host-alert-rules (scope, schedule, reset, policy), validates names and scope, lists them in words; combined server, device and service-check rules open, save and list as condition trees (linked assets, per-condition holds); Device Down covers servers as on the server.')

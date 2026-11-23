@@ -35,8 +35,10 @@ ten conditions joined by AND/OR, judged once a pass on each condition's
 current reading (the newest fresh sample, the service and process
 inventories, the automatic-service and filesystem-forecast snapshots). One
 incident per rule + server; the breach and clear holds count passes and live
-in ``service_metric_alert_state`` (``host:<server>:#tree``). Combined rules
-hold every sample (no rolling average). See docs/multi-condition-rules.md.
+in ``combined_rule_state`` (``server:<id>``, migrate-212), with each
+condition's own hold. Conditions may read the server's linked device
+(``on: device``). Combined rules hold every sample (no rolling average). See
+docs/multi-condition-rules.md.
 
 Availability (server_availability): ``host_agent_offline`` rules, and the
 device-wide "Device Down" rules (``ping_status`` triggered on down), are
@@ -877,10 +879,10 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
         who = v.get("asset") or label
         words = (detail or "").rstrip(".")
         if is_recovery:
-            v["event_sentence"] = (f"{who} is back within the rule's limits: {words[:1].lower() + words[1:]}."
+            v["event_sentence"] = (f"{who} is back within the rule's limits: {rc._lower_first(words, 1)}."
                                    if words else f"{who} is back within the rule's limits.")
         else:
-            v["event_sentence"] = f"{who}: {words[:1].lower() + words[1:]}." if words else f"{who}."
+            v["event_sentence"] = f"{who}: {rc._lower_first(words, 1)}." if words else f"{who}."
         v["matched_conditions"] = words
         sentence = (combined.get("label") or v.get("condition_label") or "").rstrip(".")
         v["condition_sentence"] = v["recovery_sentence"] = f"{sentence}." if sentence else ""
@@ -1547,9 +1549,6 @@ async def _load_history(db: AsyncSession, metric: str, lookback: float, now: flo
 
 # ── Combined rules (condition_tree, rule_conditions) ─────────────────────────
 
-TREE_HOLD_KEY = "#tree"
-
-
 def _latest(series: list, now: float, fresh: float) -> float | None:
     """The newest sample at or before now, if it is fresh; else unknown."""
     for ts, value in reversed(series or []):
@@ -1561,15 +1560,15 @@ def _latest(series: list, now: float, fresh: float) -> float | None:
     return None
 
 
-async def _tree_readings(db: AsyncSession, tree: dict, targets: list[str], *, now: float, budgets: dict,
-                         default_budget: int, max_budget: int, history_cache: dict,
+async def _tree_readings(db: AsyncSession, conditions: list[dict], targets: list[str], *, now: float,
+                         budgets: dict, default_budget: int, max_budget: int, history_cache: dict,
                          snapshot_cache: dict) -> dict[str, dict[str, rc.LeafReading]] | None:
-    """{server: {condition id: LeafReading}} for every condition of a
-    combined rule, each source read once per pass. None when a source cannot
-    be read at all (the caller then leaves every incident as it is)."""
+    """{server: {condition id: LeafReading}} for server conditions, each
+    source read once per pass. None when a source cannot be read at all (the
+    caller then leaves every incident as it is)."""
     out: dict[str, dict[str, rc.LeafReading]] = {sid: {} for sid in targets}
     lookback = max(2 * min(max_budget, MAX_LOOKBACK_BUDGET_S), MIN_LOOKBACK_S)
-    for c in rc.leaves(tree):
+    for c in conditions:
         cid, metric, target = c["id"], c["metric"], c.get("target")
         spec = rc.SERVER_METRICS[metric]
         if metric in THRESHOLD_METRICS:
@@ -1619,40 +1618,85 @@ async def _tree_readings(db: AsyncSession, tree: dict, targets: list[str], *, no
     return out
 
 
+async def server_readings(db: AsyncSession, conditions: list[dict], server_ids: list[str], *, now: float,
+                          caches: dict | None = None) -> dict[str, dict[str, rc.LeafReading]] | None:
+    """Server conditions for other subjects' linked servers (combined_rule_service).
+    A server in maintenance reads as unknown."""
+    if not conditions or not server_ids:
+        return {sid: {} for sid in server_ids}
+    caches = caches if caches is not None else {}
+    if "budgets" not in caches:
+        caches["budgets"] = await _freshness_budgets(db)
+        from app.services import maintenance_windows
+        caches["maintained"] = await maintenance_windows.active_server_ids(db)
+    budgets = caches["budgets"]
+    default_budget = telemetry_freshness_seconds(30, 60)
+    out = await _tree_readings(db, conditions, server_ids, now=now, budgets=budgets,
+                               default_budget=default_budget, max_budget=max([default_budget, *budgets.values()]),
+                               history_cache=caches.setdefault("history", {}),
+                               snapshot_cache=caches.setdefault("snapshot", {}))
+    if out is not None:
+        for sid in caches["maintained"] & set(server_ids):
+            out[sid] = {c["id"]: rc.LeafReading(known=False) for c in conditions}
+    return out
+
+
+async def _linked_device_readings(db: AsyncSession, conditions: list[dict], targets: list[str], *,
+                                  now: float, links: dict, devices_cache: dict) -> dict | None:
+    """Conditions on each server's linked device (``on: device``)."""
+    from app.services import combined_readers as cr
+    from app.services import maintenance_windows
+    wanted = {links[sid] for sid in targets if links.get(sid)}
+    if "devices" not in devices_cache:
+        devices_cache["devices"] = await cr.load_devices(db, wanted)
+        devices_cache["maintained"] = await maintenance_windows.active_device_ids(db)
+    devices = {d: v for d, v in devices_cache["devices"].items() if d in wanted}
+    try:
+        per_device = await cr.device_readings(db, devices, conditions, now=now,
+                                              unknown=set(devices_cache["maintained"]))
+    except Exception:
+        logger.exception("combined rule: linked device readings unavailable; preserving alerts")
+        return None
+    names = {d: v.hostname for d, v in devices.items()}
+    return cr.relink({sid: links.get(sid) for sid in targets}, per_device, conditions, names)
+
+
 async def _evaluate_tree(db: AsyncSession, rule, tree: dict, targets: list[str], readings: dict,
                          opened: dict, *, now: float, allowed: bool, counts: dict, servers: dict,
                          ips: dict, branding, overrides, server_groups: dict, parents: dict) -> None:
     """Raise, continue or resolve each server's incident of a combined rule.
 
     The tree is judged on this pass's readings (rule_conditions.judge); the
-    breach hold (min_duration) and clear hold (clear_duration) count passes in
-    service_metric_alert_state. An unknown result changes nothing and
-    restarts both holds, as for every other rule."""
-    from app.services import service_metric_alert_service as smas
+    breach hold (min_duration), the clear hold (clear_duration) and each
+    condition's own hold count passes in combined_rule_state. An unknown
+    result changes nothing and restarts the rule's holds, as for every other
+    rule."""
     from app.services import alert_rule_overrides as ovr
+    from app.services import combined_readers as cr
     from app.services.network_conditions import clear_hold_seconds
     at = datetime.fromtimestamp(now, timezone.utc)
-    holds = {r[0]: (smas._aware(r[1]), smas._aware(r[2])) for r in (await db.execute(text(
-        "SELECT asset_key, breach_since, clear_since FROM service_metric_alert_state"
-        " WHERE rule_id = :rid AND asset_key LIKE 'host:%'"), {"rid": str(rule.id)})).all()}
+    states = await cr.load_states(db, rule.id)
     label = rc.tree_label(tree)
     for sid in targets:
-        key = f"host:{sid}:{TREE_HOLD_KEY}"
+        key = f"server:{sid}"
         current = opened.get((sid, _dedupe(rule, None)))
         override = overrides.find(rule.id, server_id=sid, groups=server_groups.get(sid),
                                   instance=None) if overrides else None
         e_rule = ovr.apply(rule, override) if override is not None else rule
         e_tree = rc.apply_override(tree, override)
         per = readings.get(sid, {})
-        result = rc.judge(e_tree, per, active=current is not None)
-        breach_since, clear_since = holds.get(key, (None, None))
-        if current is None and breach_since is None and result.state is not True:
+        hold = states.get(key) or cr.HoldState()
+        result = rc.judge(e_tree, per, active=current is not None, leaf_since=hold.leaf_since, now=now)
+        if current is None and hold.breach_since is None and result.state is not True \
+                and result.leaf_since == hold.leaf_since:
             continue        # healthy or unknown, nothing open, no hold running
-        st = rc.step(result.state, open_incident=current is not None, breach_since=breach_since,
-                     clear_since=clear_since, hold_s=int(e_rule.min_duration or 0),
+        st = rc.step(result.state, open_incident=current is not None, breach_since=hold.breach_since,
+                     clear_since=hold.clear_since, hold_s=int(e_rule.min_duration or 0),
                      clear_hold_s=clear_hold_seconds(getattr(e_rule, "clear_duration", None)), now=at)
-        if (st.breach_since, st.clear_since) != (breach_since, clear_since):
-            await smas._save_state(db, rule.id, key, st.breach_since, st.clear_since, None, at)
+        new = cr.HoldState(st.breach_since, st.clear_since, result.leaf_since)
+        if (new.breach_since, new.clear_since, new.leaf_since) != (hold.breach_since, hold.clear_since,
+                                                                   hold.leaf_since):
+            await cr.save_state(db, rule.id, key, new, at)
         hostname = servers.get(sid, "server")
         say = dict(allowed=allowed, counts=counts, ip_address=ips.get(sid, ""), branding=branding,
                    now=now, combined={"label": label})
@@ -1704,6 +1748,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
 
     history_cache: dict[tuple[str, int], dict | None] = {}
     snapshot_cache: dict = {}
+    device_links: dict | None = None      # combined rules: server -> linked device
+    linked_devices: dict = {}
     lifecycle = None
     signals: dict | None = None
     since = 0.0
@@ -1754,9 +1800,21 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
             except rc.TreeError as exc:
                 logger.error("host rule %s skipped: %s", rule.id, exc)
                 continue
-            readings = await _tree_readings(db, tree, targets, now=now, budgets=budgets,
+            from app.services import combined_readers as cr
+            parts = cr.split(tree)
+            readings = await _tree_readings(db, parts.get("self", []), targets, now=now, budgets=budgets,
                                             default_budget=default_budget, max_budget=max_budget,
                                             history_cache=history_cache, snapshot_cache=snapshot_cache)
+            if readings is not None and parts.get("device"):
+                if device_links is None:
+                    device_links = await cr.server_device_links(db)
+                linked = await _linked_device_readings(db, parts["device"], targets, now=now,
+                                                       links=device_links, devices_cache=linked_devices)
+                if linked is None:
+                    readings = None
+                else:
+                    for sid in targets:
+                        readings[sid].update(linked.get(sid, {}))
             if readings is None:
                 await db.rollback()
                 continue        # a source could not be read: every incident stays as it is

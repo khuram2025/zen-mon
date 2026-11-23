@@ -869,6 +869,8 @@ async def _load_device_rules(db: AsyncSession) -> list:
           AND service_check_id IS NULL
           AND service_check_group_id IS NULL
           AND COALESCE(metric, '') <> 'service_status'
+          -- Combined rules (migrate-212) belong to combined_rule_service.
+          AND COALESCE(metric, '') <> 'combined'
     """))).fetchall()
 
 
@@ -1570,6 +1572,8 @@ async def evaluate_service_status_change(
               -- Certificate-expiry / response-time rules are levels evaluated
               -- by service_metric_alert_service, never status transitions.
               AND COALESCE(metric, '') NOT IN ('service_tls_days', 'service_response_ms', 'f5_cert_days')
+              -- Combined rules (migrate-212) belong to combined_rule_service.
+              AND COALESCE(metric, '') <> 'combined'
         """)
     )
     rules = rules_result.fetchall()

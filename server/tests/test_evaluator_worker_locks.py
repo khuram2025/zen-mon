@@ -40,6 +40,8 @@ PASSES = [
      "evaluate_virtualization_rules", wl.VIRTUALIZATION_ALERT_PASS),
     ("app.services.monitoring_gap_alert_service", "run_monitoring_gap_alert_pass",
      "evaluate_monitoring_gap_rules", wl.MONITORING_GAP_ALERT_PASS),
+    ("app.services.combined_rule_service", "run_combined_rule_pass",
+     "evaluate_combined_rules", wl.COMBINED_RULE_PASS),
 ]
 IDS = [p[3].split(":", 1)[1] for p in PASSES]
 

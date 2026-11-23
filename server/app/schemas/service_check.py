@@ -153,6 +153,8 @@ class NetworkConfigMixin(BaseModel):
 
 class ServiceCheckCreate(NetworkConfigMixin):
     device_id: Optional[UUID] = None
+    # The server the check runs on (combined rules, migrate-212); optional.
+    server_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
     parent_check_id: Optional[UUID] = None
     name: str = Field(..., max_length=255)
@@ -218,6 +220,7 @@ class ServiceCheckUpdate(NetworkConfigMixin):
     # than silently ignored; the type of an existing monitor is immutable.
     check_type: Optional[str] = None
     name: Optional[str] = Field(default=None, max_length=255)
+    server_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
     parent_check_id: Optional[UUID] = None
     level: Optional[int] = Field(default=None, ge=1, le=3)
@@ -273,6 +276,7 @@ class ServiceCheckUpdate(NetworkConfigMixin):
 class ServiceCheckResponse(BaseModel):
     id: UUID
     device_id: Optional[UUID] = None
+    server_id: Optional[UUID] = None
     device_hostname: Optional[str] = None
     group_id: Optional[UUID] = None
     group_name: Optional[str] = None

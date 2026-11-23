@@ -3,15 +3,25 @@
 A tree is ``{"logic": "AND"|"OR", "items": [...]}`` where an item is a
 condition or, directly under the root only, a group of conditions with its
 own logic. Each condition is ``{"id", "metric", "operator", "threshold",
-"reset_threshold"?, "target"?}``; ``target`` names one instance (a service, a
-process, a mount, a disk, a NIC) or, for the automatic-services condition,
-service name patterns to leave out. A condition without a target on a metric
-that has instances is true when any instance is.
+"reset_threshold"?, "target"?, "on"?, "for_s"?}``:
 
-This module is pure: it validates and labels trees and judges one subject's
-readings. Each evaluator supplies the readings (``LeafReading`` per condition)
-and keeps the hold clocks between passes (``step``). Phase 1 serves server
-rules (``host_alert_service``).
+* ``target`` names one instance (a service, a process, a mount, a disk, a NIC)
+  or, for the automatic-services condition, service name patterns to leave
+  out. A condition without a target on a metric that has instances is true
+  when any instance is.
+* ``on`` reads an asset linked to the rule's subject instead of the subject
+  itself (``LINKS``): a server's device, a service check's device or server,
+  a device's server. A linked asset that is missing, in maintenance or out of
+  scope reads as unknown.
+* ``for_s`` is the condition's own hold: it counts as true only after it has
+  been true for that long (the rule's ``min_duration`` holds the whole tree).
+
+The catalogue (``SUBJECT_METRICS``) says what each subject may combine. This
+module is pure: it validates and labels trees and judges one subject's
+readings. Each evaluator supplies the readings (``LeafReading`` per
+condition) and keeps the hold clocks between passes (``step``, ``leaf_since``):
+``host_alert_service`` for servers, ``combined_rule_service`` for every other
+subject.
 
 Judging follows the device engine (``network_conditions``): three-valued
 logic, so an unknown reading never raises or resolves an incident; once an
@@ -37,13 +47,15 @@ class TreeError(ValueError):
     """A tree that cannot be stored or evaluated; the message is user-facing."""
 
 
-# ── Catalogue (what a server rule may combine) ───────────────────────────────
+# ── Catalogue (what each subject may combine) ─────────────────────────────
 
 @dataclass(frozen=True)
 class MetricSpec:
     kind: str                  # "level" (numeric) or "state" (1 = the bad state)
     instance: Optional[str]    # instance noun when the metric has instances
     target: str = "none"       # "none" | "optional" (instance) | "required" | "exclude"
+    noun: str = ""             # words for a level ("Device CPU"); a state's phrase ("is down")
+    low_only: bool = False     # fires below a limit (days until full, certificate days)
 
 
 SERVER_METRICS: dict[str, MetricSpec] = {
@@ -55,11 +67,38 @@ SERVER_METRICS: dict[str, MetricSpec] = {
     "host_filesystem_pct": MetricSpec("level", "filesystem", "optional"),
     "host_disk_latency_ms": MetricSpec("level", "disk", "optional"),
     "host_nic_errors": MetricSpec("level", "network interface", "optional"),
-    "host_fs_days_left": MetricSpec("level", "filesystem", "optional"),
+    "host_fs_days_left": MetricSpec("level", "filesystem", "optional", low_only=True),
     "host_service_down": MetricSpec("state", "service", "required"),
     "host_process_down": MetricSpec("state", "process", "required"),
     "host_auto_service_stopped": MetricSpec("state", "automatic service", "exclude"),
 }
+DEVICE_METRICS: dict[str, MetricSpec] = {
+    "device_down": MetricSpec("state", None, noun="is down"),
+    "device_degraded": MetricSpec("state", None, noun="is degraded"),
+    "rtt": MetricSpec("level", None, noun="Latency"),
+    "cpu": MetricSpec("level", None, noun="CPU"),
+    "memory": MetricSpec("level", None, noun="Memory"),
+    "snmp_unreachable": MetricSpec("level", None, noun="SNMP unanswered (minutes)"),
+}
+SERVICE_CHECK_METRICS: dict[str, MetricSpec] = {
+    "service_down": MetricSpec("state", None, noun="is down"),
+    "service_degraded": MetricSpec("state", None, noun="is degraded"),
+    "service_response_ms": MetricSpec("level", None, noun="Response time"),
+    "service_tls_days": MetricSpec("level", None, noun="Certificate days left", low_only=True),
+}
+SUBJECT_METRICS: dict[str, dict[str, MetricSpec]] = {
+    "server": SERVER_METRICS,
+    "device": DEVICE_METRICS,
+    "service_check": SERVICE_CHECK_METRICS,
+}
+# What a condition may read besides its subject: {subject: {on: linked subject}}.
+LINKS: dict[str, dict[str, str]] = {
+    "server": {"device": "device"},
+    "service_check": {"device": "device", "server": "server"},
+    "device": {"server": "server"},
+}
+SUBJECT_NOUNS = {"server": "server", "device": "device", "service_check": "service check"}
+MAX_FOR_S = 86400
 # Events and availability stand alone: a restart is not "true for a while",
 # and Down / agent offline have their own signal and paging rules.
 _ALONE = {
@@ -69,6 +108,20 @@ _ALONE = {
 }
 _LOW = ("<", "<=", "lt", "lte")
 _HIGH = (">", ">=", "gt", "gte")
+
+
+def spec_of(subject: str, c: dict) -> Optional[MetricSpec]:
+    """The catalogue entry for a condition of a rule on ``subject``."""
+    on = c.get("on") or "self"
+    linked = subject if on == "self" else LINKS.get(subject, {}).get(on)
+    return SUBJECT_METRICS.get(linked or "", {}).get(c.get("metric"))
+
+
+def any_spec(metric: str) -> Optional[MetricSpec]:
+    for table in SUBJECT_METRICS.values():
+        if metric in table:
+            return table[metric]
+    return None
 
 
 # ── Shape ────────────────────────────────────────────────────────────────────
@@ -111,15 +164,19 @@ def _number(value, what: str) -> float:
     return n
 
 
-def _normalize_leaf(c: dict, used: set[str], n: int) -> dict:
+def _normalize_leaf(c: dict, used: set[str], n: int, subject: str) -> dict:
     if not isinstance(c, dict):
         raise TreeError("Each condition must be an object")
     metric = c.get("metric")
     if metric in _ALONE:
         raise TreeError(_ALONE[metric])
-    spec = SERVER_METRICS.get(metric)
+    on = str(c.get("on") or "self")
+    if on != "self" and on not in LINKS.get(subject, {}):
+        raise TreeError(f"A {SUBJECT_NOUNS.get(subject, subject)} rule cannot read a linked {on}")
+    spec = spec_of(subject, {**c, "on": on})
     if spec is None:
-        raise TreeError(f"{metric or 'This metric'} cannot be combined in a server rule")
+        whose = SUBJECT_NOUNS.get(subject, subject) if on == "self" else f"linked {on}"
+        raise TreeError(f"{metric or 'This metric'} cannot be combined for a {whose}")
     cid = str(c.get("id") or "")
     if not cid or cid in used:
         cid = f"c{n}"
@@ -135,6 +192,8 @@ def _normalize_leaf(c: dict, used: set[str], n: int) -> dict:
     if spec.target == "none":
         target = None
     out = {"id": cid, "metric": metric}
+    if on != "self":
+        out["on"] = on
     if spec.kind == "state":
         # A state reads 1 while it is bad: the condition is always "> 0".
         out.update(operator=">", threshold=0.0)
@@ -148,6 +207,8 @@ def _normalize_leaf(c: dict, used: set[str], n: int) -> dict:
                 raise TreeError("A days-until-full condition fires below a number of days: use < or <=")
             if thr <= 0:
                 raise TreeError("Days until full must be more than 0")
+        elif spec.low_only and op not in _LOW:
+            raise TreeError(f"{spec.noun or metric} fires below a number of days: use < or <=")
         out.update(operator=op, threshold=thr)
         reset = c.get("reset_threshold")
         if reset is not None:
@@ -157,13 +218,20 @@ def _normalize_leaf(c: dict, used: set[str], n: int) -> dict:
             out["reset_threshold"] = reset
     if target:
         out["target"] = target[:255]
+    for_s = c.get("for_s")
+    if for_s not in (None, "", 0):
+        for_s = _number(for_s, "A condition's hold")
+        if not 0 <= for_s <= MAX_FOR_S:
+            raise TreeError("A condition's hold is 0 to 86400 seconds")
+        if for_s:
+            out["for_s"] = int(for_s)
     return out
 
 
 def validate_tree(tree, subject: str = "server") -> dict:
     """The tree as stored (ids assigned, values normalised). Raises TreeError."""
-    if subject != "server":
-        raise TreeError("Combined conditions are available for server rules in this version")
+    if subject not in SUBJECT_METRICS:
+        raise TreeError("Combined conditions are not available for this kind of rule")
     if not isinstance(tree, dict) or not isinstance(tree.get("items"), list):
         raise TreeError("Conditions must be a group with a logic and a list of items")
     logic = str(tree.get("logic") or "AND").upper()
@@ -185,49 +253,112 @@ def validate_tree(tree, subject: str = "server") -> dict:
             norm = []
             for s in sub:
                 n += 1
-                norm.append(_normalize_leaf(s, used, n))
+                norm.append(_normalize_leaf(s, used, n, subject))
             items.append({"logic": sub_logic, "items": norm})
         else:
             n += 1
-            items.append(_normalize_leaf(item, used, n))
+            items.append(_normalize_leaf(item, used, n, subject))
     count = len(used)
     if count < 2:
         raise TreeError("A combined rule needs at least two conditions")
     if count > MAX_CONDITIONS:
         raise TreeError(f"A rule can combine at most {MAX_CONDITIONS} conditions")
-    return {"logic": logic, "items": items}
+    out = {"logic": logic, "items": items}
+    check_subject_rules(out, subject)
+    return out
 
 
-def mirror(tree: dict) -> dict:
-    """The flat columns kept in step with a tree (the first condition), so
-    lists, exports and older pages keep reading a sensible rule."""
-    first = leaves(tree)[0]
-    return {"metric": first["metric"], "operator": first["operator"],
-            "threshold": float(first["threshold"]),
-            "conditions": [{k: v for k, v in c.items() if k != "id"} for c in leaves(tree)],
+def mirror(tree: dict, subject: str = "server") -> dict:
+    """The flat columns kept in step with a tree, so lists, exports and older
+    pages keep reading a sensible rule. A server rule mirrors its first
+    condition on the server (the host evaluator loads host_* rules); every
+    other subject stores metric 'combined', which no single-condition
+    evaluator loads (migrate-212)."""
+    if subject == "server":
+        first = next(c for c in leaves(tree) if not c.get("on"))
+        return {"metric": first["metric"], "operator": first["operator"],
+                "threshold": float(first["threshold"]),
+                "conditions": [{k: v for k, v in c.items() if k not in ("id", "on", "for_s")}
+                               for c in leaves(tree) if not c.get("on")],
+                "condition_logic": tree["logic"] if not any(is_group(i) for i in tree["items"]) else "AND"}
+    return {"metric": COMBINED_METRIC, "operator": ">", "threshold": 0.0, "conditions": None,
             "condition_logic": tree["logic"] if not any(is_group(i) for i in tree["items"]) else "AND"}
+
+
+COMBINED_METRIC = "combined"
+
+
+def check_subject_rules(tree: dict, subject: str) -> None:
+    """Subject-specific shape rules beyond the catalogue."""
+    if subject == "server" and not any(not c.get("on") for c in leaves(tree)):
+        raise TreeError("A server rule needs at least one condition on the server itself")
 
 
 # ── Words ────────────────────────────────────────────────────────────────────
 
+_UNITS = {"rtt": " ms", "service_response_ms": " ms", "service_tls_days": " days",
+          "snmp_unreachable": " min", "cpu": "%", "memory": "%"}
+_STATE_WORDS = {
+    # metric: (subject noun, bad words, good words)
+    "device_down": ("Device", "is down", "is up"),
+    "device_degraded": ("Device", "is degraded", "is not degraded"),
+    "service_down": ("Check", "is down", "is up"),
+    "service_degraded": ("Check", "is degraded", "is not degraded"),
+}
+_ON_WORDS = {"device": "linked device", "server": "linked server"}
+
+
+def _number_text(metric: str, value) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{v:.0f}" if v == int(v) or abs(v) >= 100 else f"{v:.1f}"
+    return text + _UNITS.get(metric, "")
+
+
+def _op_words(op: str) -> str:
+    return {">": "above", "gt": "above", ">=": "at least", "gte": "at least", "<": "below", "lt": "below",
+            "<=": "at most", "lte": "at most", "==": "equal to", "eq": "equal to",
+            "!=": "not", "neq": "not"}.get(op, op)
+
+
 def leaf_label(c: dict) -> str:
-    """"CPU above 90%", "Service nginx stopped", "Filesystem /data above 85%"."""
+    """"CPU above 90%", "Service nginx stopped", "Filesystem /data above 85%",
+    "Linked device is down"."""
     from app.services import alert_phrasing as ap
-    metric, target = c.get("metric"), c.get("target")
+    metric, target, on = c.get("metric"), c.get("target"), c.get("on")
+    prefix = f"{_ON_WORDS[on].capitalize()}: " if on in _ON_WORDS else ""
+    hold = f" for {_duration(c['for_s'])}" if c.get("for_s") else ""
     if metric == "host_service_down":
-        return f"Service {target} stopped"
+        return f"{prefix}Service {target} stopped{hold}"
     if metric == "host_process_down":
-        return f"Process {target} not running"
+        return f"{prefix}Process {target} not running{hold}"
     if metric == "host_auto_service_stopped":
-        return "An automatic service stopped" + (f" (except {target})" if target else "")
-    label = ap.condition_label(metric, c.get("operator"), c.get("threshold"))
-    spec = SERVER_METRICS.get(metric)
+        return f"{prefix}An automatic service stopped" + (f" (except {target})" if target else "") + hold
+    if metric in _STATE_WORDS:
+        noun, bad, _ = _STATE_WORDS[metric]
+        if on in _ON_WORDS:
+            return f"{_ON_WORDS[on].capitalize()} {bad}{hold}"
+        return f"{noun} {bad}{hold}"
+    spec = any_spec(metric)
+    if metric in _UNITS:
+        label = f"{spec.noun if spec else metric} {_op_words(c.get('operator'))} {_number_text(metric, c.get('threshold'))}"
+    else:
+        label = ap.condition_label(metric, c.get("operator"), c.get("threshold"))
     if spec and spec.instance and target:
         noun = ap.metric_noun(metric)
-        if label.startswith(noun):
-            return f"{noun} {target}{label[len(noun):]}"
-        return f"{label} ({target})"
-    return label
+        label = f"{noun} {target}{label[len(noun):]}" if label.startswith(noun) else f"{label} ({target})"
+    return f"{prefix}{label}{hold}"
+
+
+def _duration(seconds) -> str:
+    s = int(seconds or 0)
+    if s and s % 3600 == 0:
+        return f"{s // 3600} h"
+    if s and s % 60 == 0:
+        return f"{s // 60} min"
+    return f"{s} s"
 
 
 def tree_label(tree: Optional[dict]) -> str:
@@ -249,7 +380,7 @@ def tree_label(tree: Optional[dict]) -> str:
 
 def _lower_first(text: str, index: int) -> str:
     """Later parts of a sentence start lower-case, except names and acronyms."""
-    if index == 0 or not text or text[:3].isupper() or text.startswith(("CPU", "(")):
+    if index == 0 or not text or text[:3].isupper() or text.startswith(("CPU", "(", "SNMP")):
         return text
     return text[:1].lower() + text[1:]
 
@@ -260,10 +391,12 @@ def _lower_first(text: str, index: int) -> str:
 class LeafReading:
     """One condition's reading for one subject: ``{instance: value}`` ("" for
     a metric without instances); a value of None is unknown. ``known`` False
-    means the source could not be read for this subject at all."""
+    means the source could not be read for this subject at all (or a linked
+    asset is missing, in maintenance or out of scope)."""
     values: dict[str, Optional[float]] = field(default_factory=dict)
     known: bool = True
     details: dict[str, str] = field(default_factory=dict)
+    asset: str = ""            # the linked asset's name, for the message
 
 
 @dataclass
@@ -271,6 +404,7 @@ class LeafResult:
     state: Optional[bool]
     matched: list[tuple[str, Optional[float]]]     # (instance, value) that are true
     shown: list[tuple[str, Optional[float]]]       # what to report when nothing matched
+    waiting: bool = False                          # true, but its own hold is still running
 
 
 @dataclass
@@ -278,14 +412,25 @@ class TreeResult:
     state: Optional[bool]
     leaves: dict[str, LeafResult]
     matched: list[str]                              # ids of the conditions that made it true
+    leaf_since: dict[str, float] = field(default_factory=dict)   # per-condition hold starts (epoch s)
+
+
+def is_state(metric: str) -> bool:
+    spec = any_spec(metric)
+    return bool(spec and spec.kind == "state")
 
 
 def clear_condition(c: dict) -> dict:
     """The condition an open incident must leave: its clear level."""
-    if c.get("metric") == "host_fs_days_left" and c.get("reset_threshold") is None:
-        return {**c, "threshold": float(c["threshold"]) + 1.0}     # one day on the healthy side
-    if SERVER_METRICS.get(c.get("metric"), MetricSpec("level", None)).kind == "state":
+    metric = c.get("metric")
+    if is_state(metric):
         return c
+    if c.get("reset_threshold") is None:
+        spec = any_spec(metric)
+        if spec is not None and spec.low_only and c.get("operator") in _LOW:
+            return {**c, "threshold": float(c["threshold"]) + 1.0}     # one day on the healthy side
+        if metric == "service_response_ms" and c.get("operator") in _HIGH:
+            return {**c, "threshold": float(c["threshold"]) * 0.9}     # 10 % on the healthy side
     return {**c, "threshold": nc.effective_reset_threshold(c)}
 
 
@@ -310,9 +455,27 @@ def judge_leaf(c: dict, reading: Optional[LeafReading], *, active: bool) -> Leaf
     return LeafResult(state, matched, shown)
 
 
-def judge(tree: dict, readings: dict[str, LeafReading], *, active: bool) -> TreeResult:
-    """The tree's state for one subject, with what matched."""
-    results = {c["id"]: judge_leaf(c, readings.get(c["id"]), active=active) for c in leaves(tree)}
+def judge(tree: dict, readings: dict[str, LeafReading], *, active: bool,
+          leaf_since: Optional[dict] = None, now: Optional[float] = None) -> TreeResult:
+    """The tree's state for one subject, with what matched.
+
+    A condition with its own hold (``for_s``) counts as true only once it has
+    been true since ``leaf_since[id]`` for that long (while no incident is
+    open; an open incident is judged on clear levels alone). The returned
+    ``leaf_since`` is what the caller keeps for the next pass."""
+    since_in = dict(leaf_since or {})
+    since_out: dict[str, float] = {}
+    results = {}
+    for c in leaves(tree):
+        r = judge_leaf(c, readings.get(c["id"]), active=active)
+        hold = int(c.get("for_s") or 0)
+        if hold and not active and now is not None:
+            if r.state is True:
+                start = float(since_in.get(c["id"]) or now)
+                since_out[c["id"]] = start
+                if now - start < hold:
+                    r = LeafResult(False, [], r.matched, waiting=True)
+        results[c["id"]] = r
 
     def group(items, logic):
         states, matched = [], []
@@ -329,7 +492,7 @@ def judge(tree: dict, readings: dict[str, LeafReading], *, active: bool) -> Tree
         return state, (matched if state else [])
 
     state, matched = group(tree.get("items") or [], tree.get("logic") or "AND")
-    return TreeResult(state, results, matched)
+    return TreeResult(state, results, matched, since_out)
 
 
 @dataclass(frozen=True)
@@ -367,13 +530,14 @@ def step(state: Optional[bool], *, open_incident: bool, breach_since: Optional[d
 
 def apply_override(tree: dict, override) -> dict:
     """The tree with a per-asset override's threshold / clear level on the
-    condition it names (its metric), or on the first condition."""
+    condition it names (its metric), or on the first condition on the subject
+    itself."""
     if override is None or (getattr(override, "threshold", None) is None
                             and getattr(override, "reset_threshold", None) is None):
         return tree
-    target = next((c for c in leaves(tree)
-                   if not getattr(override, "metric", None) or c["metric"] == override.metric), None)
-    if target is None or SERVER_METRICS.get(target["metric"], MetricSpec("level", None)).kind == "state":
+    target = next((c for c in leaves(tree) if not c.get("on")
+                   and (not getattr(override, "metric", None) or c["metric"] == override.metric)), None)
+    if target is None or is_state(target["metric"]):
         return tree
 
     def swap(c):
@@ -400,23 +564,35 @@ def apply_override(tree: dict, override) -> dict:
 
 def _reading_words(c: dict, instance: str, value: Optional[float], reading: Optional[LeafReading]) -> str:
     from app.services import alert_phrasing as ap
-    metric = c["metric"]
+    metric, on = c["metric"], c.get("on")
+    asset = (reading.asset if reading else "") or ""
+    who = (f"{_ON_WORDS[on]} {asset}".strip() + " ") if on in _ON_WORDS else ""
     if metric == "host_service_down":
-        return f"service {c.get('target')} " + ("stopped" if value else "running")
+        return f"{who}service {c.get('target')} " + ("stopped" if value else "running")
     if metric == "host_process_down":
-        return f"process {c.get('target')} " + ("not running" if value else "running")
+        return f"{who}process {c.get('target')} " + ("not running" if value else "running")
     if metric == "host_auto_service_stopped":
         detail = (reading.details.get(instance) if reading else "") or ""
-        return f"automatic service {instance} " + (detail or ("stopped" if value else "running"))
-    noun = ap.metric_noun(metric)
+        return f"{who}automatic service {instance} " + (detail or ("stopped" if value else "running"))
+    if metric in _STATE_WORDS:
+        noun, bad, good = _STATE_WORDS[metric]
+        subject = who.strip() or noun.lower()
+        if value is None:
+            return f"{subject}: no current reading"
+        return f"{subject} {bad if value else good}"
+    spec = any_spec(metric)
+    noun = spec.noun if metric in _UNITS and spec else ap.metric_noun(metric)
     if instance:
         noun = f"{noun} {instance}"
+    noun = f"{who}{noun[:1].lower() + noun[1:] if who else noun}"
     if value is None:
         return f"{noun}: no current reading"
     detail = (reading.details.get(instance) if reading else "") or ""
     if metric == "host_fs_days_left" and (detail or not math.isfinite(value)):
         limit = ap.format_threshold(metric, c.get("threshold"), c.get("operator"))
         return f"{noun} {detail or 'not filling'}" + (f" (limit {limit})" if limit else "")
+    if metric in _UNITS:
+        return f"{noun} {_number_text(metric, value)} (limit {_number_text(metric, c.get('threshold'))})"
     shown = ap.format_reading(metric, value, c.get("operator"), c.get("threshold"))
     limit = ap.format_threshold(metric, c.get("threshold"), c.get("operator"))
     return f"{noun} {shown}" + (f" (limit {limit})" if limit else "")
@@ -434,8 +610,10 @@ def describe(tree: dict, result: TreeResult, readings: dict[str, LeafReading], *
         lr = result.leaves.get(c["id"])
         rows = (lr.matched if matched_only else (lr.matched or lr.shown)) if lr else []
         if not rows and not matched_only:
-            words.append(_reading_words(c, "", None, None) if SERVER_METRICS[c["metric"]].kind == "level"
-                         else f"{leaf_label(c).lower()}: no current reading")
+            if is_state(c["metric"]) and lr is not None and lr.state is False:
+                words.append(_reading_words(c, "", 0.0, readings.get(c["id"])))
+            else:
+                words.append(_reading_words(c, "", None, readings.get(c["id"])))
             continue
         for inst, value in rows[:5]:
             words.append(_reading_words(c, inst, value, readings.get(c["id"])))
@@ -453,7 +631,8 @@ def matched_metadata(tree: dict, result: TreeResult) -> list[dict]:
         if c["id"] not in result.matched:
             continue
         for inst, value in result.leaves[c["id"]].matched[:20]:
-            out.append({"id": c["id"], "metric": c["metric"], "instance": inst or None,
+            out.append({"id": c["id"], "metric": c["metric"], "on": c.get("on") or "self",
+                        "instance": inst or None,
                         "value": None if value is None or not math.isfinite(value) else round(value, 2)})
     return out
 
@@ -464,4 +643,3 @@ def states_metadata(result: TreeResult) -> dict[str, Optional[bool]]:
 
 def metrics(tree: Optional[dict]) -> set[str]:
     return {c.get("metric") for c in leaves(tree)}
-
