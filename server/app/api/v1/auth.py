@@ -224,23 +224,26 @@ async def _issue_session(db: AsyncSession, user: User, request: Optional[Request
     user.failed_login_count = 0
     user.locked_until = None
     user.last_login = datetime.now(timezone.utc)
-    ttl = timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
+    from app.services.session_timeouts import effective_at_login
+    policy = await effective_at_login(db, user.id)
+    duration = settings.JWT_EXPIRE_MINUTES if policy == -1 else policy
+    ttl = timedelta(minutes=duration) if duration else None
     jti, _exp = await session_service.create_session(
         db, user.id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent") if request else None,
-        auth_method=method, mfa_verified=mfa_verified, ttl=ttl,
+        auth_method=method, mfa_verified=mfa_verified, ttl=ttl, idle_minutes=policy if policy > 0 else None,
     )
     await db.commit()
     await db.refresh(user)
     token = create_access_token(
         data={"sub": str(user.id), "role": user.role, "jti": jti,
-              "ver": getattr(user, "token_version", 0) or 0, "mfa": mfa_verified},
-        expires_delta=ttl,
+              "ver": getattr(user, "token_version", 0) or 0, "mfa": mfa_verified, "idle_minutes": max(policy, 0)},
+        expires_delta=ttl, server_managed_session=policy >= 0,
     )
     return TokenResponse(
         access_token=token,
-        expires_in=settings.JWT_EXPIRE_MINUTES * 60,
+        expires_in=duration * 60 if duration else None,
         user=await _user_response(db, user, session_id=jti),
     )
 
@@ -438,6 +441,25 @@ def _session_id_from(credentials) -> Optional[str]:
         return payload.get("jti")
     except Exception:
         return None
+
+
+@router.get("/session/idle-remaining")
+async def idle_remaining(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+                         credentials=Depends(security)):
+    seconds = (await db.execute(text(
+        "SELECT ceil(extract(epoch FROM expires_at-clock_timestamp()))::int FROM auth_sessions "
+        "WHERE id=CAST(:id AS uuid) AND user_id=:uid AND idle_minutes IS NOT NULL "
+        "AND revoked_at IS NULL AND expires_at>clock_timestamp()"),
+        {"id": _session_id_from(credentials), "uid": user.id})).scalar_one_or_none()
+    if seconds is None:
+        raise HTTPException(401, "Idle session is no longer active")
+    return {"seconds": seconds}
+
+
+@router.post("/session/activity", status_code=204)
+async def session_activity(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+                           credentials=Depends(security)):
+    await session_service.record_activity(db, _session_id_from(credentials), user.id)
 
 
 @router.post("/stream-ticket")

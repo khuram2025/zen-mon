@@ -16,7 +16,7 @@ timing); those are covered by new tests (below). Three statements deserve a corr
 |---|---|
 | RP-09 | `/reports/data/{executive,technical,business}` **already** honour visibility scope (added with tag scoping); the gaps are `/reports/generate`, `/reports/data/inventory`, section rendering (`/reports/render/*`) and report schedules, plus NetFlow. |
 | RP-22 | "APM Admins has the same 22 permissions as Operator" is a configuration fact of that appliance, not reproducible from the repository. Not a code defect; no code change. |
-| UA-09 | The window is bounded by design: access tokens last `JWT_EXPIRE_MINUTES` (60), so a directory account is re-authenticated against the provider at least hourly. The gap is real (no immediate revocation on disable) but is *at most an hour*, not unbounded. A "sign out now" option was added. |
+| UA-09 | The default fixed session lasts `JWT_EXPIRE_MINUTES` (60 by default). Administrators can also configure idle and no-timeout sessions under Security & TLS. Directory credentials are rechecked at sign-in. Use “sign out now” to revoke open sessions immediately. |
 
 Everything else was reproduced or read directly in code. The route inventory is stronger than the document's
 "679 declarations": introspecting the live application gives **684 routes**, of which **232 required nothing but a

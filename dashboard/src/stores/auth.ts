@@ -185,17 +185,13 @@ export const useAuth = create<AuthState>()(
       },
 
       async hydrateUser() {
-        if (!get().token) return
+        const token = get().token
+        if (!token) return
         try {
           const { data } = await api.get('/auth/me')
-          set({ user: data })
-        } catch (e: any) {
-          // A transient failure must not sign the user out; only a rejected
-          // session does (the api layer already fires zp-auth-expired on 401).
-          if (e?.response?.status === 401) {
-            set({ token: null, user: null })
-            setApiToken(null)
-          }
+          if (get().token === token) set({ user: data })
+        } catch {
+          // The interceptor handles a rejected session. Keep the user on transient failures.
         }
       },
     }),
@@ -214,8 +210,69 @@ export const useAuth = create<AuthState>()(
 // Wire the global 401 event so axios can boot the user out.
 if (typeof window !== 'undefined') {
   window.addEventListener('zp-auth-expired', () => {
-    useAuth.getState().logout()
+    setApiToken(null)
+    useAuth.setState({ token: null, user: null, error: null })
   })
+
+  // Only input in a visible dashboard extends a sliding session. A quiet wall display
+  // and its periodic requests must never be mistaken for an interactive operator.
+  let idleToken: string | null = null
+  let pending: ReturnType<typeof setTimeout> | undefined
+  let lastSent = 0
+  let idleMs = 0
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  function scheduleCheck(token: string, ms: number) {
+    clearTimeout(deadlineTimer)
+    deadlineTimer = setTimeout(() => void checkDeadline(token), Math.max(500, ms))
+  }
+  async function checkDeadline(token: string) {
+    if (idleToken !== token) return
+    try {
+      const { data } = await api.get<{ seconds: number }>('/auth/session/idle-remaining')
+      if (idleToken === token) scheduleCheck(token, data.seconds * 1000)
+    } catch {
+      // The server could not confirm this idle session. Close this display locally.
+      if (idleToken === token) window.dispatchEvent(new CustomEvent('zp-auth-expired'))
+    }
+  }
+  const configureActivity = (token: string | null) => {
+    clearTimeout(deadlineTimer)
+    clearTimeout(pending)
+    pending = undefined
+    idleToken = null
+    lastSent = 0
+    if (!token) return
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
+      if (payload.idle_minutes > 0) {
+        idleToken = token
+        idleMs = payload.idle_minutes * 60_000
+        // Defer until the token has also been installed in the request interceptor.
+        scheduleCheck(token, 0)
+      }
+    } catch { /* The API validates the token on hydration. */ }
+  }
+  configureActivity(useAuth.getState().token)
+  useAuth.subscribe((state, previous) => {
+    if (state.token !== previous.token) configureActivity(state.token)
+  })
+  function activity(event: Event) {
+    if (!event.isTrusted || !idleToken || document.visibilityState !== 'visible' || pending) return
+    const send = () => {
+      pending = undefined
+      lastSent = Date.now()
+      const token = idleToken
+      if (token) void api.post('/auth/session/activity').then(() => {
+        if (idleToken === token) scheduleCheck(token, idleMs)
+      }).catch(() => {})
+    }
+    const wait = lastSent + 10_000 - Date.now()
+    if (wait <= 0) send()
+    else pending = setTimeout(send, wait)
+  }
+  for (const type of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart']) {
+    window.addEventListener(type, activity, { passive: true })
+  }
 
   // Role edits are enforced server-side within seconds; keep what the UI shows
   // in step. Re-read the account when the tab regains focus and once a minute

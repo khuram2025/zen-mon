@@ -13,6 +13,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react'
+import { SessionTimeoutCard } from '@/components/security/SessionTimeoutCard'
 import { ProbeTrustCard } from '@/components/ProbeTrustCard'
 import { ManagementAccessCard } from '@/components/ManagementAccessCard'
 import { api } from '@/lib/api'
@@ -20,6 +21,7 @@ import { apiErrorMessage, cn, copyText } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { QueryFailure } from '@/components/ui/QueryState'
 import { FormField } from '@/components/ui/FormField'
 import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
@@ -71,6 +73,15 @@ type CertMode = 'self-signed' | 'csr' | 'upload' | 'pfx'
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export function SecurityTabContent() {
+  return <div className="space-y-4">
+    <SessionTimeoutCard />
+    <TransportSecurity />
+    <ProbeTrustCard />
+    <ManagementAccessCard />
+  </div>
+}
+
+function TransportSecurity() {
   const status = useQuery<TlsStatus>({
     queryKey: ['security', 'tls'],
     queryFn: async () => (await api.get('/system/security/tls')).data,
@@ -84,11 +95,8 @@ export function SecurityTabContent() {
     )
   }
   if (status.isError || !status.data) {
-    return (
-      <div className="flex items-center gap-2 py-10 text-sm text-danger">
-        <AlertTriangle className="h-4 w-4" /> Failed to load security status: {apiErrorMessage(status.error)}
-      </div>
-    )
+    return <QueryFailure what="TLS status" error={status.error} retrying={status.isFetching}
+      onRetry={() => void status.refetch()} />
   }
 
   const s = status.data
@@ -98,8 +106,6 @@ export function SecurityTabContent() {
       <StatusCard status={s} />
       <CertificateCard status={s} />
       <HardeningCard status={s} />
-      <ProbeTrustCard />
-      <ManagementAccessCard />
       <AgentTrustNote status={s} />
     </div>
   )
@@ -172,7 +178,9 @@ function StatusCard({ status }: { status: TlsStatus }) {
           {httpsLive ? (
             <Badge variant="success"><Lock className="h-3 w-3" /> HTTPS enabled</Badge>
           ) : (
-            <Badge variant="danger"><AlertTriangle className="h-3 w-3" /> HTTP only — traffic is unencrypted</Badge>
+            status.applied?.https === 'off'
+              ? <Badge variant="danger"><AlertTriangle className="h-3 w-3" /> HTTP only</Badge>
+              : <Badge variant="outline">Applied HTTPS state unavailable</Badge>
           )}
           {httpsLive && status.applied?.redirect === 'on' && <Badge variant="info">HTTP → HTTPS redirect</Badge>}
           {httpsLive && status.applied?.hsts === 'on' && <Badge variant="info">HSTS</Badge>}

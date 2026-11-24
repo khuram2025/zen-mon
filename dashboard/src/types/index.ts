@@ -195,7 +195,7 @@ export interface SubscriptionInfo {
 export interface LoginResponse {
   access_token?: string
   token_type: string
-  expires_in: number
+  expires_in: number | null
   user?: User
   /** Set (instead of a token) when the account needs a second factor. */
   mfa_required?: boolean

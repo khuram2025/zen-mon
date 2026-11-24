@@ -19,7 +19,7 @@ class MfaLoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: Optional[str] = None
     token_type: str = "bearer"
-    expires_in: int = 0
+    expires_in: Optional[int] = 0
     user: Optional["UserResponse"] = None
     # Set instead of a token when the account has multi-factor enabled and the
     # request carried no code: complete sign-in with POST /auth/login/mfa.
