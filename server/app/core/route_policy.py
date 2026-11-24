@@ -96,6 +96,8 @@ PUBLIC_ROUTES: frozenset[str] = frozenset({
 SELF_ROUTES: frozenset[str] = frozenset({
     "/api/v1/auth/me",
     "/api/v1/auth/logout",
+    "/api/v1/auth/session/idle-remaining",
+    "/api/v1/auth/session/activity",
     "/api/v1/auth/stream-ticket",
     "/api/v1/auth/mfa/status",
     "/api/v1/system/time",
