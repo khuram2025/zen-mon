@@ -312,7 +312,7 @@ async def _account_counts(db: AsyncSession, source: str) -> dict:
         "SELECT count(*), count(*) FILTER (WHERE is_active) FROM users WHERE auth_source = :s"), {"s": source})).first()
     sessions = (await db.execute(text(
         "SELECT count(*) FROM auth_sessions s JOIN users u ON u.id = s.user_id "
-        "WHERE u.auth_source = :s AND s.revoked_at IS NULL AND s.expires_at > NOW()"), {"s": source})).scalar() or 0
+        "WHERE u.auth_source = :s AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > NOW())"), {"s": source})).scalar() or 0
     return {"accounts": int((row[0] if row else 0) or 0), "active_accounts": int((row[1] if row else 0) or 0),
             "open_sessions": int(sessions)}
 

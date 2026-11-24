@@ -35,7 +35,7 @@ api.interceptors.response.use(
   },
   (err: AxiosError) => {
     if (err.response) recordFromHeaders(err.response.headers as any, (err.config as any)?.__sentAt ?? Date.now(), Date.now())
-    if (err.response?.status === 401) {
+    if (err.response?.status === 401 && currentToken && err.config?.headers?.Authorization === `Bearer ${currentToken}`) {
       // Wipe token and bounce to login. The auth store listens for
       // this custom event so it can clear its own state too.
       currentToken = null

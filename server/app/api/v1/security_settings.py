@@ -39,6 +39,7 @@ import json
 import os
 import re
 import subprocess
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -60,6 +61,34 @@ from cryptography.hazmat.primitives.serialization import pkcs7, pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 router = APIRouter(prefix="/system/security", tags=["Security Settings"])
+
+class SessionTimeoutInput(BaseModel):
+    minutes: int = Field(ge=-1, le=1440, strict=True)
+
+
+class UserTimeoutInput(BaseModel):
+    minutes: int | None = Field(ge=-1, le=1440, strict=True)
+
+
+@router.get("/session-timeouts")
+async def get_session_timeouts(db: AsyncSession = Depends(get_db), admin: User = Depends(require_admin_user)):
+    from app.services.session_timeouts import snapshot
+    return await snapshot(db)
+
+
+@router.put("/session-timeouts", status_code=204)
+async def set_session_timeout(data: SessionTimeoutInput, db: AsyncSession = Depends(get_db),
+                              admin: User = Depends(require_admin_user)):
+    from app.services.session_timeouts import change
+    await change(db, user_id=None, minutes=data.minutes, actor=admin)
+
+
+@router.put("/session-timeouts/users/{user_id}", status_code=204)
+async def set_user_timeout(user_id: UUID, data: UserTimeoutInput, db: AsyncSession = Depends(get_db),
+                           admin: User = Depends(require_admin_user)):
+    from app.services.session_timeouts import change
+    await change(db, user_id=user_id, minutes=data.minutes, actor=admin)
+
 
 SECURITY_HELPER = "/usr/local/sbin/zenplus-security-helper"
 STAGING_DIR = "/opt/zenplus/data/tls-staging"

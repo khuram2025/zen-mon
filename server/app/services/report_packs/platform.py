@@ -1408,13 +1408,13 @@ async def active_sessions(ctx: SectionCtx) -> dict:
         "count(DISTINCT s.ip_address), max(s.last_seen_at), min(s.created_at), max(s.expires_at), "
         "count(*) FILTER (WHERE s.last_seen_at >= :recent) "
         "FROM auth_sessions s JOIN users u ON u.id = s.user_id "
-        "WHERE s.revoked_at IS NULL AND s.expires_at > :now "
+        "WHERE s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > :now) "
         "GROUP BY u.username, u.role, u.auth_source ORDER BY 4 DESC, lower(u.username)"), p)).fetchall()
     if not per_user:
         return _section(sid, title, notes=["No account is signed in right now."])
     methods = (await ctx.db.execute(text(
         "SELECT auth_method, count(*), count(*) FILTER (WHERE mfa_verified), count(DISTINCT user_id) "
-        "FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > :now GROUP BY 1 ORDER BY 2 DESC"),
+        "FROM auth_sessions WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > :now) GROUP BY 1 ORDER BY 2 DESC"),
         p)).fetchall()
     roles = await _roles(ctx)
 

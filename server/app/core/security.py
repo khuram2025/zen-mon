@@ -218,10 +218,15 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, *, server_managed_session: bool = False) -> str:
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc)})
+    now = datetime.now(timezone.utc)
+    to_encode["iat"] = now
+    if server_managed_session:
+        if not data.get("jti") or data.get("purpose"):
+            raise ValueError("A server-managed token requires a sign-in session")
+    else:
+        to_encode["exp"] = now + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 

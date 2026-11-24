@@ -283,7 +283,7 @@ function ToggleDialog({ target, data, onClose }: { target: { kind: ProviderKind;
             <p className="text-xs">{cfg.accounts} account{cfg.accounts === 1 ? '' : 's'} ({cfg.active_accounts} active) sign in through this source; <strong>{cfg.open_sessions}</strong> {cfg.open_sessions === 1 ? 'session is' : 'sessions are'} open now.</p>
             <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border px-3 py-2">
               <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 accent-primary" checked={revoke} onChange={(e) => setRevoke(e.target.checked)} />
-              <span className="text-xs"><span className="font-medium">Also sign those accounts out now</span><br /><span className="text-muted">Otherwise open sessions continue until they expire (within about an hour).</span></span>
+              <span className="text-xs"><span className="font-medium">Also sign those accounts out now</span><br /><span className="text-muted">Otherwise open sessions follow their configured timeout. Sessions without a timeout can remain open until revoked.</span></span>
             </label>
           </div>
         )}
