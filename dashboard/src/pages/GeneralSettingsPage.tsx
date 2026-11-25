@@ -30,6 +30,7 @@ import { SystemStatusTabContent } from '@/components/SystemStatusTabContent'
 import { SYSTEM_STATUS_TAB, SYSTEM_STATUS_TAB_ALIASES } from '@/components/system/sections'
 import { SecurityTabContent } from '@/components/SecurityTabContent'
 import { SshTerminalCard } from '@/components/settings/SshTerminalCard'
+import { ServiceCheckConnectionsCard } from '@/components/settings/ServiceCheckConnectionsCard'
 import { CompanySettings } from '@/components/settings/CompanySettings'
 import { MibsTabContent } from '@/components/MibsTabContent'
 import { AccessTabContent, ACCESS_TAB_PERMISSIONS } from '@/components/access/AccessTabContent'
@@ -121,6 +122,7 @@ export function GeneralSettingsPage() {
         </TabsContent>
         <TabsContent value="monitoring" className="space-y-4">
           <MonitoringCard />
+          <ServiceCheckConnectionsCard />
           <SshTerminalCard />
         </TabsContent>
         <TabsContent value="users">

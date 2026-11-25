@@ -76,6 +76,15 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	if err := json.Unmarshal([]byte(trustJSON), &trust); err != nil {
 		return nil, fmt.Errorf("parse probe trust: %w", err)
 	}
+	// Manual host addresses that apply to the central appliance
+	// (docs/service-check-connections.md).
+	var overridesJSON string
+	if err := s.pool.QueryRow(ctx, "SELECT COALESCE((SELECT value::text FROM system_settings WHERE key='monitoring.host_overrides'), '{}')").Scan(&overridesJSON); err != nil {
+		return nil, fmt.Errorf("load host overrides: %w", err)
+	}
+	// A damaged document or row is left out rather than failing the load:
+	// monitoring must not stop because of this setting.
+	overrides := checker.ResolveHostOverrides(checker.ParseHostOverrideEntries([]byte(overridesJSON)), checker.HostOverrideScopeCentral)
 	rows, err := s.pool.Query(ctx, `
 		SELECT sc.id, sc.device_id, sc.name, sc.check_type, sc.enabled,
 		       sc.target_host, COALESCE(sc.target_port, 0), COALESCE(sc.target_url, ''),
@@ -111,6 +120,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	for rows.Next() {
 		var sc checker.ServiceCheck
 		sc.ProbeTrust = &trust
+		sc.HostOverrides = overrides
 		var deviceID, groupID, parentID, credentialID *uuid.UUID
 		var intervalSec, timeoutSec int
 		var retryCount, retryDelaySec, downIntervalSec int

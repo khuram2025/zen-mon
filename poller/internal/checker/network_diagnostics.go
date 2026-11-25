@@ -19,6 +19,10 @@ type NetworkDiagnostics struct {
 	ConnectMS    *float64 `json:"connect_ms,omitempty"`
 	TLSMS        *float64 `json:"tls_ms,omitempty"`
 	FailureStage string   `json:"failure_stage,omitempty"`
+	// Set when the probe connected to a manual host address instead of
+	// resolving the name: an Up result then says nothing about DNS.
+	OverrideHost    string `json:"override_host,omitempty"`
+	OverrideAddress string `json:"override_address,omitempty"`
 }
 
 func (d *NetworkDiagnostics) JSON() string {
@@ -109,9 +113,11 @@ func traceProbe(ctx context.Context, sc *ServiceCheck, result *ServiceCheckResul
 			d.FailureStage = "response"
 		},
 	}
+	ctx, note := withOverrideNote(ctx)
 	return httptrace.WithClientTrace(ctx, trace), func() {
 		mu.Lock()
 		defer mu.Unlock()
+		d.OverrideHost, d.OverrideAddress = note.get()
 		if result.IsUp {
 			d.FailureStage = ""
 		} else if result.StatusCode > 0 {

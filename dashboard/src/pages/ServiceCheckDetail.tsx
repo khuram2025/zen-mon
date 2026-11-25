@@ -3,6 +3,10 @@ import { regionalDate } from '@/lib/regionalTime'
 import { DailyProbeFailures } from '@/components/services/DailyProbeFailures'
 import { explainServiceFailure } from '@/components/services/failureReason'
 import { ServiceFailureReason } from '@/components/services/ServiceFailureReason'
+import { ConnectionHints } from '@/components/services/ConnectionHints'
+import { manualAddressNote, resultManualAddress } from '@/components/services/connectionAdvice'
+import { CONNECTIONS_LINK } from '@/components/settings/hostOverrides'
+import { useCan } from '@/stores/auth'
 import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -200,6 +204,8 @@ type ProbeEvidenceResult = {
     status_code?: number | null
     authentication?: string
     steps?: ProbeEvidenceStep[]
+    /** Manual host addresses the test connected to instead of using DNS. */
+    manual_addresses?: { host: string; address: string }[]
   }
 }
 
@@ -1562,6 +1568,8 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
     ? `${check.credential_name} · ${check.credential_auth_type === 'ntlm' ? 'NTLM' : check.credential_auth_type}`
     : 'No saved credential'
   const resultLabel = latest?.is_up == null ? NO_DATA : latest.is_up ? 'UP' : 'DOWN'
+  const manualAddress = resultManualAddress(latest?.network_diagnostics)
+  const canManageConnections = useCan()('system.admin')
   const resultTone = latest?.is_up == null ? 'text-muted' : latest.is_up ? 'text-success' : 'text-danger'
   const when = latest?.timestamp
     ? `${relativeTime(latest.timestamp)} · ${regionalDate(new Date(latest.timestamp), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
@@ -1600,7 +1608,20 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
           </div>
           {latest.network_diagnostics.failure_stage && <div className="mt-1 text-xs text-danger">Failed stage: {latest.network_diagnostics.failure_stage.toUpperCase()}</div>}
           <p className="mt-1 text-2xs text-muted">Phase times include connection attempts and redirects. A dash means the phase was not observed.</p>
+          {manualAddress && (
+            // An Up result through a manual address must never be read as working DNS.
+            <div role="note" className="mt-2 flex items-start gap-1.5 rounded-md border border-info/30 bg-info/5 px-2 py-1.5 text-xs text-text2">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" aria-hidden />
+              <span>
+                <span className="font-semibold text-text">Manual address.</span> {manualAddressNote([manualAddress])}{' '}
+                {canManageConnections && <Link to={CONNECTIONS_LINK} className="font-medium text-primary underline-offset-2 hover:underline">Manual host addresses</Link>}
+              </span>
+            </div>
+          )}
         </div>
+      )}
+      {latest?.is_up === false && (
+        <div className="mt-2"><ConnectionHints failed checkType={check.check_type} error={latest?.error_message || check.last_error} /></div>
       )}
       {manualProbe && (
         <div className="mt-2 rounded-md border border-border bg-surface2/40 px-2.5 py-2">
@@ -1619,6 +1640,9 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
             {' · diagnostic only; not counted in status or SLA'}
           </div>
           {manualProbe.result.error && <div className="mt-1 text-danger"><ServiceFailureReason reason={manualProbe.result.error} timeoutSeconds={check.timeout} /></div>}
+          <div className="mt-2">
+            <ConnectionHints failed={manualProbe.result.status === 'down'} checkType={check.check_type} diagnosis={manualProbe.result.diagnosis} error={manualProbe.result.error} manualAddresses={manualProbe.result.details?.manual_addresses} />
+          </div>
           {(manualProbe.result.details?.steps?.length || 0) > 1 && (
             <div className="mt-2 space-y-1 border-t border-border/60 pt-1.5">
               {manualProbe.result.details!.steps!.map((s) => (

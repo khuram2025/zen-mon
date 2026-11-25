@@ -93,6 +93,7 @@ jobs:
       - run: node scripts/test-rule-exclusions.mjs
       - run: node scripts/test-rule-overrides-ui.mjs
       - run: node scripts/test-discovery-rules.mjs
+      - run: node scripts/test-service-check-connections.mjs
       - run: npm run test:alert-wizard
       - run: npm run test:list-ordering
       - run: npm run test:baseline-details

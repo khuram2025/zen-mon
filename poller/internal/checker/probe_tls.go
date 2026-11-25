@@ -33,15 +33,34 @@ type ProbeTrustCertificate struct {
 
 func probeTransport(sc *ServiceCheck, roots *x509.CertPool) *http.Transport {
 	dial := &net.Dialer{Timeout: sc.Timeout}
+	// A manual host address replaces only the address dialled here. Every
+	// connection asks again by name, so a redirect to another host is looked
+	// up for that host, and the TLS configuration below keeps the name.
+	target := func(ctx context.Context, addr string) (string, error) {
+		target, host, used, err := sc.HostOverrides.connectAddress(addr, probeIPVersion(sc))
+		if err != nil {
+			return "", err
+		}
+		noteOverride(ctx, host, used)
+		return target, nil
+	}
 	return &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return dial.DialContext(ctx, ProbeNetwork(probeIPVersion(sc)), addr)
+		address, err := target(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		return dial.DialContext(ctx, ProbeNetwork(probeIPVersion(sc)), address)
 	}, DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
 		cfg := probeTLSConfig(ctx, host, sc.ProbeTrust, roots, sc.HTTPIgnoreTLSErrors)
-		raw, err := dial.DialContext(ctx, ProbeNetwork(probeIPVersion(sc)), addr)
+		address, err := target(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := dial.DialContext(ctx, ProbeNetwork(probeIPVersion(sc)), address)
 		if err != nil {
 			return nil, err
 		}
@@ -79,12 +98,22 @@ type issuerFetcher func(context.Context, string) ([]*x509.Certificate, error)
 // VerifyServiceTLS returns a leaf only after strict verification. The caller
 // may pin that leaf for its immediately following HTTP connection.
 func VerifyServiceTLS(ctx context.Context, host string, port int, policy *ProbeTrustPolicy, ipVersion ...string) (*x509.Certificate, error) {
+	return VerifyServiceTLSAt(ctx, host, "", port, policy, ipVersion...)
+}
+
+// VerifyServiceTLSAt is VerifyServiceTLS connecting to a manual host address.
+// The certificate is still verified for host, never for the address.
+func VerifyServiceTLSAt(ctx context.Context, host, address string, port int, policy *ProbeTrustPolicy, ipVersion ...string) (*x509.Certificate, error) {
 	d := tls.Dialer{Config: probeTLSConfig(ctx, host, policy, nil, false)}
 	network := "tcp"
 	if len(ipVersion) > 0 {
 		network = ProbeNetwork(ipVersion[0])
 	}
-	conn, err := d.DialContext(ctx, network, net.JoinHostPort(host, fmt.Sprint(port)))
+	connectTo := host
+	if address != "" {
+		connectTo = address
+	}
+	conn, err := d.DialContext(ctx, network, net.JoinHostPort(connectTo, fmt.Sprint(port)))
 	if err != nil {
 		return nil, err
 	}

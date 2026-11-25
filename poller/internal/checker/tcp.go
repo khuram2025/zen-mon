@@ -30,11 +30,15 @@ func (c *TCPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID strin
 		PollerID:       pollerID,
 	}
 
-	addr := tcpAddress(sc.TargetHost, sc.TargetPort)
+	// A manual host address changes only where the connection goes.
+	addr, host, manual, _ := sc.HostOverrides.connectAddress(tcpAddress(sc.TargetHost, sc.TargetPort), "")
 
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, sc.Timeout)
 	result.ResponseTime = time.Since(start)
+	if manual != "" {
+		result.Diagnostics = overrideDiagnostics(sc, host, manual, err == nil)
+	}
 
 	if err != nil {
 		result.Error = fmt.Sprintf("tcp connect failed: %v", err)

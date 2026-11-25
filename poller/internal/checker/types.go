@@ -22,6 +22,7 @@ type HTTPWorkflowStep struct {
 // ServiceCheck represents a configured service check loaded from PostgreSQL.
 type ServiceCheck struct {
 	ProbeTrust            *ProbeTrustPolicy
+	HostOverrides         HostOverrides // manual host addresses for this vantage; never read by DNS checks
 	ID                    uuid.UUID
 	DeviceID              *uuid.UUID
 	GroupID               *uuid.UUID

@@ -1,0 +1,44 @@
+{
+  "description": "Which manual host addresses apply at one place. Shared by poller/internal/checker (ResolveHostOverrides) and server/app/services/host_overrides.py (resolve_for). A row for the place wins over an 'everywhere' row for the same name; names match exactly, ignoring case and a trailing dot; addresses never match as names.",
+  "entries": [
+    {"host": "portal.example.local", "address": "10.1.2.3", "scope": "all"},
+    {"host": "portal.example.local", "address": "10.9.9.9", "scope": "central"},
+    {"host": "portal.example.local", "address": "192.168.50.7", "scope": "sensor", "sensor_id": "11111111-1111-4111-8111-111111111111"},
+    {"host": "intranet.example.local", "address": "2001:db8::10", "scope": "all"},
+    {"host": "branch-only.example.local", "address": "172.16.4.4", "scope": "sensor", "sensor_id": "22222222-2222-4222-8222-222222222222"},
+    {"host": "hq-only.example.local", "address": "10.0.0.8", "scope": "central"}
+  ],
+  "places": [
+    {
+      "place": "central",
+      "expect": {
+        "portal.example.local": "10.9.9.9",
+        "intranet.example.local": "2001:db8::10",
+        "hq-only.example.local": "10.0.0.8"
+      }
+    },
+    {
+      "place": "11111111-1111-4111-8111-111111111111",
+      "expect": {
+        "portal.example.local": "192.168.50.7",
+        "intranet.example.local": "2001:db8::10"
+      }
+    },
+    {
+      "place": "22222222-2222-4222-8222-222222222222",
+      "expect": {
+        "portal.example.local": "10.1.2.3",
+        "intranet.example.local": "2001:db8::10",
+        "branch-only.example.local": "172.16.4.4"
+      }
+    }
+  ],
+  "lookups": [
+    {"place": "central", "host": "Portal.Example.Local", "address": "10.9.9.9"},
+    {"place": "central", "host": "portal.example.local.", "address": "10.9.9.9"},
+    {"place": "central", "host": "sub.portal.example.local", "address": null},
+    {"place": "central", "host": "branch-only.example.local", "address": null},
+    {"place": "central", "host": "10.9.9.9", "address": null},
+    {"place": "22222222-2222-4222-8222-222222222222", "host": "hq-only.example.local", "address": null}
+  ]
+}

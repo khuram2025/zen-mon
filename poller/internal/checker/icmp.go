@@ -49,7 +49,17 @@ func (c *ICMPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 		count = 10
 	}
 
-	pinger, err := probing.NewPinger(sc.TargetHost)
+	// A manual host address is pinged instead of resolving the name.
+	target := sc.TargetHost
+	manual, usesManual := sc.HostOverrides.Lookup(sc.TargetHost)
+	if usesManual {
+		target = manual
+		defer func() {
+			result.Diagnostics = overrideDiagnostics(sc, sc.TargetHost, manual, result.PacketsReceived > 0)
+		}()
+	}
+
+	pinger, err := probing.NewPinger(target)
 	if err != nil {
 		result.IsUp = false
 		result.Error = fmt.Sprintf("resolve: %v", err)

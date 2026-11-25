@@ -14,6 +14,7 @@ from app.api.v1 import storage_management as storage_api
 from app.api.v1 import system_status as system_status_api
 from app.api.v1 import security_settings as security_api
 from app.api.v1.probe_trust import router as probe_trust_router
+from app.api.v1.host_overrides import router as host_overrides_router
 from app.api.v1.ssh_terminal import router as ssh_terminal_router
 from app.api.v1 import management_access
 from app.api.v1 import network_events
@@ -167,6 +168,7 @@ def create_app() -> FastAPI:
     app.include_router(system_status_api.router, prefix="/api/v1")
     app.include_router(security_api.router, prefix="/api/v1")
     app.include_router(probe_trust_router, prefix="/api/v1")
+    app.include_router(host_overrides_router, prefix="/api/v1")
     app.include_router(ssh_terminal_router, prefix="/api/v1")
     app.include_router(management_access.router, prefix="/api/v1")
     app.include_router(support.router, prefix="/api/v1")

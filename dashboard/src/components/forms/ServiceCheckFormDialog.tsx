@@ -27,6 +27,7 @@ import {
 import { toast } from '@/components/ui/Toast'
 import { ExpectedStatusInput } from '@/components/forms/ExpectedStatusInput'
 import { ServiceWorkflowFields } from '@/components/forms/ServiceWorkflowFields'
+import { ConnectionHints } from '@/components/services/ConnectionHints'
 
 type State = {
   name: string
@@ -170,6 +171,8 @@ type ServiceTestResult = {
     steps_passed?: number
     steps?: ServiceTestStep[]
     tls_verification_disabled?: boolean
+    /** Manual host addresses the test connected to instead of using DNS. */
+    manual_addresses?: { host: string; address: string }[]
   }
 }
 
@@ -181,6 +184,8 @@ const DIAGNOSIS_LABELS: Record<string, string> = {
   unreachable: 'Service unreachable',
   connectivity: 'Connection failed',
   tls: 'TLS / certificate problem',
+  tls_trust: 'Certificate not trusted',
+  tls_name: 'Certificate issued for a different name',
   redirect: 'Redirect problem',
   http_status: 'Unexpected HTTP response',
   content: 'Required content missing',
@@ -278,6 +283,9 @@ function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
           </span>
         )}
       </div>
+
+      {/* Certificate trust and name resolution are fixed in Settings, not in this form: say so and link there. */}
+      <ConnectionHints failed={!passed} diagnosis={result.diagnosis} error={result.error} manualAddresses={result.details.manual_addresses} newTab />
 
       {result.details.tls_verification_disabled && (
         <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">

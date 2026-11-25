@@ -56,6 +56,29 @@ def _auth_schemes(value: str | None) -> list[str]:
     return found
 
 
+_DNS_MARKERS = ("name or service not known", "nodename nor servname", "getaddrinfo", "temporary failure in name resolution", "no such host", "name resolution")
+_TLS_MARKERS = ("certificate", "x509", "ssl", "tls")
+_TLS_TRUST_MARKERS = ("unknown authority", "self-signed", "self signed", "unable to get local issuer", "unable to verify the first certificate", "trusted chain")
+_TLS_NAME_MARKERS = ("not valid for any names", "is valid for", "is not valid for", "hostname mismatch", "doesn't match", "does not match", "ip address mismatch")
+
+
+def tls_diagnosis(text: str) -> tuple[str, str]:
+    """Split TLS failures into the ones an operator fixes in different places.
+
+    ``tls_trust``: the certificate's issuer is not trusted here (install the CA
+    under Security & TLS). ``tls_name``: the certificate was issued for another
+    name (the URL, or the address the name leads to, is wrong).
+    """
+    text = text.lower()
+    if any(marker in text for marker in _TLS_TRUST_MARKERS):
+        return "tls_trust", "The service's certificate is not signed by a certificate authority this appliance trusts"
+    if any(marker in text for marker in _TLS_NAME_MARKERS):
+        return "tls_name", "The service's certificate was issued for a different name"
+    if "expired" in text or "not yet valid" in text:
+        return "tls", "The service's certificate has expired or is not valid yet"
+    return "tls", "The TLS connection or certificate validation failed"
+
+
 def _request_diagnosis(exc: httpx.HTTPError) -> tuple[str, str]:
     """Map httpx failures to stable, user-facing diagnostic categories."""
     if isinstance(exc, httpx.TimeoutException):
@@ -63,12 +86,14 @@ def _request_diagnosis(exc: httpx.HTTPError) -> tuple[str, str]:
 
     text = " ".join(str(item) for item in (exc, exc.__cause__, exc.__context__) if item).lower()
     if isinstance(exc, httpx.ConnectError):
-        if any(marker in text for marker in ("name or service not known", "nodename nor servname", "getaddrinfo", "temporary failure in name resolution")):
+        if "the manual address" in text:
+            return "connectivity", str(exc)
+        if any(marker in text for marker in _DNS_MARKERS):
             return "dns", "The hostname could not be resolved"
         if any(marker in text for marker in ("connection refused", "errno 111", "errno 61")):
             return "connection_refused", "The host is reachable but refused the connection"
-        if any(marker in text for marker in ("certificate verify failed", "ssl", "tls")):
-            return "tls", "The TLS connection or certificate validation failed"
+        if any(marker in text for marker in _TLS_MARKERS):
+            return tls_diagnosis(text)
         if any(marker in text for marker in ("network is unreachable", "no route to host")):
             return "unreachable", "No network route to the service is available"
         return "connectivity", "A connection to the service could not be established"
@@ -163,14 +188,17 @@ async def execute_http_workflow(
 
     ip_version = (getattr(check, "config", None) or {}).get("ip_version", "auto")
     probe_trust = getattr(check, "probe_trust", None)
+    # Manual host addresses that apply on this appliance, and the ones this run used.
+    host_overrides = getattr(check, "host_overrides", None) or None
+    used_addresses: dict[str, str] = {}
     if _transport is None and probe_trust is not None and not ignore_tls_errors and auth_type != "ntlm":
         from app.services.probe_tls import ProbeTrustTransport
-        _transport = ProbeTrustTransport(probe_trust, timeout, ip_version)
+        _transport = ProbeTrustTransport(probe_trust, timeout, ip_version, host_overrides, used_addresses)
 
     if auth_type == "ntlm":
         if _transport is not None:
             raise ValueError("A custom HTTPX transport cannot execute an NTLM probe")
-        return await asyncio.to_thread(
+        outcome = await asyncio.to_thread(
             _execute_ntlm_workflow,
             steps,
             operator,
@@ -180,11 +208,19 @@ async def execute_http_workflow(
             base_origin,
             probe_trust,
             ip_version,
+            host_overrides,
+            used_addresses,
         )
+        outcome["details"]["manual_addresses"] = _manual_addresses(used_addresses)
+        return outcome
 
-    if _transport is None and ip_version != "auto":
-        from app.services.probe_tls import probe_local_address
-        _transport = httpx.AsyncHTTPTransport(verify=not ignore_tls_errors, local_address=probe_local_address(ip_version))
+    if _transport is None and (ip_version != "auto" or host_overrides):
+        from app.services.probe_tls import HostOverrideTransport, probe_local_address
+
+        def plain_transport():
+            return httpx.AsyncHTTPTransport(verify=not ignore_tls_errors, local_address=probe_local_address(ip_version))
+
+        _transport = HostOverrideTransport(plain_transport, host_overrides, ip_version, used_addresses) if host_overrides else plain_transport()
 
     client_auth = None
     if auth_type == "basic":
@@ -296,8 +332,14 @@ async def execute_http_workflow(
             "steps_passed": passed,
             "status_code": results[-1]["status_code"] if results else None,
             "steps": results,
+            "manual_addresses": _manual_addresses(used_addresses),
         },
     }
+
+
+def _manual_addresses(used: dict[str, str]) -> list[dict[str, str]]:
+    """The manual host addresses a run connected to, so a pass is never read as working DNS."""
+    return [{"host": host, "address": address} for host, address in used.items()]
 
 
 def _execute_ntlm_workflow(
@@ -309,6 +351,8 @@ def _execute_ntlm_workflow(
     base_origin: tuple[str, str | None, int | None],
     probe_trust: dict | None = None,
     ip_version: str = "auto",
+    host_overrides: dict[str, str] | None = None,
+    used_addresses: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute NTLM/Negotiate requests in a private worker thread.
 
@@ -319,13 +363,13 @@ def _execute_ntlm_workflow(
     started = time.monotonic()
     results: list[dict[str, Any]] = []
     session = requests.Session()
-    if ip_version != "auto":
+    if ip_version != "auto" or host_overrides:
         from app.services.probe_tls import ProbeAddressAdapter
-        session.mount("http://", ProbeAddressAdapter(ip_version))
-        session.mount("https://", ProbeAddressAdapter(ip_version))
+        session.mount("http://", ProbeAddressAdapter(ip_version, host_overrides, used_addresses))
+        session.mount("https://", ProbeAddressAdapter(ip_version, host_overrides, used_addresses))
     if probe_trust is not None and not ignore_tls_errors:
         from app.services.probe_tls import ProbeTrustAdapter
-        session.mount("https://", ProbeTrustAdapter(probe_trust, timeout, ip_version))
+        session.mount("https://", ProbeTrustAdapter(probe_trust, timeout, ip_version, host_overrides, used_addresses))
     session.auth = HttpNtlmAuth(values["username"], values["password"])
     session.headers["User-Agent"] = "ZenPlus-Monitor/1.0"
     try:
@@ -427,10 +471,12 @@ def _execute_ntlm_workflow(
             except requests.RequestException as exc:
                 item["response_time_ms"] = round((time.monotonic() - step_started) * 1000, 1)
                 message = str(exc).lower()
-                if "certificate" in message or "ssl" in message:
-                    item["diagnosis"] = "tls"
-                    item["error"] = "The TLS connection or certificate validation failed"
-                elif "name resolution" in message or "getaddrinfo" in message:
+                if "the manual address" in message:
+                    item["diagnosis"] = "connectivity"
+                    item["error"] = str(exc)
+                elif any(marker in message for marker in ("certificate", "x509", "ssl")):
+                    item["diagnosis"], item["error"] = tls_diagnosis(message)
+                elif any(marker in message for marker in _DNS_MARKERS):
                     item["diagnosis"] = "dns"
                     item["error"] = "The hostname could not be resolved"
                 elif "refused" in message:
