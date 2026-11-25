@@ -1,0 +1,42 @@
+{% extends "core/base.html" %}
+
+{% block extra_head %}{% include "trial_downloads/_styles.html" %}{% endblock %}
+
+{% block content %}
+<section class="page-hero ink-glow"><div class="container">
+  <p class="eyebrow on-ink">Appliance release · {{ released_on|date:"j F Y" }}</p>
+  <h1>ZenPlus {{ release.version }} virtual appliance.</h1>
+  <p>A ready-to-run monitoring appliance for your hypervisor. Import it, complete a short first setup and start a free trial on your own network.</p>
+  <ul class="tdl-facts"><li>{{ release.trial }}</li><li>No payment card</li><li>Signed and verifiable</li></ul>
+  <div class="hero-actions"><a class="btn btn-primary" href="{% url 'trial_downloads:request' %}">Start free trial</a><a class="btn btn-on-ink" href="/kb/zenplus/installation/">Installation guide</a></div>
+</div></section>
+
+<section class="section"><div class="container tdl-stack">
+  <div class="tdl-panel" id="download">
+    <p class="eyebrow">Packages</p>
+    <h2>Choose the package for your hypervisor</h2>
+    <p class="tdl-meta">Every package contains the same ZenPlus {{ release.version }} and needs {{ release.requirements }}.</p>
+    {% for artifact in artifacts %}
+    <div class="tdl-file" id="{{ artifact.key }}">
+      <div><h3>{{ artifact.label }}</h3><p>{{ artifact.summary }}</p>
+        <p class="tdl-meta">{{ artifact.size }} · <a href="{{ artifact.checksum_url }}">Checksum</a> · <a href="{{ artifact.signature_url }}">Signature</a> · <a href="{{ artifact.install_url }}">Import steps</a></p></div>
+      <a class="btn btn-primary" href="{{ artifact.request_url }}" rel="nofollow">Get {{ artifact.label }}</a>
+      <p class="tdl-hash">SHA-256 {{ artifact.sha256 }}</p>
+    </div>
+    {% endfor %}
+    <p class="tdl-meta" style="margin:16px 0 0">Running VMware ESXi, KVM, Proxmox or Nutanix? <a href="/contact/?topic=trial">Tell us your platform</a> and we will confirm the right package.</p>
+  </div>
+
+  <div class="tdl-panel" id="verify">
+    <p class="eyebrow">Integrity</p>
+    <h2>Verify before importing</h2>
+    {% include "trial_downloads/_verify.html" %}
+  </div>
+
+  <div class="grid grid-2">
+    <article class="card" id="existing"><h3>Already running ZenPlus?</h3><p>Keep your appliance and its data. Registered appliances receive new releases through <strong>Settings → General → Updates</strong>; a new image does not migrate an existing deployment.</p><p><a href="/kb/zenplus/updates/">Signed updates</a></p></article>
+    <article class="card" id="evidence"><h3>Release records</h3><p>Published with every release for your security and procurement review.</p>
+      <p>{% for item in release.evidence %}<a href="{{ item.url }}">{{ item.label }}</a>{% if not forloop.last %}<br>{% endif %}{% endfor %}</p></article>
+  </div>
+</div></section>
+{% endblock %}

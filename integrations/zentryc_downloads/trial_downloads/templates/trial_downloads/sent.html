@@ -1,0 +1,26 @@
+{% extends "core/base.html" %}
+
+{% block extra_head %}{% include "trial_downloads/_styles.html" %}{% endblock %}
+
+{% block content %}
+<section class="page-hero ink-glow"><div class="container">
+  <p class="eyebrow on-ink">Almost there</p>
+  <h1>Check your inbox.</h1>
+  <p>We have sent your personal download link. Open it within {{ link_hours }} hours to reach your downloads.</p>
+</div></section>
+<section class="section"><div class="container"><div class="tdl-center">
+  <div class="tdl-panel">
+    <h2>No email after a few minutes?</h2>
+    <ul class="tdl-plain">
+      <li>Look in your spam or quarantine folder for a message from Zentryc.</li>
+      <li>Some company mail filters hold new senders for a short time.</li>
+      <li>If the address had a typing mistake, <a href="{% url 'trial_downloads:request' %}">send the request again</a>.</li>
+      <li>Still nothing? <a href="/contact/?topic=trial">Contact us</a> and we will arrange the download.</li>
+    </ul>
+  </div>
+  <div class="tdl-actions" style="justify-content:center">
+    <a class="btn btn-secondary" href="/kb/zenplus/installation/">Read the installation guide</a>
+    <a class="btn btn-secondary" href="/demo/">Explore the product demo</a>
+  </div>
+</div></div></section>
+{% endblock %}

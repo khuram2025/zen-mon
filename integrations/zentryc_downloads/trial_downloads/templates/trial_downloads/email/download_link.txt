@@ -1,0 +1,21 @@
+Hello {{ lead.first_name }},
+
+Thank you for your interest in ZenPlus. Your personal download page is ready:
+
+{{ url }}
+
+Open the link within {{ hours }} hours. After that the page works for {{ days }} days, so you can come back to it while you set up.
+
+What you get
+- ZenPlus {{ release.version }} virtual appliance for VMware or Hyper-V
+- A free trial: {{ release.trial }}
+- Requirements: {{ release.requirements }}
+
+Installation guide: {{ site_url }}/kb/zenplus/installation/
+
+If you would like help with the setup or with adding your first devices, reply to this email. Your reference is {{ lead.reference }}.
+
+The link is personal to you; please do not forward it. If you did not ask for this download, ignore this email and nothing further will be sent.
+
+Zentryc
+{{ site_url }}

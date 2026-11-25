@@ -1,0 +1,53 @@
+{% extends "core/base.html" %}
+
+{% block extra_head %}{% include "trial_downloads/_styles.html" %}{% endblock %}
+
+{% block content %}
+<section class="page-hero ink-glow"><div class="container">
+  <p class="eyebrow on-ink">Your ZenPlus trial</p>
+  <h1>Thank you, {{ lead.first_name }}. Your downloads are ready.</h1>
+  <p>ZenPlus {{ release.version }} for {{ lead.company }}. This page is personal to you and works until {{ lead.access_expires_at|date:"j F Y" }}.</p>
+  <ul class="tdl-facts"><li>{{ release.trial }}</li><li>Reference {{ lead.reference }}</li></ul>
+</div></section>
+
+<section class="section"><div class="container tdl-stack">
+  <div class="tdl-panel">
+    <p class="eyebrow">Step 1</p>
+    <h2>Download the package for your hypervisor</h2>
+    <p class="tdl-meta">Needs {{ release.requirements }}.</p>
+    {% for artifact in artifacts %}
+    <div class="tdl-file">
+      <div><h3>{{ artifact.label }}</h3><p>{{ artifact.summary }}</p>
+        <p class="tdl-meta">{{ artifact.size }} · <a href="{{ artifact.checksum_url }}">Checksum</a> · <a href="{{ artifact.signature_url }}">Signature</a> · <a href="{{ artifact.install_url }}">Import steps</a></p></div>
+      <a class="btn btn-primary" href="{{ artifact.download_url }}" rel="nofollow">Download {{ artifact.label }}</a>
+      <p class="tdl-hash">SHA-256 {{ artifact.sha256 }}</p>
+    </div>
+    {% endfor %}
+    {% if downloads_left < 4 %}<p class="tdl-meta" style="margin:14px 0 0">{{ downloads_left }} download{{ downloads_left|pluralize }} left on this link. Interrupted downloads resume without using another.</p>{% endif %}
+  </div>
+
+  <div class="tdl-panel">
+    <p class="eyebrow">Step 2</p>
+    <h2>Verify the download</h2>
+    {% include "trial_downloads/_verify.html" %}
+  </div>
+
+  <div class="tdl-panel">
+    <p class="eyebrow">Step 3</p>
+    <h2>Import and complete first setup</h2>
+    <ol class="tdl-plain">
+      <li>Import the package with the steps for <a href="/kb/zenplus/installation/#vmware">VMware</a> or <a href="/kb/zenplus/installation/#hyperv">Hyper-V</a>. Keep the CPU, memory, both disks, UEFI and Secure Boot as delivered.</li>
+      <li>Connect the management network adapter to a trusted network with DHCP and power the VM on. Initialisation takes several minutes.</li>
+      <li>Open the VM console and sign in with the first-use login given in the <a href="/kb/zenplus/installation/">installation guide</a>. You are asked to replace the console password and to choose a separate web administrator password.</li>
+      <li>When the console shows <strong>Setup complete</strong>, open the HTTPS address it displays and sign in as <strong>admin</strong> with your new web password.</li>
+      <li>Add your first devices. The trial started at first boot and needs no key.</li>
+    </ol>
+    <p class="tdl-note" style="margin-top:18px">To receive signed product updates during the evaluation, <a href="/contact/?topic=registration">request an evaluation registration key</a> and quote reference <strong>{{ lead.reference }}</strong>.</p>
+  </div>
+
+  <div class="grid grid-2">
+    <article class="card"><h3>Need a hand?</h3><p>Reply to the email we sent you, or <a href="/contact/?topic=trial">ask for trial assistance</a>. An engineer can join a short call to help you add your first devices.</p></article>
+    <article class="card"><h3>While it downloads</h3><p><a href="/kb/zenplus/installation/">Installation guide</a><br><a href="/kb/zenplus/registration/">Trial, registration and licensing</a><br><a href="/demo/">Product demo</a></p></article>
+  </div>
+</div></section>
+{% endblock %}

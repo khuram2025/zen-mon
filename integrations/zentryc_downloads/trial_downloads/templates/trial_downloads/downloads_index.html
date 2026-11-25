@@ -1,0 +1,60 @@
+{% extends "core/base.html" %}
+
+{% block extra_head %}{% include "trial_downloads/_styles.html" %}{% endblock %}
+
+{% block content %}
+<section class="page-hero ink-glow"><div class="container">
+  <p class="eyebrow on-ink">Free 30-day trial</p>
+  <h1>Run ZenPlus on your own network.</h1>
+  <p>A ready-to-run virtual appliance with the dashboard, polling and databases already installed. Import it, choose your passwords and start monitoring your own devices.</p>
+  <ul class="tdl-facts"><li>No payment card</li><li>{{ release.trial }}</li><li>Your data stays on-premises</li></ul>
+  <div class="hero-actions"><a class="btn btn-primary" href="{% url 'trial_downloads:request' %}">Start free trial</a><a class="btn btn-on-ink" href="/demo/">See the product demo</a></div>
+</div></section>
+
+<section class="section"><div class="container">
+  <div class="grid grid-2">
+    <article class="card">
+      <p class="eyebrow">Start here · monitoring appliance</p>
+      <h2>ZenPlus virtual appliance</h2>
+      <p>ZenPlus {{ release.version }} for VMware and Microsoft Hyper-V. The trial starts by itself on first boot.</p>
+      <ul class="check-list" style="margin:18px 0">
+        <li><strong>Trial:</strong> {{ release.trial }}</li>
+        <li><strong>Needs:</strong> {{ release.requirements }}</li>
+        <li><strong>Packages:</strong> {% for artifact in artifacts %}{{ artifact.label }} ({{ artifact.size }}){% if not forloop.last %}, {% endif %}{% endfor %}</li>
+      </ul>
+      <p><a class="btn btn-primary" href="{% url 'trial_downloads:request' %}">Start free trial</a> <a class="btn btn-secondary" href="{% url 'trial_downloads:release' release.version %}">Release details</a></p>
+      <p class="muted"><a href="/kb/zenplus/installation/">Installation guide</a> · <a href="/kb/zenplus/registration/">Trial and licensing</a></p>
+    </article>
+    <article class="card">
+      <p class="eyebrow">For running deployments · endpoint monitoring</p>
+      <h2>ZenPlus Windows agent</h2>
+      <p>Monitor Windows servers with the server agent, or the combined server and application performance package. The agent reports to your own ZenPlus appliance.</p>
+      <ul class="check-list" style="margin:18px 0">
+        <li>Windows 10/11 and Windows Server, x64</li>
+        <li>Signed EXE and MSI packages</li>
+        <li>Silent rollout with Group Policy, Intune or PowerShell</li>
+      </ul>
+      <p><a class="btn btn-secondary" href="/downloads/zenplus-agent/">Download Windows agent</a></p>
+      <p class="muted">You need a running ZenPlus appliance first.</p>
+    </article>
+  </div>
+
+  <div class="grid grid-3" style="margin-top:28px">
+    <article class="card"><h3>1. Request the download</h3><p>Tell us who you are and we email a personal download link to your work address.</p></article>
+    <article class="card"><h3>2. Import and set up</h3><p>Verify the signed package, import it into your hypervisor and choose your passwords in the VM console.</p></article>
+    <article class="card"><h3>3. Evaluate with support</h3><p>Monitor your own devices for 30 days. An engineer is available to help you get value from the trial.</p></article>
+  </div>
+
+  <div class="section-head" style="margin-top:64px;margin-bottom:26px"><h2>Questions before you download</h2></div>
+  <div class="tdl-faq">
+    <details><summary>Do I need a payment card or a license key?</summary><p>No. The appliance starts a 30-day local trial on first boot. A registration key is needed only to receive signed product updates, and you can request one during the evaluation.</p></details>
+    <details><summary>Where does my monitoring data go?</summary><p>It stays with you. ZenPlus runs entirely on the appliance inside your network, and your monitoring data remains within your infrastructure.</p></details>
+    <details><summary>Which hypervisors are supported?</summary><p>This release is published for VMware Workstation 17 or later and Microsoft Hyper-V (Generation 2). For VMware ESXi, KVM, Proxmox or Nutanix, <a href="/contact/?topic=trial">tell us your platform</a> and we will confirm the right package.</p></details>
+    <details><summary>Why do you ask for my details?</summary><p>So that a real engineer can help with your evaluation, and so we know who is running our software. We do not sell or share your details. See the <a href="/privacy/">Privacy Policy</a>.</p></details>
+    <details><summary>What happens when the trial ends?</summary><p>Talk to us before the 30 days are over and we will confirm the subscription that fits your estate. See <a href="/pricing/">pricing</a> and <a href="/kb/zenplus/registration/">trial and licensing</a>.</p></details>
+    <details><summary>I am already a customer. Do I need this download?</summary><p>No. Keep your appliance and update it from Settings. Use this download only for a new installation.</p></details>
+  </div>
+
+  <div class="section-head" style="margin-top:56px"><h2>Prefer to see it first?</h2><p><a href="/demo/">Explore the product demo</a> or <a href="/contact/?topic=demo">request a guided walkthrough</a>.</p></div>
+</div></section>
+{% endblock %}
