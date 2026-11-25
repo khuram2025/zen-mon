@@ -506,8 +506,11 @@ async def test_service_check_configuration(
 
         # The workflow runner consumes the same dict-shaped steps stored in JSONB.
         check = SimpleNamespace(**data.model_dump(mode="python"))
+        from app.services.host_overrides import central_overrides
         from app.services.probe_trust import load_probe_trust
         check.probe_trust = await load_probe_trust(db)
+        # The test runs on this appliance, so it uses the manual host addresses that apply here.
+        check.host_overrides = await central_overrides(db)
         result = await execute_http_workflow(check, runtime_credential)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -750,6 +753,16 @@ async def test_service_check(
         "details": {},
     }
 
+    # The test runs on this appliance: it uses the manual host addresses that
+    # apply here, as the central poller does (docs/service-check-connections.md).
+    # DNS checks never use them.
+    from app.services.host_overrides import central_overrides, lookup as manual_address
+    host_overrides = await central_overrides(db)
+    manual = manual_address(host_overrides, check.target_host) if check.check_type in ("tcp", "tls", "icmp") else None
+    if manual:
+        result["details"]["manual_addresses"] = [{"host": str(check.target_host).rstrip(".").lower(), "address": manual}]
+    connect_family = socket.AF_INET6 if manual and ":" in manual else socket.AF_INET
+
     start = time.monotonic()
 
     try:
@@ -757,15 +770,16 @@ async def test_service_check(
             from app.services.service_workflow import execute_http_workflow
             from app.services.probe_trust import load_probe_trust
             check.probe_trust = await load_probe_trust(db)
+            check.host_overrides = host_overrides
             workflow_result = await execute_http_workflow(check, runtime_credential)
             result.update(workflow_result)
 
         elif check.check_type == "tcp":
             host = check.target_host
             port = check.target_port or 80
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = socket.socket(connect_family, socket.SOCK_STREAM)
             sock.settimeout(check.timeout)
-            sock.connect((host, port))
+            sock.connect((manual or host, port))
             elapsed = (time.monotonic() - start) * 1000
             sock.close()
             result["response_time_ms"] = round(elapsed, 1)
@@ -778,11 +792,12 @@ async def test_service_check(
             import asyncio
             from app.services.probe_trust import load_probe_trust
             from app.services.probe_tls import verified_context
-            ctx = await asyncio.to_thread(verified_context, host, port, max(1, min(int(check.timeout or 10), 60)), await load_probe_trust(db))
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # A manual address changes only where the connection goes: the certificate is verified for the name.
+            ctx = await asyncio.to_thread(verified_context, host, port, max(1, min(int(check.timeout or 10), 60)), await load_probe_trust(db), "auto", manual)
+            sock = socket.socket(connect_family, socket.SOCK_STREAM)
             sock.settimeout(check.timeout)
             wrapped = ctx.wrap_socket(sock, server_hostname=host)
-            wrapped.connect((host, port))
+            wrapped.connect((manual or host, port))
             elapsed = (time.monotonic() - start) * 1000
             cert = wrapped.getpeercert()
             wrapped.close()
@@ -802,7 +817,7 @@ async def test_service_check(
             count = int((check.config or {}).get("count", 1)) or 1
             count = max(1, min(count, 10))
             proc = subprocess.run(
-                ["ping", "-c", str(count), "-W", str(max(1, check.timeout)), check.target_host],
+                ["ping", "-c", str(count), "-W", str(max(1, check.timeout)), manual or check.target_host],
                 capture_output=True, text=True, timeout=check.timeout + 5,
             )
             elapsed = (time.monotonic() - start) * 1000
@@ -819,7 +834,11 @@ async def test_service_check(
                 result["response_time_ms"] = round(elapsed, 1)
                 result["status"] = "down"
                 loss_m = re.search(r"(\d+)%\s*packet loss", out)
-                result["error"] = f"Ping failed ({loss_m.group(1)}% packet loss)" if loss_m else "Ping failed"
+                if re.search(r"name or service not known|temporary failure in name resolution|unknown host", out, re.I):
+                    result["error"] = "The hostname could not be resolved"
+                    result["diagnosis"] = "dns"
+                else:
+                    result["error"] = f"Ping failed ({loss_m.group(1)}% packet loss)" if loss_m else "Ping failed"
 
         elif check.check_type == "dns":
             # DNS resolution check. Config: record_type (A|AAAA|CNAME|MX|TXT), expected (optional substring).
@@ -877,9 +896,10 @@ async def test_service_check(
     except ssl.SSLError as e:
         elapsed = (time.monotonic() - start) * 1000
         result["response_time_ms"] = round(elapsed, 1)
+        from app.services.service_workflow import tls_diagnosis
         result["status"] = "down"
         result["error"] = f"TLS error: {e}"
-        result["diagnosis"] = "tls"
+        result["diagnosis"] = tls_diagnosis(str(e))[0]
     except Exception as e:
         elapsed = (time.monotonic() - start) * 1000
         result["response_time_ms"] = round(elapsed, 1)

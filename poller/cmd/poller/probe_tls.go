@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net/netip"
 	"time"
 
 	"github.com/zenplus/poller/internal/checker"
@@ -17,6 +18,7 @@ func verifyServiceTLS(input io.Reader, output io.Writer) error {
 	var request struct {
 		IPVersion string                    `json:"ip_version"`
 		Host      string                    `json:"host"`
+		Address   string                    `json:"address"` // manual host address to connect to; the certificate is still checked for Host
 		Port      int                       `json:"port"`
 		Timeout   int                       `json:"timeout"`
 		Policy    *checker.ProbeTrustPolicy `json:"policy"`
@@ -30,9 +32,14 @@ func verifyServiceTLS(input io.Reader, output io.Writer) error {
 	if request.IPVersion != "" && request.IPVersion != "auto" && request.IPVersion != "ipv4" && request.IPVersion != "ipv6" {
 		return fmt.Errorf("invalid IP version")
 	}
+	if request.Address != "" {
+		if _, err := netip.ParseAddr(request.Address); err != nil {
+			return fmt.Errorf("invalid connect address")
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(request.Timeout)*time.Second)
 	defer cancel()
-	cert, err := checker.VerifyServiceTLS(ctx, request.Host, request.Port, request.Policy, request.IPVersion)
+	cert, err := checker.VerifyServiceTLSAt(ctx, request.Host, request.Address, request.Port, request.Policy, request.IPVersion)
 	if err != nil {
 		return err
 	}

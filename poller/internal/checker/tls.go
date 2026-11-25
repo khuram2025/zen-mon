@@ -3,6 +3,7 @@ package checker
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"math"
 	"net"
@@ -13,7 +14,8 @@ import (
 
 // TLSChecker performs TLS certificate health checks.
 type TLSChecker struct {
-	logger *zap.SugaredLogger
+	logger  *zap.SugaredLogger
+	rootCAs *x509.CertPool // nil = the system roots; tests set their own
 }
 
 // NewTLSChecker creates a new TLS checker.
@@ -36,15 +38,20 @@ func (c *TLSChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID strin
 		port = 443
 	}
 
-	addr := net.JoinHostPort(sc.TargetHost, fmt.Sprint(port))
+	// A manual host address changes only where the connection goes: the TLS
+	// server name and the certificate name check below keep sc.TargetHost.
+	addr, host, manual, _ := sc.HostOverrides.connectAddress(net.JoinHostPort(sc.TargetHost, fmt.Sprint(port)), "")
 
 	dialer := &net.Dialer{Timeout: sc.Timeout}
-	tlsConfig := probeTLSConfig(ctx, sc.TargetHost, sc.ProbeTrust, nil, false)
+	tlsConfig := probeTLSConfig(ctx, sc.TargetHost, sc.ProbeTrust, c.rootCAs, false)
 
 	start := time.Now()
 	tlsDialer := &tls.Dialer{NetDialer: dialer, Config: tlsConfig}
 	conn, err := tlsDialer.DialContext(ctx, "tcp", addr)
 	result.ResponseTime = time.Since(start)
+	if manual != "" {
+		result.Diagnostics = overrideDiagnostics(sc, host, manual, err == nil)
+	}
 
 	if err != nil {
 		result.Error = fmt.Sprintf("tls connect failed: %v", err)

@@ -348,7 +348,7 @@ export interface ServiceCheckSummary {
 }
 
 export interface ServiceMetricPoint {
-  network_diagnostics?: { ip_version?: string; remote_ip?: string; dns_ms?: number; connect_ms?: number; tls_ms?: number; failure_stage?: string } | null
+  network_diagnostics?: { ip_version?: string; remote_ip?: string; dns_ms?: number; connect_ms?: number; tls_ms?: number; failure_stage?: string; /** Set when the probe connected to a manual host address instead of using DNS. */ override_host?: string; override_address?: string } | null
   timestamp: string
   response_ms: number | null
   is_up: boolean | null

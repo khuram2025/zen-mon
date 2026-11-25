@@ -70,12 +70,14 @@ type state struct {
 }
 
 type configResponse struct {
-	ProbeTrust    *checker.ProbeTrustPolicy `json:"probe_trust"`
-	ETag          string                    `json:"etag"`
-	SensorID      string                    `json:"sensor_id"`
-	SensorName    string                    `json:"sensor_name"`
-	Devices       []configDevice            `json:"devices"`
-	ServiceChecks []configServiceCheck      `json:"service_checks"`
+	ProbeTrust *checker.ProbeTrustPolicy `json:"probe_trust"`
+	// Manual host addresses the controller selected for this sensor.
+	HostOverrides []checker.HostOverrideEntry `json:"host_overrides,omitempty"`
+	ETag          string                      `json:"etag"`
+	SensorID      string                      `json:"sensor_id"`
+	SensorName    string                      `json:"sensor_name"`
+	Devices       []configDevice              `json:"devices"`
+	ServiceChecks []configServiceCheck        `json:"service_checks"`
 }
 
 type configDevice struct {
@@ -90,6 +92,7 @@ type configDevice struct {
 
 type configServiceCheck struct {
 	ProbeTrust            *checker.ProbeTrustPolicy  `json:"-"`
+	HostOverrides         checker.HostOverrides      `json:"-"`
 	CredentialID          *uuid.UUID                 `json:"credential_id"`
 	CredentialAuthType    string                     `json:"credential_auth_type"`
 	CredentialUsername    string                     `json:"credential_username"`
@@ -199,6 +202,7 @@ func cloneConfig(in configResponse) configResponse {
 		out.ProbeTrust = new(checker.ProbeTrustPolicy)
 		_ = json.Unmarshal(data, out.ProbeTrust)
 	}
+	out.HostOverrides = append([]checker.HostOverrideEntry(nil), in.HostOverrides...)
 	out.Devices = append([]configDevice(nil), in.Devices...)
 	for i := range out.Devices {
 		if in.Devices[i].SNMP != nil {
@@ -654,6 +658,11 @@ func clearEnrollmentToken(path string) error {
 	return syncStateDirectory(filepath.Dir(path))
 }
 
+// sensorCapabilities tells the controller which optional configuration this
+// build applies, so a setting an older sensor ignores is shown as not applied
+// instead of silently doing nothing.
+var sensorCapabilities = []string{"host_overrides"}
+
 func sensorVersion() string {
 	if commit == "" || commit == "unknown" {
 		return version
@@ -698,6 +707,7 @@ func (c *client) heartbeat(ctx context.Context, cfg *runtimeConfig, queueDepth, 
 		"queue_dropped_count": dropped,
 		"hostname":            cfg.hostname,
 		"os_info":             cfg.operatingSystem,
+		"capabilities":        sensorCapabilities,
 	}
 	var response heartbeatResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/sensor/heartbeat", body, &response, ""); err != nil {
@@ -1896,9 +1906,11 @@ func (s *checkScheduler) Schedule(ctx context.Context, current configResponse, n
 			run: func() { s.runDevice(ctx, device, interval) },
 		})
 	}
+	hostOverrides := checker.ResolveHostOverrides(current.HostOverrides, "")
 	for _, configured := range current.ServiceChecks {
 		service := configured
 		service.ProbeTrust = current.ProbeTrust
+		service.HostOverrides = hostOverrides
 		if !service.Enabled || service.ID == "" {
 			continue
 		}
@@ -2065,7 +2077,8 @@ func (s *checkScheduler) runService(ctx context.Context, sc configServiceCheck, 
 		HTTPExpectedStatuses: sc.HTTPExpectedStatuses, HTTPContentMatch: sc.HTTPContentMatch,
 		HTTPFollowRedirects: followRedirects, HTTPIgnoreTLSErrors: sc.HTTPIgnoreTLSErrors,
 		HTTPAllowInsecureAuth: sc.HTTPAllowInsecureAuth, Config: cloneJSONMap(sc.Config), ProbeTrust: sc.ProbeTrust,
-		TLSWarnDays: sc.TLSWarnDays, TLSCriticalDays: sc.TLSCriticalDays,
+		HostOverrides: sc.HostOverrides,
+		TLSWarnDays:   sc.TLSWarnDays, TLSCriticalDays: sc.TLSCriticalDays,
 		CheckInterval: interval, Timeout: timeout, RetryCount: sc.RetryCount, RetryDelay: retryDelay,
 	}
 	s.mu.Lock()

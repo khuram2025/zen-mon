@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import ipaddress
-from typing import Optional, Literal, List, Any
+from typing import Annotated, Optional, Literal, List, Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -312,6 +312,9 @@ class HeartbeatRequest(BaseModel):
     hostname: Optional[str] = None
     os_info: Optional[str] = None
     config_etag: Optional[str] = Field(default=None, max_length=128)
+    # Optional abilities this build applies (e.g. "host_overrides"). A sensor
+    # that sends none is treated as having none.
+    capabilities: Optional[List[Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")]]] = Field(default=None, max_length=32)
 
 
 class HeartbeatCommand(BaseModel):
@@ -403,6 +406,8 @@ class ConfigServiceCheck(BaseModel):
 
 class ConfigResponse(BaseModel):
     probe_trust: dict[str, Any] = Field(default_factory=dict)
+    # Manual host addresses that apply to this sensor: [{"host", "address"}].
+    host_overrides: List[dict[str, str]] = Field(default_factory=list)
     etag: str
     sensor_id: str
     sensor_name: str
@@ -448,6 +453,9 @@ class ProbeNetworkDiagnostics(BaseModel):
     connect_ms: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     tls_ms: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     failure_stage: Optional[Literal["dns", "connect", "tls", "response", "http", ""]] = None
+    # Set when the probe connected to a manual host address instead of resolving the name.
+    override_host: Optional[str] = Field(default=None, max_length=253)
+    override_address: Optional[str] = Field(default=None, max_length=64)
 
 
 class ServiceResultItem(BaseModel):

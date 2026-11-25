@@ -1,5 +1,6 @@
 import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ShieldCheck, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -9,6 +10,9 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Switch } from '@/components/ui/Switch'
 import { toast } from '@/components/ui/Toast'
+import { useAllowedPages, useCan } from '@/stores/auth'
+import { useScrollToAnchor } from '@/components/settings/ServiceCheckConnectionsCard'
+import { CONNECTIONS_LINK, CONNECTIONS_PAGE, PROBE_TRUST_ANCHOR } from '@/components/settings/hostOverrides'
 
 interface TrustCertificate {
   id: string; label: string; subject: string; issuer: string
@@ -39,11 +43,22 @@ export function ProbeTrustCard() {
   const remove = useMutation({ mutationFn: async (id: string) => (await api.delete(`/system/security/probe-trust/certificates/${id}`)).data,
     onSuccess: (data: ProbeTrust) => { changed(data); setRemoving(null) }, onError: failed })
   const submit = (event: FormEvent) => { event.preventDefault(); if (file) upload.mutate() }
+  // Linked from Monitoring > Service check connections and from a failed check test.
+  const anchor = useScrollToAnchor(PROBE_TRUST_ANCHOR, !!trust.data)
+  const can = useCan()
+  const pages = useAllowedPages()
+  const connectionsReachable = can('settings.manage') && (!pages || pages.has(CONNECTIONS_PAGE))
 
-  return <Card>
+  return <Card id={PROBE_TRUST_ANCHOR} ref={anchor} className="scroll-mt-16">
     <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5" /> Service probe trust</CardTitle></CardHeader>
     <CardContent className="space-y-5">
       <p className="text-sm text-muted">Trust certificates used by monitored HTTPS services. These settings apply to central HTTP and TLS probes and compatible updated sensors.</p>
+      <p className="text-sm text-muted">
+        A certificate is always checked against the host name in the check. For a name that is not in DNS, or that must be reached at a
+        specific address, set a manual host address{connectionsReachable
+          ? <> under <Link to={CONNECTIONS_LINK} className="font-medium text-primary underline-offset-2 hover:underline">Monitoring &gt; Service check connections</Link>.</>
+          : ' under Monitoring > Service check connections.'}
+      </p>
       {trust.isLoading && <p className="text-sm text-muted">Loading probe trust…</p>}
       {trust.isError && <p className="text-sm text-danger">{apiErrorMessage(trust.error)}</p>}
       {trust.data && <>

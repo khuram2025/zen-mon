@@ -66,6 +66,7 @@ from app.services.sensor_health_service import create_sensor_alert, resolve_sens
 from app.services.sensor_rate_limit import enforce_sensor_quota
 from app.services.audit_service import write_audit_log
 from app.services.probe_trust import load_probe_trust
+from app.services.host_overrides import load_host_overrides, sensor_payload as host_overrides_payload
 from app.schemas.sensor import (
     EnrollRequest,
     EnrollResponse,
@@ -541,6 +542,26 @@ async def _heartbeat_commands(
         for row in rows
     ]
 
+async def _record_capabilities(db: AsyncSession, sensor_id: Any, reported: Optional[list[str]]) -> None:
+    """Keep the abilities the sensor named in this heartbeat (migrate-215).
+
+    Always the latest report: a sensor that names none (an older build) has
+    none, so settings it cannot apply are shown as not applied. Kept apart
+    from the health update, in a savepoint: a heartbeat must never fail
+    because this column cannot be written.
+    """
+    capabilities = json.dumps(sorted(set(reported or [])))
+    try:
+        async with db.begin_nested():
+            await db.execute(
+                text("""UPDATE sensors SET capabilities = CAST(:capabilities AS jsonb)
+                         WHERE id = :id AND capabilities IS DISTINCT FROM CAST(:capabilities AS jsonb)"""),
+                {"id": sensor_id, "capabilities": capabilities},
+            )
+    except Exception:  # noqa: BLE001 - reported abilities are advisory
+        logger.warning("could not record sensor capabilities", exc_info=True)
+
+
 @router.post("/heartbeat", response_model=HeartbeatResponse)
 async def heartbeat(
     data: HeartbeatRequest,
@@ -588,6 +609,7 @@ async def heartbeat(
             "id": sensor["id"],
         },
     )
+    await _record_capabilities(db, sensor["id"], data.capabilities)
     if sensor["status"] != next_status or sensor.get("status_reason") != status_reason:
         await db.execute(
             text("""INSERT INTO sensor_events (sensor_id, kind, detail)
@@ -682,6 +704,10 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
         "service_checks": [dict(row) for row in service_checks],
         "probe_trust": await load_probe_trust(db),
     }
+    # Added only when this sensor has entries, so existing ETags stay as they are.
+    host_overrides = host_overrides_payload((await load_host_overrides(db))["entries"], sensor_id)
+    if host_overrides:
+        material["host_overrides"] = host_overrides
     return _sha256(json.dumps(material, default=str, sort_keys=True, separators=(",", ":")))
 
 
@@ -741,6 +767,7 @@ async def get_config(
     probe_trust = await load_probe_trust(db)
     return ConfigResponse(
         probe_trust=probe_trust,
+        host_overrides=host_overrides_payload((await load_host_overrides(db))["entries"], sensor["id"]),
         etag=etag,
         sensor_id=str(sensor["id"]),
         sensor_name=sensor["name"],
