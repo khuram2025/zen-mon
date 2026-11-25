@@ -128,10 +128,19 @@ appliance executor runs them in order. The current ZenPlus recipe is:
 9. `build_dashboard` — extract the prebuilt `dashboard-dist.tar.gz`
 10. `install_binary` / `install_systemd` — Go poller, netflow collector + its unit, remote sensor
 11. `start_services` — api, poller, netflow, nginx, etc.
-12. `health_check` — `GET http://localhost:8000/api/v1/system/health` (30s)
+12. `run_hook` — `scripts/ota-wait-api.py`: waits up to 180 s for the restarted API to answer,
+    stops early if systemd gave up on the unit, and on failure writes the unit state and the newest
+    API log lines into the update log
+13. `health_check` — `GET http://localhost:8000/api/v1/system/health` (30s per request)
 
-`rollback_steps` = `restore_backup` then `start_services`, so a failed update self-heals to the
-previous version.
+`rollback_steps` = `restore_backup` then `start_services`, then the same wait and health check, so a
+failed update self-heals to the previous version.
+
+> **Why the API wait is a hook** — every installed updater's `health_check` tries 5 times, 3 s
+> apart. On 2026-11-23 appliance 10.51.2.12 needed ~15 s before its API accepted connections:
+> 1.25.24 passed on the fifth attempt, 1.25.25 and 1.25.26 rolled back. The updater runs its
+> already-imported handlers for the whole hop, so only a hook from the payload helps the next
+> install; `updater/health.py` now also retries until a 180 s deadline for later hops.
 
 > **Why step 8 is a hook and not updater code** — `run_hook` executes the script from the freshly
 > extracted payload, so the *new* gate runs on the very first update that carries it, even though
