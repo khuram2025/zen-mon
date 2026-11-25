@@ -85,6 +85,21 @@ func TestResolveHostOverridesSkipsDamagedRows(t *testing.T) {
 	}
 }
 
+func TestParseHostOverrideEntriesNeverFailsOnADamagedDocument(t *testing.T) {
+	for _, raw := range []string{"", "{}", "[]", `"text"`, `{"entries": "x"}`, `{"entries": null}`, "not json"} {
+		if got := ParseHostOverrideEntries([]byte(raw)); len(got) != 0 {
+			t.Errorf("%q: expected no entries, got %v", raw, got)
+		}
+	}
+	// Rows of the wrong shape are left out; the good row beside them still applies.
+	got := ParseHostOverrideEntries([]byte(`{"entries": ["x", 7, {"host": 123, "address": "10.0.0.1"}, null,
+		{"host": "good.test", "address": "10.0.0.2", "scope": "central", "note": "kept", "sensor_id": null}]}`))
+	table := ResolveHostOverrides(got, HostOverrideScopeCentral)
+	if len(table) != 1 || table["good.test"] != "10.0.0.2" {
+		t.Fatalf("unexpected table %v from %v", table, got)
+	}
+}
+
 // overrideTLSServer serves a certificate for service.test and 127.0.0.1 and
 // records the Host header and TLS server name of every request.
 type overrideTLSServer struct {

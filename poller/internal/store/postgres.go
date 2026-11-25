@@ -82,13 +82,9 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	if err := s.pool.QueryRow(ctx, "SELECT COALESCE((SELECT value::text FROM system_settings WHERE key='monitoring.host_overrides'), '{}')").Scan(&overridesJSON); err != nil {
 		return nil, fmt.Errorf("load host overrides: %w", err)
 	}
-	var overridesDoc struct {
-		Entries []checker.HostOverrideEntry `json:"entries"`
-	}
-	if err := json.Unmarshal([]byte(overridesJSON), &overridesDoc); err != nil {
-		return nil, fmt.Errorf("parse host overrides: %w", err)
-	}
-	overrides := checker.ResolveHostOverrides(overridesDoc.Entries, checker.HostOverrideScopeCentral)
+	// A damaged document or row is left out rather than failing the load:
+	// monitoring must not stop because of this setting.
+	overrides := checker.ResolveHostOverrides(checker.ParseHostOverrideEntries([]byte(overridesJSON)), checker.HostOverrideScopeCentral)
 	rows, err := s.pool.Query(ctx, `
 		SELECT sc.id, sc.device_id, sc.name, sc.check_type, sc.enabled,
 		       sc.target_host, COALESCE(sc.target_port, 0), COALESCE(sc.target_url, ''),

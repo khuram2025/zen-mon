@@ -45,7 +45,7 @@ use manual addresses.
 Each entry has:
 
 - **Host name**: one exact name, compared without case and without a trailing dot. No wildcards, no port, no URL.
-  A subdomain is a different name.
+  A subdomain is a different name. A name with non-ASCII characters is stored in its ASCII (punycode) form.
 - **Address**: one IPv4 or IPv6 address. The unspecified address, multicast addresses and addresses with an
   interface zone are refused.
 - **Applies**: everywhere, this appliance only, or one named sensor.
@@ -75,6 +75,8 @@ A check that carries a credential sends it to the address given here. So:
   not saved.
 - Rows that are not a name and an address are skipped by the poller, so a damaged row cannot redirect a check to
   a name of its own.
+- A damaged stored document never stops monitoring: the poller leaves out a row (or the whole document) that is
+  not what the API writes and loads the checks as usual.
 
 ### Where it is applied
 
@@ -94,6 +96,7 @@ A check that carries a credential sends it to the address given here. So:
 
 A sensor names what it can apply in every heartbeat (`capabilities`, stored in `sensors.capabilities`,
 migrate-215). A sensor that does not name `host_overrides` ignores the entries and keeps resolving names itself.
+A heartbeat is never refused over this list; names that are not lower-case words are dropped when it is stored.
 The table says so on every row that reaches such a sensor ("Not applied by …"), and the add/edit dialog warns
 when that sensor is chosen. The entry is stored and takes effect once the sensor is updated. Sensors that never
 enrolled or are disabled run no checks and are not named in the warning.
@@ -120,7 +123,7 @@ When a check test fails, the result says in plain words what kind of problem it 
 | --- | --- | --- |
 | `tls_trust` | The certificate's issuer is not trusted by the appliance, or it is self-signed | Trusted certificates (Security & TLS) |
 | `tls_name` | The certificate was issued for a different name | Manual host addresses (is the address the right server?) |
-| `dns` | The name could not be resolved | Manual host addresses |
+| `dns` | The name could not be resolved | Manual host addresses (never for a DNS check, which does not use them) |
 | `tls` | Any other TLS failure (expired, handshake) | Nothing to configure |
 
 Accounts that cannot change these settings are told what to ask an administrator for, without a link.

@@ -1621,7 +1621,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
         </div>
       )}
       {latest?.is_up === false && (
-        <div className="mt-2"><ConnectionHints failed error={latest?.error_message || check.last_error} /></div>
+        <div className="mt-2"><ConnectionHints failed checkType={check.check_type} error={latest?.error_message || check.last_error} /></div>
       )}
       {manualProbe && (
         <div className="mt-2 rounded-md border border-border bg-surface2/40 px-2.5 py-2">
@@ -1641,7 +1641,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
           </div>
           {manualProbe.result.error && <div className="mt-1 text-danger"><ServiceFailureReason reason={manualProbe.result.error} timeoutSeconds={check.timeout} /></div>}
           <div className="mt-2">
-            <ConnectionHints failed={manualProbe.result.status === 'down'} diagnosis={manualProbe.result.diagnosis} error={manualProbe.result.error} manualAddresses={manualProbe.result.details?.manual_addresses} />
+            <ConnectionHints failed={manualProbe.result.status === 'down'} checkType={check.check_type} diagnosis={manualProbe.result.diagnosis} error={manualProbe.result.error} manualAddresses={manualProbe.result.details?.manual_addresses} />
           </div>
           {(manualProbe.result.details?.steps?.length || 0) > 1 && (
             <div className="mt-2 space-y-1 border-t border-border/60 pt-1.5">

@@ -21,8 +21,13 @@ const TRUST = /unknown authority|self[- ]signed|unable to get local issuer|unabl
 const NAME = /certificate is valid for|not valid for any names|is not valid for|hostname mismatch|issued for a different name/i
 const RESOLUTION = /no such host|name or service not known|temporary failure in name resolution|hostname could not be resolved|enotfound|eai_again|dns lookup failed/i
 
-/** `diagnosis` is the test API's category; `error` covers results that only carry the poller's message. */
-export function connectionHint(diagnosis: string | null | undefined, error?: string | null): ConnectionHint | null {
+/**
+ * `diagnosis` is the test API's category; `error` covers results that only carry the poller's message.
+ * A DNS check gets no hint: it tests name resolution itself and never uses a manual address, so pointing
+ * there would send the reader to a setting that cannot fix it.
+ */
+export function connectionHint(diagnosis: string | null | undefined, error?: string | null, checkType?: string | null): ConnectionHint | null {
+  if (checkType === 'dns') return null
   const text = error || ''
   if (diagnosis === 'tls_trust' || (!diagnosis && TRUST.test(text)) || (diagnosis === 'tls' && TRUST.test(text))) {
     return {

@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -30,6 +31,27 @@ type HostOverrideEntry struct {
 // HostOverrides is the table for one place: normalised name to IP literal.
 // It is built once per configuration load and only read afterwards.
 type HostOverrides map[string]string
+
+// ParseHostOverrideEntries reads the stored document ({"entries": [...]}).
+// It never fails: a row, or a whole document, that is not what the API writes
+// is left out, so a damaged setting can cost its own manual addresses but
+// never stop service checks from loading.
+func ParseHostOverrideEntries(raw []byte) []HostOverrideEntry {
+	var doc struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	entries := make([]HostOverrideEntry, 0, len(doc.Entries))
+	for _, row := range doc.Entries {
+		var entry HostOverrideEntry
+		if err := json.Unmarshal(row, &entry); err == nil {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
 
 func normalizeOverrideHost(host string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))

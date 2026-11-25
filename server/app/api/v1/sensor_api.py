@@ -542,7 +542,15 @@ async def _heartbeat_commands(
         for row in rows
     ]
 
-async def _record_capabilities(db: AsyncSession, sensor_id: Any, reported: Optional[list[str]]) -> None:
+def _clean_capabilities(reported: Any) -> list[str]:
+    """Well-formed capability names only (lower-case words), at most 32."""
+    if not isinstance(reported, (list, tuple)):
+        return []
+    names = {item for item in reported if isinstance(item, str) and re.fullmatch(r"[a-z0-9_]{1,64}", item)}
+    return sorted(names)[:32]
+
+
+async def _record_capabilities(db: AsyncSession, sensor_id: Any, reported: Any) -> None:
     """Keep the abilities the sensor named in this heartbeat (migrate-215).
 
     Always the latest report: a sensor that names none (an older build) has
@@ -550,7 +558,7 @@ async def _record_capabilities(db: AsyncSession, sensor_id: Any, reported: Optio
     from the health update, in a savepoint: a heartbeat must never fail
     because this column cannot be written.
     """
-    capabilities = json.dumps(sorted(set(reported or [])))
+    capabilities = json.dumps(_clean_capabilities(reported))
     try:
         async with db.begin_nested():
             await db.execute(

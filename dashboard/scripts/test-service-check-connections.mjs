@@ -178,6 +178,10 @@ try {
   for (const [diagnosis, error] of [['timeout', ''], ['connection_refused', ''], ['http_status', 'expected status 200, got 503'], ['tls', 'certificate has expired'], [null, ''], [null, 'connection refused']]) {
     assert.equal(hints.connectionHint(diagnosis, error), null, `${diagnosis} ${error}`)
   }
+  // A DNS check tests resolution itself and never uses a manual address: no hint that points there.
+  assert.equal(hints.connectionHint('dns', 'The hostname could not be resolved', 'dns'), null)
+  assert.equal(hints.connectionHint(null, 'lookup intranet.example.local: no such host', 'dns'), null)
+  assert.equal(hints.connectionHint(null, 'lookup intranet.example.local: no such host', 'tcp').kind, 'resolution')
   assert.equal(hints.manualAddressNote([]), null)
   assert.match(hints.manualAddressNote([{ host: 'portal.example.local', address: '10.1.2.3' }]), /manual address 10\.1\.2\.3 for portal\.example\.local\. DNS was not used/)
   assert.deepEqual(hints.resultManualAddress({ override_host: 'a.test', override_address: '10.0.0.1' }), { host: 'a.test', address: '10.0.0.1' })
@@ -311,6 +315,8 @@ try {
   assert(text().includes('Connected to the manual address 10.1.2.3 for portal.example.local. DNS was not used'))
   await mount(React.createElement(M.ConnectionHints, { failed: true, diagnosis: 'timeout', error: 'timed out' }))
   assert.equal(document.getElementById('root').textContent, '')
+  await mount(React.createElement(M.ConnectionHints, { failed: true, diagnosis: 'dns', checkType: 'dns', error: 'no such host' }))
+  assert.equal(document.getElementById('root').textContent, '', 'a failed DNS check is not sent to manual addresses')
   await mount(React.createElement(M.ConnectionHints, { failed: false, diagnosis: 'dns' }))
   assert.equal(document.getElementById('root').textContent, '')
 

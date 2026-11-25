@@ -56,7 +56,9 @@ def test_host_names_are_exact_names():
     assert ho.normalize_host("intranet") == "intranet"
     for bad in ["", "   ", "*.example.local", "https://portal.example.local", "portal.example.local/login",
                 "portal.example.local:8443", "10.1.2.3", "[2001:db8::1]", "2001:db8::1", "-bad.test", "bad..test",
-                "a" * 64 + ".test", "sp ace.test"]:
+                "a" * 64 + ".test", "sp ace.test",
+                # An address only after IDNA mapping (full-width digits, ideographic full stops).
+                "\uff11\uff10.\uff11.\uff12.\uff13", "10\u30021\u30022\u30023"]:
         with pytest.raises(ho.HostOverrideError) as error:
             ho.normalize_host(bad)
         assert error.value.field == "host"
@@ -374,8 +376,15 @@ def test_sensor_config_and_heartbeat_schemas_carry_the_new_fields():
     assert ConfigResponse(etag="e", sensor_id="s", sensor_name="n").host_overrides == []
     assert HeartbeatRequest().capabilities is None  # an older sensor
     assert HeartbeatRequest(capabilities=["host_overrides"]).capabilities == ["host_overrides"]
-    with pytest.raises(ValueError):
-        HeartbeatRequest(capabilities=["Not A Capability"])
+    # A heartbeat is never refused over this list: odd values are dropped when it is stored.
+    from app.api.v1.sensor_api import _clean_capabilities
+    odd = ["host_overrides", "Not A Capability", "host-overrides", "", 7, None, "x" * 65, "host_overrides", "future_thing"]
+    assert HeartbeatRequest(capabilities=odd).capabilities == odd
+    assert _clean_capabilities(odd) == ["future_thing", "host_overrides"]
+    assert len(_clean_capabilities([f"c{i}" for i in range(50)])) == 32
+    for reported in (None, "host_overrides", {"host_overrides": True}, 5):
+        assert HeartbeatRequest(capabilities=reported).capabilities == reported
+        assert _clean_capabilities(reported) == []
     # A sensor result keeps the manual address it used through ingestion.
     kept = ProbeNetworkDiagnostics(override_host="a.test", override_address="10.0.0.1").model_dump()
     assert (kept["override_host"], kept["override_address"]) == ("a.test", "10.0.0.1")
@@ -521,6 +530,29 @@ def test_requests_adapters_connect_to_the_manual_address_and_keep_the_name(servi
             http.get(f"https://wrong.test:{service.port}/", timeout=3)
     assert calls == [("service.test", service.port, "127.0.0.1"), ("wrong.test", service.port, "127.0.0.1")]
     assert service.seen.hosts[-1] == f"service.test:{service.port}"
+
+
+def test_internationalised_names_match_their_stored_ascii_form():
+    # Entries are stored in ASCII (punycode) form; httpx shows such a host decoded. Both spellings of the URL must match.
+    stored = ho.normalize_host("b\u00fccher.example")
+    assert stored == "xn--bcher-kva.example"
+    seen: list[tuple[str, str, bytes]] = []
+
+    class Capture(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            seen.append((request.url.host, request.extensions.get("sni_hostname"), request.headers.raw[0][1]))
+            return httpx.Response(200, text="ok")
+
+    async def run():
+        used: dict[str, str] = {}
+        async with httpx.AsyncClient(transport=HostOverrideTransport(Capture, {stored: "10.1.2.3"}, "auto", used), timeout=1) as client:
+            for url in ("http://b\u00fccher.example/", "http://xn--bcher-kva.example/"):
+                assert (await client.get(url)).text == "ok"
+        assert used == {stored: "10.1.2.3"}
+
+    asyncio.run(run())
+    assert [(host, sni) for host, sni, _ in seen] == [("10.1.2.3", stored)] * 2
+    assert all(header == stored.encode() for _, _, header in seen), "the Host header keeps the name"
 
 
 def test_manual_address_of_the_other_family_is_refused_in_plain_words():

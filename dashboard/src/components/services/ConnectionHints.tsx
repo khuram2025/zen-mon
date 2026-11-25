@@ -11,16 +11,18 @@ import { connectionHint, manualAddressNote, type ManualAddress } from './connect
  * Both settings are administrator-only, so other accounts are told what to ask for instead of given a link.
  * `newTab` keeps an unsaved form open while the setting is changed.
  */
-export function ConnectionHints({ failed, diagnosis, error, manualAddresses, newTab = false }: {
+export function ConnectionHints({ failed, diagnosis, error, checkType, manualAddresses, newTab = false }: {
   failed: boolean
   diagnosis?: string | null
   error?: string | null
+  /** The check's type; DNS checks never use manual addresses and get no hint. */
+  checkType?: string | null
   manualAddresses?: readonly ManualAddress[] | null
   newTab?: boolean
 }) {
   const admin = useCan()('system.admin')
   const pages = useAllowedPages()
-  const hint = failed ? connectionHint(diagnosis, error) : null
+  const hint = failed ? connectionHint(diagnosis, error, checkType) : null
   const manual = manualAddressNote(manualAddresses)
   if (!hint && !manual) return null
   const reachable = !!hint?.link && admin && (!pages || pages.has(hint.link.page))

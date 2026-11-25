@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import ipaddress
-from typing import Annotated, Optional, Literal, List, Any
+from typing import Optional, Literal, List, Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -313,8 +313,10 @@ class HeartbeatRequest(BaseModel):
     os_info: Optional[str] = None
     config_etag: Optional[str] = Field(default=None, max_length=128)
     # Optional abilities this build applies (e.g. "host_overrides"). A sensor
-    # that sends none is treated as having none.
-    capabilities: Optional[List[Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")]]] = Field(default=None, max_length=32)
+    # that sends none is treated as having none. Deliberately unvalidated: a
+    # heartbeat is never refused over this list; names the controller does not
+    # recognise are dropped when it is stored (sensor_api._record_capabilities).
+    capabilities: Optional[Any] = None
 
 
 class HeartbeatCommand(BaseModel):

@@ -62,7 +62,8 @@ def verified_context(host, port, timeout, policy, ip_version="auto", address=Non
 
 def _manual_target(request, overrides, ip_version, used):
     """The manual address for this request's host, or None. Records what was used."""
-    host = request.url.host
+    # The ASCII form: entries are stored that way, while httpx shows an internationalised name decoded.
+    host = request.url.raw_host.decode("ascii")
     address = manual_address(overrides, host)
     if address is None:
         return None
@@ -86,7 +87,7 @@ async def _send_at(transport, request, address):
         return await transport.handle_async_request(request)
     target = httpx.Request(
         request.method, request.url.copy_with(host=address), headers=request.headers, stream=request.stream,
-        extensions={**request.extensions, "sni_hostname": request.url.host},
+        extensions={**request.extensions, "sni_hostname": request.url.raw_host.decode("ascii")},
     )
     return await transport.handle_async_request(target)
 

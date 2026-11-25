@@ -92,7 +92,11 @@ def normalize_host(raw: Any) -> str:
         raise HostOverrideError("This is not a valid host name") from None
     if not host or len(host) > 253 or any(not _LABEL.fullmatch(label) for label in host.split(".")):
         raise HostOverrideError("This is not a valid host name")
-    return host
+    try:
+        ipaddress.ip_address(host)  # full-width digits and the like become an address only after mapping
+    except ValueError:
+        return host
+    raise HostOverrideError("This is an address, not a name. A check of an address already connects to it")
 
 
 def normalize_address(raw: Any) -> str:
