@@ -1,0 +1,54 @@
+{% extends "core/base.html" %}
+
+{% block extra_head %}{% include "trial_downloads/_styles.html" %}{% endblock %}
+
+{% block content %}
+<section class="page-hero ink-glow"><div class="container">
+  <p class="eyebrow on-ink">Free 30-day trial</p>
+  <h1>Start your ZenPlus trial.</h1>
+  <p>Tell us where to send the download. The appliance runs on your own network and your monitoring data never leaves it.</p>
+  <ul class="tdl-facts"><li>No payment card</li><li>{{ release.trial }}</li><li>ZenPlus {{ release.version }}</li></ul>
+</div></section>
+
+<section class="section"><div class="container tdl-grid">
+  <div>
+    <p class="eyebrow">What happens next</p>
+    <h2>Three steps to a running appliance.</h2>
+    <ol class="tdl-steps">
+      <li><strong>Confirm your email</strong>We send a personal download link to your work address. Open it within {{ link_hours }} hours.</li>
+      <li><strong>Download and verify</strong>Choose the package for your hypervisor and check it against the signed checksum.</li>
+      <li><strong>Import and monitor</strong>First setup takes a few minutes in the VM console. The trial starts on first boot, with no license key.</li>
+    </ol>
+    <div class="tdl-panel" style="margin-top:30px">
+      <h3 style="margin-top:0">This release</h3>
+      {% for artifact in artifacts %}<p style="margin:8px 0"><strong>{{ artifact.label }}</strong> <span class="tdl-meta">· {{ artifact.size }}</span><br><span class="tdl-meta">{{ artifact.summary }}</span></p>{% endfor %}
+      <p class="tdl-meta" style="margin-bottom:0">Needs {{ release.requirements }}. <a href="/kb/zenplus/installation/">Installation guide</a></p>
+    </div>
+    <p class="tdl-meta" style="margin-top:18px">Already a customer? Existing appliances update through Settings and do not need a new image. <a href="/contact/?topic=support">Contact support</a>.</p>
+  </div>
+
+  <div class="form-card tdl-panel" id="details">
+    <h2>Your details</h2>
+    <p class="tdl-meta" style="margin-bottom:22px">Fields marked * are required.</p>
+    {% if form.non_field_errors %}<div class="tdl-alert" role="alert">{% for error in form.non_field_errors %}{{ error }}{% endfor %} <a href="/contact/?topic=trial">Contact us</a></div>{% endif %}
+    <form method="post" action="{% url 'trial_downloads:request' %}#details" novalidate>
+      {% csrf_token %}
+      {{ form.opened }}{{ form.src }}
+      <div class="tdl-trap" aria-hidden="true"><label for="id_website">Leave this field empty</label><input type="text" name="website" id="id_website" tabindex="-1" autocomplete="off"></div>
+      <div class="form-row">{% include "trial_downloads/_field.html" with field=form.first_name %}{% include "trial_downloads/_field.html" with field=form.last_name %}</div>
+      {% include "trial_downloads/_field.html" with field=form.email %}
+      <div class="form-row">{% include "trial_downloads/_field.html" with field=form.company %}{% include "trial_downloads/_field.html" with field=form.job_title %}</div>
+      <div class="form-row">{% include "trial_downloads/_field.html" with field=form.country %}{% include "trial_downloads/_field.html" with field=form.phone %}</div>
+      <div class="form-row">{% include "trial_downloads/_field.html" with field=form.device_count %}{% include "trial_downloads/_field.html" with field=form.hypervisor %}</div>
+      {% include "trial_downloads/_field.html" with field=form.current_tool %}
+
+      <label class="tdl-check" for="{{ form.accept_terms.id_for_label }}">{{ form.accept_terms }}<span>I agree to the <a href="/terms/" target="_blank" rel="noopener">Terms of Service</a> and to using this software for evaluation, and I have read the <a href="/privacy/" target="_blank" rel="noopener">Privacy Policy</a>. *</span></label>
+      {% for error in form.accept_terms.errors %}<p class="tdl-error" role="alert" style="margin:-6px 0 12px 29px">{{ error }}</p>{% endfor %}
+      <label class="tdl-check" for="{{ form.marketing_opt_in.id_for_label }}">{{ form.marketing_opt_in }}<span>Send me occasional product updates. You can unsubscribe at any time.</span></label>
+
+      <button type="submit" class="btn btn-primary btn-lg btn-block" style="margin-top:10px">Email me the download link</button>
+      <p class="form-note">A Zentryc engineer may contact you once to help with setup. We do not sell or share your details. No company email address? <a href="/contact/?topic=trial">Contact us</a> and we will arrange the download.</p>
+    </form>
+  </div>
+</div></section>
+{% endblock %}

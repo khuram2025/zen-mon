@@ -1,0 +1,18 @@
+A trial request was confirmed (the person opened the emailed link).
+
+Reference:   {{ lead.reference }}
+Name:        {{ lead.full_name }}
+Job title:   {{ lead.job_title }}
+Company:     {{ lead.company }}
+Email:       {{ lead.email }}
+Phone:       {{ lead.phone }}
+Country:     {{ lead.get_country_display }}
+
+Devices:     {{ lead.get_device_count_display }}
+Platform:    {{ lead.get_hypervisor_display }}
+Current tool: {{ lead.current_tool|default:"not given" }}
+Product updates by email: {{ lead.marketing_opt_in|yesno:"yes,no" }}
+Came from:   {{ lead.source|default:"not recorded" }}
+
+Reply to this message to write to the requester.
+Record: {{ site_url }}/admin/trial_downloads/triallead/{{ lead.pk }}/change/

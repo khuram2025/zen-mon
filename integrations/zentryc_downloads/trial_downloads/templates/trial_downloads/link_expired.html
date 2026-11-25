@@ -1,0 +1,17 @@
+{% extends "core/base.html" %}
+
+{% block extra_head %}{% include "trial_downloads/_styles.html" %}{% endblock %}
+
+{% block content %}
+<section class="page-hero ink-glow"><div class="container">
+  <p class="eyebrow on-ink">ZenPlus trial download</p>
+  {% if state == "limit" %}
+  <h1>This link has reached its download limit.</h1>
+  <p>Request a new link to download again, or contact us if you need the files for several sites.</p>
+  {% else %}
+  <h1>This download link has expired.</h1>
+  <p>Download links work for a limited time. Request a new one and it will arrive in a minute.</p>
+  {% endif %}
+  <div class="hero-actions"><a class="btn btn-primary" href="{% url 'trial_downloads:request' %}">Request a new link</a><a class="btn btn-on-ink" href="/contact/?topic=trial">Contact us</a></div>
+</div></section>
+{% endblock %}

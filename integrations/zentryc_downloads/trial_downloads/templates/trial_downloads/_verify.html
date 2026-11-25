@@ -1,0 +1,10 @@
+<p>Check the file before you import it. Download the checksum, its signature and the <a href="{{ public_key_url }}">public verification key</a>, then compare the hash:</p>
+<div class="tdl-code"># Windows PowerShell
+Get-FileHash .\{{ verify_example }} -Algorithm SHA256
+
+# Linux and macOS
+sha256sum {{ verify_example }}</div>
+<p>To confirm the checksum itself was published by Zentryc:</p>
+<div class="tdl-code">openssl pkeyutl -verify -pubin -inkey zentryc-release.pub -rawin \
+  -in {{ verify_example }}.sha256 -sigfile {{ verify_example }}.sha256.sig</div>
+<p class="tdl-meta">Expected answer: <strong>Signature Verified Successfully</strong>. Do not import a file whose hash or signature does not match; <a href="/contact/?topic=support">tell us</a> instead.</p>

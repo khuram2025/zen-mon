@@ -1,0 +1,6 @@
+<div class="form-group{% if field.errors %} tdl-invalid{% endif %}">
+  <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %} *{% else %} <span class="tdl-optional">(optional)</span>{% endif %}</label>
+  {{ field }}
+  {% for error in field.errors %}<p class="tdl-error" role="alert">{{ error }}</p>{% endfor %}
+  {% if field.help_text and not field.errors %}<p class="tdl-help">{{ field.help_text }}</p>{% endif %}
+</div>
