@@ -110,6 +110,8 @@ NCM_UNITS = (
     ("zenplus-ncm-delivery.timer", True),
 )
 NCM_UNIT_VERIFIER = "code/scripts/verify-ncm-units.py"
+# Waits up to 180 s for the restarted API before the health check (see the script).
+API_WAIT_STEP = {"type": "run_hook", "script": "code/scripts/ota-wait-api.py", "timeout": 240}
 
 
 def ncm_unit_steps(build_dir: Path) -> list[dict]:
@@ -1213,6 +1215,10 @@ def build_package(version: str, changelog: str, severity: str,
     # the restart; a non-zero exit names the unit and fails (rolls back) the
     # update instead of leaving configuration backups silently stopped.
     steps.append({"type": "run_hook", "script": NCM_UNIT_VERIFIER, "timeout": 90})
+    # Give the API time to accept connections before the health check, whose
+    # own window (5 x 3 s in every installed updater) is shorter than some
+    # appliances need. Runs from the signed payload, so old updaters wait too.
+    steps.append(API_WAIT_STEP)
     steps.append({"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30})
 
     manifest = {
@@ -1256,6 +1262,7 @@ def build_package(version: str, changelog: str, severity: str,
              "services": ["zenplus-api", "zenplus-poller",
                           "zenplus-netflow-collector", "netmon-gunicorn",
                           "netmon-celery", "netmon-celery-beat", "nginx"]},
+            API_WAIT_STEP,
             {"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30},
         ],
     }

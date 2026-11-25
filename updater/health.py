@@ -12,37 +12,35 @@ class HealthCheckError(Exception):
     """Raised when a health check fails."""
 
 
-def check_http(url: str, timeout: int = 30, retries: int = 5, delay: int = 3) -> bool:
+def check_http(url: str, timeout: int = 30, retries: int = 5, delay: int = 3,
+               wait_s: float = 180, *, clock=time.monotonic, sleep=time.sleep) -> bool:
     """Check if an HTTP endpoint returns 2xx.
 
-    Retries with delay to allow services to start up.
+    Retries with delay to allow services to start up: at least ``retries``
+    attempts and, while the endpoint keeps failing, until ``wait_s`` seconds
+    have passed. Five attempts 3 s apart (the old limit) are shorter than some
+    appliances need before the API accepts connections, which rolled back
+    good releases.
     """
-    for attempt in range(1, retries + 1):
+    start = clock()
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             resp = httpx.get(url, timeout=timeout, follow_redirects=True)
             if 200 <= resp.status_code < 300:
-                logger.info("Health check passed: %s (status %d)", url, resp.status_code)
+                logger.info("Health check passed: %s (status %d, attempt %d, %.0f s)",
+                            url, resp.status_code, attempt, clock() - start)
                 return True
-            logger.warning(
-                "Health check attempt %d/%d: %s returned %d",
-                attempt,
-                retries,
-                url,
-                resp.status_code,
-            )
+            logger.warning("Health check attempt %d: %s returned %d", attempt, url, resp.status_code)
         except httpx.RequestError as e:
-            logger.warning(
-                "Health check attempt %d/%d: %s — %s",
-                attempt,
-                retries,
-                url,
-                e,
-            )
+            logger.warning("Health check attempt %d: %s — %s", attempt, url, e)
 
-        if attempt < retries:
-            time.sleep(delay)
-
-    raise HealthCheckError(f"Health check failed after {retries} attempts: {url}")
+        elapsed = clock() - start
+        if attempt >= retries and elapsed >= wait_s:
+            raise HealthCheckError(
+                f"Health check failed after {attempt} attempts in {elapsed:.0f} s: {url}")
+        sleep(delay)
 
 
 def check_service_active(service: str) -> bool:
