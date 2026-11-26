@@ -163,6 +163,14 @@ def main() -> None:
         installed_version = read_member(tar, "code/.version").decode().splitlines()[0]
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
+        if manifest.get("release_profile") == "reference-os-report-bridge":
+            import reference_bridge_profile as bridge
+            if not args.appliance_only or args.required_source_archive:
+                raise RuntimeError("Reference bridge requires appliance-only verification")
+            bridge.verify(Path(__file__).resolve().parents[1], manifest, tar)
+            print(json.dumps({"version": bridge.VERSION, "signature": "valid",
+                              "profile": bridge.PROFILE, "target_enrollment": bridge.REFERENCE}))
+            return
         if manifest.get("release_profile") == "os-patch-report-only":
             import os_patch_release
             if not args.appliance_only or inventory is None or args.required_source_archive:

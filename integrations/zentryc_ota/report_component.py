@@ -31,6 +31,8 @@ def download(request):
     from django.http import HttpResponse
     from ota.auth import authenticate_appliance
 
+    from ota.services import log_audit
+
     appliance = authenticate_appliance(request)
     selected = getattr(settings, "OS_REPORT_REFERENCE_ID", None)
     if not eligible(appliance, request.headers.get("X-ZenPlus-Firmware"), selected):
@@ -41,6 +43,8 @@ def download(request):
         except (AttributeError, OSError, ValueError):
             response = HttpResponse(status=503)
         else:
+            log_audit("system", "reference_os_report_download", str(appliance.id),
+                      {"firmware": FIRMWARE, "sha256": DIGEST, "size": len(data)})
             response = HttpResponse(data, content_type="application/octet-stream")
             response["Content-Disposition"] = f'attachment; filename="{FILENAME}"'
     response["Cache-Control"] = "private, no-store"

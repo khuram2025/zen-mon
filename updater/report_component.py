@@ -31,36 +31,45 @@ def fetch(client, headers, firmware):
         return bytes(data)
 
 
+def verified_component(cfg, version, scratch):
+    from updater.agent import _api_headers
+    from updater.package_trust import verify_and_extract
+
+    if (version != FIRMWARE or cfg.server.url.rstrip("/") != "https://zentryc.com"
+            or not cfg.security.verify_tls or not cfg.appliance.id or not cfg.appliance.api_key):
+        raise ValueError("Component delivery requires the qualified firmware and a verified enrollment")
+    with httpx.Client(timeout=httpx.Timeout(30, connect=10), verify=True) as client:
+        data = fetch(client, _api_headers(cfg), version)
+    if data is None:
+        return None
+    package = Path(scratch) / "reporter.zup"
+    package.write_bytes(data)
+    verified = Path(scratch) / "verified"
+    manifest = verify_and_extract(
+        str(package), str(verified), public_key_paths=cfg.security.public_key_paths,
+        revoked_fingerprints=cfg.security.revoked_key_fingerprints,
+        max_age_days=cfg.security.max_manifest_age_days, allow_legacy=False,
+        expected_version="1.0.0",
+    )
+    if (manifest.get("release_profile") != "zenplus-os-patch-reporter"
+            or manifest.get("supported_firmware") != [version]):
+        raise ValueError("Incompatible reporting component")
+    return package, verified
+
+
 def receive():
-    from .agent import _api_headers
     from .config import load_config
     from .inventory import get_current_version
-    from .package_trust import verify_and_extract
 
     cfg = load_config()
     version = get_current_version()
     if version != FIRMWARE:
         return False
-    if (cfg.server.url.rstrip("/") != "https://zentryc.com" or not cfg.security.verify_tls
-            or not cfg.appliance.id or not cfg.appliance.api_key):
-        raise ValueError("Component delivery requires a verified Zentryc enrollment")
-    with httpx.Client(timeout=httpx.Timeout(30, connect=10), verify=True) as client:
-        data = fetch(client, _api_headers(cfg), version)
-    if data is None:
-        return False
     with tempfile.TemporaryDirectory(prefix="zenplus-os-report-") as scratch:
-        package = Path(scratch) / "reporter.zup"
-        package.write_bytes(data)
-        verified = Path(scratch) / "verified"
-        manifest = verify_and_extract(
-            str(package), str(verified), public_key_paths=cfg.security.public_key_paths,
-            revoked_fingerprints=cfg.security.revoked_key_fingerprints,
-            max_age_days=cfg.security.max_manifest_age_days, allow_legacy=False,
-            expected_version="1.0.0",
-        )
-        if (manifest.get("release_profile") != "zenplus-os-patch-reporter"
-                or manifest.get("supported_firmware") != [version]):
-            raise ValueError("Incompatible reporting component")
+        result = verified_component(cfg, version, scratch)
+        if result is None:
+            return False
+        package, verified = result
         # The signed installer rechecks the actual firmware and base files under the OTA lock.
         subprocess.run([sys.executable, "-I", "-B", str(verified / "os_report_component.py"),
                         "install", str(package)], check=True)
