@@ -32,6 +32,18 @@ class ReportingDeliveryTests(unittest.TestCase):
             with patch.object(self.appliance.subscription, attribute, value):
                 self.assertFalse(allowed())
 
+    def test_bridge_is_private_even_if_a_policy_is_broadened(self):
+        a = self.appliance
+        a.id, a.rollout_group = portal.REFERENCE_ID, portal.PILOT_GROUP
+        policy = SimpleNamespace(stage="canary", auto_promote=False, completed_at=None,
+                                 target_group=portal.PILOT_GROUP, target_pct=100)
+        self.assertTrue(portal.bridge_allowed(a, policy, a.id))
+        for key, value in (("stage", "full"), ("auto_promote", True), ("target_group", "")):
+            with patch.object(policy, key, value):
+                self.assertFalse(portal.bridge_allowed(a, policy, a.id))
+        with patch.object(a, "id", "other"):
+            self.assertFalse(portal.bridge_allowed(a, policy, portal.REFERENCE_ID))
+
     def test_qualified_download_and_changed_artifact(self):
         body = b"reporter fixture"
         digest = hashlib.sha256(body).hexdigest()

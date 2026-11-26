@@ -129,6 +129,10 @@ def halt_failing_rollouts(rollouts):
 
 
 def rollout_allows(appliance, release, rollout):
+    if release.version == "1.25.9001":
+        from django.conf import settings
+        from ota.report_component import bridge_allowed
+        return bridge_allowed(appliance, rollout, getattr(settings, "OS_REPORT_REFERENCE_ID", None))
     if not rollout or rollout.stage not in ACTIVE_STAGES:
         return False
     if rollout.completed_at is not None:

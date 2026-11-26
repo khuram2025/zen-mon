@@ -6,6 +6,17 @@ FIRMWARE = "1.25.1"
 FILENAME = "zenplus-os-patch-reporter-v1.0.0.zup"
 DIGEST = "6e22f0692bb0d5c75f19e99422a1250ca4b30ab62532854a990ec366a462e44c"
 MAX_BYTES = 256 * 1024
+BRIDGE_VERSION = "1.25.9001"
+PILOT_GROUP = "os-report-legacy-reference"
+REFERENCE_ID = "09933c9f-0e63-4bb1-8d2b-a51f7af53bf3"
+
+
+def bridge_allowed(appliance, policy, selected):
+    return (selected == REFERENCE_ID and eligible(appliance, FIRMWARE, selected)
+            and policy is not None and policy.stage == "canary" and not policy.auto_promote
+            and policy.completed_at is None and policy.target_group == PILOT_GROUP
+            and appliance.rollout_group == PILOT_GROUP and policy.target_pct == 100)
+
 
 
 def eligible(appliance, requested_firmware, reference_id):
