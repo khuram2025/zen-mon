@@ -1372,7 +1372,10 @@ def build_reporting_component(version, changelog):
 
 
 def build_reference_bridge(version, minimum, changelog):
-    import reference_bridge_profile as profile
+    if version == "1.25.9002":
+        import reference_reporter_profile as profile
+    else:
+        import reference_bridge_profile as profile
     provenance = release_source.git_provenance(ZENPLUS_DIR)
     if (version != profile.VERSION or minimum != profile.BASE or provenance["tag"] != profile.TAG
             or release_source.source_problems(provenance, allow_dirty=False, require_tag=True)):
@@ -1389,7 +1392,7 @@ def build_reference_bridge(version, minimum, changelog):
                     "target_enrollment": profile.REFERENCE, "update_id": str(uuid4()),
                     "release_date": datetime.now(timezone.utc).isoformat(), "severity": "optional",
                     "changelog": changelog, "agent_artifacts_included": False, "agent_packages": [],
-                    "steps": profile.STEPS, "rollback_steps": []}
+                    "steps": profile.STEPS, "rollback_steps": profile.ROLLBACK_STEPS}
         return sign_and_archive(directory, manifest, version, provenance)
 
 
