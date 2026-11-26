@@ -148,6 +148,18 @@ def main() -> None:
             raise RuntimeError(
                 "manifest does not record a clean, committed source (source.dirty / "
                 "source.commit); build from a clean checkout or pass --allow-dirty-source")
+        if manifest.get("release_profile") == "zenplus-os-patch-reporter":
+            import os_report_component as component
+            if not args.appliance_only or args.required_source_archive or len(tar.getmembers()) != len(members):
+                raise RuntimeError("Unexpected reporting component verification scope")
+            component.validate(manifest)
+            checked = {*manifest[INVENTORY_KEY], "manifest.json"}
+            expected = {f"{hashlib.sha256(read_member(tar, n)).hexdigest()}  {n}" for n in checked}
+            if set(read_member(tar, "checksums.sha256").decode().splitlines()) != expected:
+                raise RuntimeError("Reporting component checksum list mismatch")
+            print(json.dumps({"component": component.PROFILE, "version": component.VERSION,
+                              "signature": "valid", "supported_firmware": [component.BASE]}))
+            return
         installed_version = read_member(tar, "code/.version").decode().splitlines()[0]
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
