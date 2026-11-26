@@ -151,6 +151,15 @@ def main() -> None:
         installed_version = read_member(tar, "code/.version").decode().splitlines()[0]
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
+        if manifest.get("release_profile") == "os-patch-report-only":
+            import os_patch_release
+            if not args.appliance_only or inventory is None or args.required_source_archive:
+                raise RuntimeError("Reporting-only verification requires the exact scoped payload")
+            os_patch_release.verify(Path(__file__).resolve().parents[1], manifest, tar)
+            print(json.dumps({"version": args.version, "signature": "valid",
+                              "release_scope": os_patch_release.PROFILE,
+                              "source_commit": source["commit"], "payload_files": len(inventory)}))
+            return
         if tuple(map(int, args.version.split('.'))) >= (1, 23, 32):
             # zenplus-cli and zenplus-apply-network.sh were retired (ZP-07); the
             # signed inventory lists them as managed files so upgrades remove them.

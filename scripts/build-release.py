@@ -1267,6 +1267,29 @@ def build_package(version: str, changelog: str, severity: str,
         ],
     }
 
+    output_path = sign_and_archive(build_dir, manifest, version, provenance)
+    pkg_hash = sha256_file(str(output_path))
+    pkg_size = output_path.stat().st_size
+
+    # Save metadata alongside
+    meta = {
+        "version": version,
+        "changelog": changelog,
+        "severity": severity,
+        "min_version": min_version,
+        "package_sha256": pkg_hash,
+        "package_size": pkg_size,
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "migrations": [p.name for p in selected_migrations],
+        "agent_packages": agent_staged,
+    }
+    meta_path = RELEASE_DIR / f"update-{version}.meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+    return output_path
+
+
+def sign_and_archive(build_dir, manifest, version, provenance):
     # The signature must cover the payload, not only the instructions: list the
     # SHA-256 of every file that will be in the package, and name the commit.
     manifest[INVENTORY_KEY] = release_source.payload_inventory(build_dir)
@@ -1326,22 +1349,33 @@ def build_package(version: str, changelog: str, severity: str,
     print(f"  SHA-256: {pkg_hash}")
     print(f"{'='*60}\n")
 
-    # Save metadata alongside
-    meta = {
-        "version": version,
-        "changelog": changelog,
-        "severity": severity,
-        "min_version": min_version,
-        "package_sha256": pkg_hash,
-        "package_size": pkg_size,
-        "built_at": datetime.now(timezone.utc).isoformat(),
-        "migrations": [p.name for p in selected_migrations],
-        "agent_packages": agent_staged,
-    }
-    meta_path = RELEASE_DIR / f"update-{version}.meta.json"
-    meta_path.write_text(json.dumps(meta, indent=2))
-
     return output_path
+
+
+def build_reporting_release(version, changelog, severity, minimum):
+    import os_patch_release as profile
+    validate_release_inputs(version)
+    provenance = release_source.git_provenance(ZENPLUS_DIR)
+    if (version != profile.VERSION or minimum != profile.BASE
+            or provenance["tag"] != f"v{version}"
+            or release_source.source_problems(provenance, allow_dirty=False, require_tag=True)):
+        raise ValueError("Reporting release requires the clean release tag and exact base")
+    RELEASE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="zenplus-reporting-") as tmp:
+        build_dir = Path(tmp)
+        for name, data in profile.payload(ZENPLUS_DIR).items():
+            path = build_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        manifest = {
+            "format_version": 2, "release_profile": profile.PROFILE,
+            "version": version, "min_version": minimum, "arch": "amd64",
+            "update_id": str(uuid4()), "release_date": datetime.now(timezone.utc).isoformat(),
+            "severity": severity, "changelog": changelog, "agent_artifacts_included": False,
+            "agent_packages": [], "steps": profile.steps(["check", "install"]),
+            "rollback_steps": profile.steps(["restore"]),
+        }
+        return sign_and_archive(build_dir, manifest, version, provenance)
 
 
 # ─── Publish ──────────────────────────────────────────────────────────────────
@@ -1631,6 +1665,7 @@ Examples:
     build_p.add_argument("--severity", "-s", default="normal",
                          choices=["critical", "security", "normal", "optional"])
     build_p.add_argument("--min-version", default=None, help="Minimum version to upgrade from")
+    build_p.add_argument("--os-patch-report-only", action="store_true", help="Build the two-file reporting overlay")
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
     build_p.add_argument("--skip-go", action="store_true", help="Skip Go binary build")
     build_p.add_argument(
@@ -1704,6 +1739,11 @@ Examples:
     args = parser.parse_args()
 
     if args.command == "build":
+        if args.os_patch_report_only:
+            if not args.skip_agent_artifacts or args.include_migrations or args.migration or args.agent_artifact_dir:
+                parser.error("Reporting-only build requires appliance-only scope and no migrations")
+            build_reporting_release(args.version, args.changelog, args.severity, args.min_version)
+            return
         build_package(args.version, args.changelog, args.severity,
                       args.min_version, args.skip_dashboard, args.skip_go,
                       args.include_migrations, args.migration,
