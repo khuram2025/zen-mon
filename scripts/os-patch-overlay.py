@@ -6,17 +6,14 @@ import tempfile
 
 
 def replace(path, data):
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
-        temporary = Path(output.name)
-        try:
+    output = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
+    temporary = Path(output.name)
+    try:
+        with output:
             output.write(data)
             output.flush()
-            os.fchmod(output.fileno(), 0o644)
             os.fsync(output.fileno())
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-    try:
+        temporary.chmod(0o644)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
