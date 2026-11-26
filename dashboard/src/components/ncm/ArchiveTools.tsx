@@ -310,6 +310,7 @@ export function CrossDeviceCompare({ initialDeviceId }: { initialDeviceId?: stri
   useEffect(() => { compare.reset() }, [a.version, b.version, normalized, raw]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = devices.data || []
+  const hostOf = (id: string) => list.find((d: any) => d.device_id === id)?.hostname
   return (
     <div className="min-w-0 space-y-3">
       <Card className="min-w-0">
@@ -370,7 +371,9 @@ export function CrossDeviceCompare({ initialDeviceId }: { initialDeviceId?: stri
               </div>
             ))}
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-mono tabular-nums"><span className="text-success">+{r.added ?? 0}</span> added · <span className="text-danger">−{r.removed ?? 0}</span> removed</span>
+              {r.added != null && (
+                <span className="font-mono tabular-nums"><span className="text-success">+{r.added}</span> added · <span className="text-danger">−{r.removed ?? 0}</span> removed</span>
+              )}
               {r.identical && <Badge variant="outline"><CheckCircle2 className="h-3 w-3" aria-hidden /> Identical</Badge>}
               {r.sensitive_changed && (
                 <Badge variant="warning"><ShieldCheck className="h-3 w-3" aria-hidden /> Sensitive lines changed (redacted)</Badge>
@@ -380,7 +383,8 @@ export function CrossDeviceCompare({ initialDeviceId }: { initialDeviceId?: stri
               <EmptyState>The two versions are identical{r.normalized ? ' after normalization' : ''}.</EmptyState>
             ) : (
               <DiffView diff={r.diff || ''} added={r.added} removed={r.removed} identical={r.identical}
-                sensitiveChanged={false} redacted={r.redacted} normalized={r.normalized} />
+                sensitiveChanged={false} redacted={r.redacted} normalized={r.normalized} tooLarge={r.too_large} message={r.message}
+                sides={[{ deviceId: a.device, versionId: a.version, hostname: hostOf(a.device) }, { deviceId: b.device, versionId: b.version, hostname: hostOf(b.device) }]} />
             )}
           </CardContent>
         </Card>

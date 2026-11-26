@@ -1,9 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { AlertTriangle, ChevronDown, ChevronUp, Search, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronUp, Download, Search, ShieldCheck } from 'lucide-react'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { toast } from '@/components/ui/Toast'
+import { download, ncmError } from './model'
+
+/** A compared version, so a diff too large to show can offer both downloads. */
+export type DiffSide = { deviceId: string; versionId: string; hostname?: string }
+
+export const DIFF_TOO_LARGE = 'The differences are too large to show here. Download both versions and compare them with a file comparison tool.'
+
+async function downloadSide(side: DiffSide, label: 'before' | 'after') {
+  try {
+    const c = (await api.get(`/devices/${side.deviceId}/configs/${side.versionId}`)).data
+    const at = String(c.captured_at || '').slice(0, 19).replace(/[:T]/g, '-')
+    download(`${side.hostname || 'device'}-${c.config_type}-${at}-${label}-redacted.cfg`, c.content || '')
+  } catch (e: any) { toast.error('Download failed', ncmError(e)) }
+}
 
 type Kind = 'hunk' | 'add' | 'del' | 'ctx' | 'meta'
 type Row = { kind: Kind; text: string; oldNo: number | null; newNo: number | null }
@@ -98,8 +114,10 @@ const ROW_BG: Record<Kind, string> = {
 const SIGN: Record<Kind, string> = { add: '+', del: '-', ctx: ' ', hunk: '', meta: '' }
 const SIGN_CLS: Record<Kind, string> = { add: 'text-success', del: 'text-danger', ctx: 'text-muted', hunk: '', meta: '' }
 
-export function DiffView({ diff, added, removed, identical, sensitiveChanged, redacted, normalized }: {
-  diff: string; added?: number; removed?: number; identical?: boolean; sensitiveChanged?: boolean; redacted?: boolean; normalized?: boolean
+export function DiffView({ diff, added, removed, identical, sensitiveChanged, redacted, normalized, tooLarge, message, sides }: {
+  diff: string; added?: number | null; removed?: number | null; identical?: boolean; sensitiveChanged?: boolean; redacted?: boolean; normalized?: boolean
+  /** The server stopped because the diff exceeded its time or size bound. */
+  tooLarge?: boolean; message?: string; sides?: [DiffSide, DiffSide]
 }) {
   const [view, setView] = useState<'unified' | 'split'>('unified')
   const [query, setQuery] = useState('')
@@ -156,16 +174,19 @@ export function DiffView({ diff, added, removed, identical, sensitiveChanged, re
   }
 
   const noDiff = identical || (!rows.length && !(diff || '').trim())
+  const counted = !tooLarge || added != null
 
   return (
     <div className="min-w-0 space-y-2">
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-mono tabular-nums">
-          <span className="text-success">+{addCount}</span>
-          <span className="sr-only"> added,</span>{' '}
-          <span className="text-danger">−{delCount}</span>
-          <span className="sr-only"> removed</span>
-        </span>
+        {counted && (
+          <span className="font-mono tabular-nums">
+            <span className="text-success">+{addCount}</span>
+            <span className="sr-only"> added,</span>{' '}
+            <span className="text-danger">−{delCount}</span>
+            <span className="sr-only"> removed</span>
+          </span>
+        )}
         {sensitiveChanged && (
           <Badge variant="warning"><AlertTriangle className="h-3 w-3" aria-hidden /> Sensitive lines changed</Badge>
         )}
@@ -205,7 +226,17 @@ export function DiffView({ diff, added, removed, identical, sensitiveChanged, re
 
       <div ref={scrollRef} role="region" aria-label="Configuration differences" tabIndex={0}
         className="max-h-[65vh] overflow-auto rounded-md border border-border bg-surface font-mono text-sm leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-        {noDiff ? (
+        {tooLarge ? (
+          <div role="status" className="space-y-3 px-4 py-8 text-center font-sans text-sm text-muted">
+            <p>{message || DIFF_TOO_LARGE}</p>
+            {sides && (
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => downloadSide(sides[0], 'before')}><Download className="h-3.5 w-3.5" aria-hidden /> Download before</Button>
+                <Button size="sm" variant="outline" onClick={() => downloadSide(sides[1], 'after')}><Download className="h-3.5 w-3.5" aria-hidden /> Download after</Button>
+              </div>
+            )}
+          </div>
+        ) : noDiff ? (
           <div className="px-4 py-8 text-center font-sans text-sm text-muted">
             {identical ? 'No differences after excluding known runtime metadata.' : 'Only redacted content differs. Secrets are hidden in this view, so no visible lines changed.'}
           </div>

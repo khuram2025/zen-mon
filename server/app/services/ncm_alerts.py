@@ -42,7 +42,6 @@ State lives in ``ncm_alert_state`` (migrate-201).
 """
 from __future__ import annotations
 
-import difflib
 import json
 import logging
 import re
@@ -322,9 +321,10 @@ def comparable(content: str) -> list[str]:
 
 
 def unsaved_diff(running: str, startup: str) -> int:
-    """Lines that differ between the running and the startup configuration."""
-    return sum(1 for line in difflib.unified_diff(comparable(startup), comparable(running), lineterm="")
-               if line[:1] in "+-" and not line.startswith(("+++", "---")))
+    """Lines that differ between the running and the startup configuration.
+    CPU-bound on large configurations: async callers run it off the event loop."""
+    from app.services.ncm_content import changed_line_count
+    return changed_line_count(comparable(startup), comparable(running))
 
 
 def unsaved_sentence(who: str, lines: int) -> str:
@@ -348,7 +348,7 @@ async def check_unsaved(db, device_id, *, hold_s: int = UNSAVED_HOLD_S) -> Optio
     unsaved-configuration alert. Returns "raised", "resolved", "pending",
     "open", "saved" or None (nothing to compare). Never commits."""
     from app.services import ncm_events
-    from app.services.ncm_content import read_content
+    from app.services.ncm_content import off_loop, read_content
     running, startup = await _latest(db, device_id, "running"), await _latest(db, device_id, "startup")
     if not running or not startup:
         return None
@@ -362,7 +362,7 @@ async def check_unsaved(db, device_id, *, hold_s: int = UNSAVED_HOLD_S) -> Optio
                      {"k": f"ncm_alert:{device_id}:{UNSAVED}"})
     seen_at = max(r_at, s_at)
     lines = 0 if running.norm_hash and running.norm_hash == startup.norm_hash else \
-        unsaved_diff(read_content(running), read_content(startup))
+        await off_loop(unsaved_diff, read_content(running), read_content(startup))
     state = (await db.execute(text(
         "SELECT alert_id, first_seen_at FROM ncm_alert_state WHERE device_id = :d AND kind = :k AND subject = ''"),
         {"d": device_id, "k": UNSAVED})).first()
