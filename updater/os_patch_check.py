@@ -33,8 +33,10 @@ def result(status, reason, packages=()):
 
 def simulate(packages):
     pins = [f"{p['name']}={p['required']}" for p in packages]
+    # Simulation resolves from the indexes without fetching archives. Adding
+    # --no-download would also require the .deb files to be cached locally.
     proc = subprocess.run(
-        ["apt-get", "--simulate", "--no-download", "--only-upgrade",
+        ["apt-get", "--simulate", "--only-upgrade",
          "--no-install-recommends", "install", *pins],
         capture_output=True, text=True, timeout=20,
         env={**os.environ, "LC_ALL": "C"},

@@ -15,6 +15,7 @@ class PatchCheckTests(unittest.TestCase):
                 run.return_value = subprocess.CompletedProcess([], 0, plan+"\n"+extra, "")
                 self.assertEqual(check.simulate(rows), allowed)
                 self.assertIn("--simulate", run.call_args.args[0])
+                self.assertNotIn("--no-download", run.call_args.args[0])
 
     def test_unsupported_platform_never_runs_apt(self):
         with patch.object(check.platform, "freedesktop_os_release", return_value={"ID": "debian"}):
