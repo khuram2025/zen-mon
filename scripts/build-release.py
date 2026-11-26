@@ -1371,6 +1371,28 @@ def build_reporting_component(version, changelog):
                                 filename=f"{component.TAG}.zup")
 
 
+def build_reference_bridge(version, minimum, changelog):
+    import reference_bridge_profile as profile
+    provenance = release_source.git_provenance(ZENPLUS_DIR)
+    if (version != profile.VERSION or minimum != profile.BASE or provenance["tag"] != profile.TAG
+            or release_source.source_problems(provenance, allow_dirty=False, require_tag=True)):
+        raise ValueError("Reference bridge requires its clean tag and exact base")
+    RELEASE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="zenplus-reference-bridge-") as tmp:
+        directory = Path(tmp)
+        for name, content in profile.payload(ZENPLUS_DIR).items():
+            target = directory / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        manifest = {"format_version": 2, "release_profile": profile.PROFILE,
+                    "version": version, "min_version": minimum, "arch": "amd64",
+                    "target_enrollment": profile.REFERENCE, "update_id": str(uuid4()),
+                    "release_date": datetime.now(timezone.utc).isoformat(), "severity": "optional",
+                    "changelog": changelog, "agent_artifacts_included": False, "agent_packages": [],
+                    "steps": profile.STEPS, "rollback_steps": []}
+        return sign_and_archive(directory, manifest, version, provenance)
+
+
 def build_reporting_release(version, changelog, severity, minimum):
     import os_patch_release as profile
     validate_release_inputs(version)
@@ -1687,6 +1709,7 @@ Examples:
     build_p.add_argument("--severity", "-s", default="normal",
                          choices=["critical", "security", "normal", "optional"])
     build_p.add_argument("--min-version", default=None, help="Minimum version to upgrade from")
+    build_p.add_argument("--reference-os-report-bridge", action="store_true", help="Build the isolated reference OTA")
     build_p.add_argument("--os-report-component", action="store_true", help="Build standalone legacy reporting component")
     build_p.add_argument("--os-patch-report-only", action="store_true", help="Build the two-file reporting overlay")
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
@@ -1762,6 +1785,12 @@ Examples:
     args = parser.parse_args()
 
     if args.command == "build":
+        if args.reference_os_report_bridge:
+            if (not args.skip_agent_artifacts or args.os_report_component or args.os_patch_report_only
+                    or args.include_migrations or args.migration or args.agent_artifact_dir):
+                parser.error("Reference bridge accepts only its signed read-only profile")
+            build_reference_bridge(args.version, args.min_version, args.changelog)
+            return
         if args.os_report_component:
             if (not args.skip_agent_artifacts or args.min_version or args.os_patch_report_only
                     or args.include_migrations or args.migration or args.agent_artifact_dir):
