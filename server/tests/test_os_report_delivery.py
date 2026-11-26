@@ -38,6 +38,12 @@ class ReportingDeliveryTests(unittest.TestCase):
         policy = SimpleNamespace(stage="canary", auto_promote=False, completed_at=None,
                                  target_group=portal.PILOT_GROUP, target_pct=100)
         self.assertTrue(portal.bridge_allowed(a, policy, a.id))
+        self.assertFalse(portal.bridge_allowed(a, policy, a.id, "1.25.9002"))
+        with patch.object(a, "current_version", "1.25.9001"):
+            self.assertTrue(portal.bridge_allowed(a, policy, a.id, "1.25.9002"))
+            self.assertFalse(portal.bridge_allowed(a, policy, a.id))
+            with patch.object(a, "id", "another"):
+                self.assertFalse(portal.bridge_allowed(a, policy, portal.REFERENCE_ID, "1.25.9002"))
         for key, value in (("stage", "full"), ("auto_promote", True), ("target_group", "")):
             with patch.object(policy, key, value):
                 self.assertFalse(portal.bridge_allowed(a, policy, a.id))
