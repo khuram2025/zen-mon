@@ -39,6 +39,7 @@ from .health import HealthCheckError, check_http
 from . import history
 from .inventory import collect_inventory, get_current_version
 from .lockfile import LockError, UpdateLock
+from .os_patch_check import collect_os_patch_check
 
 logger = logging.getLogger("zenplus.updater")
 
@@ -162,12 +163,27 @@ def register(cfg: AgentConfig, registration_token: str = "") -> AgentConfig:
     return cfg
 
 
+def report_os_patches(cfg: AgentConfig) -> dict:
+    """Submit only the assessment. An update offer in the response is ignored."""
+    if not cfg.appliance.id or not cfg.appliance.api_key:
+        raise ValueError("Appliance is not registered")
+    assessment = collect_os_patch_check()
+    with _api_client(cfg) as client:
+        response = client.post("/api/v1/appliances/checkin", json={
+            "current_version": get_current_version(),
+            "os_patch_check": assessment,
+        })
+        response.raise_for_status()
+    return assessment
+
+
 def checkin(cfg: AgentConfig) -> dict | None:
     """Check in with the server and get update instructions.
 
     Returns release info dict if an update is available, None otherwise.
     """
     inventory = collect_inventory()
+    inventory["os_patch_check"] = collect_os_patch_check()
 
     try:
         with _api_client(cfg) as client:
@@ -687,6 +703,8 @@ def cli() -> None:
         action="store_true",
         help="Check for updates without applying",
     )
+    parser.add_argument("--report-os-patches", action="store_true",
+                        help="Report the OS patch assessment without applying updates")
     parser.add_argument('--plan', action='store_true', help='Print a read-only upgrade-path preview as JSON')
     parser.add_argument('--install-plan', help='Install an explicitly approved plan ID and target version')
     parser.add_argument('--install-latest', action='store_true', help='Explicitly install the currently eligible required upgrade path')
@@ -699,8 +717,15 @@ def cli() -> None:
 
     args = parser.parse_args()
 
-    if sum(bool(x) for x in (args.check, args.plan, args.install_plan, args.continue_plan, args.install_latest, args.register)) > 1:
-        parser.error('Choose one operation: check, plan, install, or register')
+    if sum(bool(x) for x in (args.check, args.report_os_patches, args.plan, args.install_plan, args.continue_plan, args.install_latest, args.register)) > 1:
+        parser.error('Choose one updater operation at a time')
+    if args.report_os_patches:
+        try:
+            print(json.dumps(report_os_patches(load_config(args.config))))
+        except (OSError, ValueError, SecurityError, httpx.HTTPError):
+            print("OS patch report could not be submitted. Check registration and connectivity.", file=sys.stderr)
+            sys.exit(1)
+        return
     if args.plan:
         try:
             from .plan import get_plan
