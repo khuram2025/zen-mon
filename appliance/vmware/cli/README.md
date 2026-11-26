@@ -1,14 +1,14 @@
 # Zentryc appliance CLI edition r2
 
 The authenticated command console replaces the old numbered recovery menu.
-The web application remains the separately signed ZenPlus 1.24.14 payload.
+The appliance includes the separately signed ZenPlus application payload.
 
 Fresh downloads use the public bootstrap login **admin / Zentryc@Setup123**.
-Console setup requires a new console password, then a web administrator password.
-Users may enter the same new password for both or choose different passwords.
-The two credentials remain independently managed; changing one later does not
-change the other. HTTP/HTTPS listeners remain loopback-only until both passwords are
-changed. No administrator session can use the unchanged console password.
+Enter one new administrator password and confirm it. Use 8 to 128 characters
+including at least one letter and one digit. Use that password with admin on
+the console and HTTPS dashboard. Later password changes are independent.
+If setup is interrupted, sign in with the console password you chose and resume
+setup. HTTPS stays closed until the web administrator credential is ready.
 Passwords are hashed independently. Console credentials are root-owned mode 0600
 under `/var/lib/zentryc`; they never create a shared Linux password or change web
 MFA. Five failed console logins impose a one-minute lockout. Idle sessions expire

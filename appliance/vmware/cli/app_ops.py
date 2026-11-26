@@ -5,6 +5,7 @@ This is not an HTTP endpoint or an alternate web authentication mechanism.
 The authenticated physical-console administrator invokes it through the root CLI.
 Secrets arrive through stdin and never appear in arguments or response output.
 """
+from datetime import datetime, timezone
 import asyncio
 import json
 import logging
@@ -40,10 +41,27 @@ async def dispatch(request):
                 return {'must_change_password': bool(user.must_change_password)}
             if not user.must_change_password:
                 raise ValueError('Web administrator is already configured; use the dashboard to change its password')
-            from app.api.v1.users import ChangePasswordRequest, change_own_password
-            return await change_own_password(ChangePasswordRequest(
-                current_password=request['current_password'], new_password=request['new_password']),
-                db=db, current_user=user)
+            from auth import AuthError, validate_setup_password
+            from app.core.security import hash_password, verify_password
+            from app.services import session_service
+            from app.services.audit_service import write_audit_log
+            from fastapi import HTTPException
+            old, new = request['current_password'], request['new_password']
+            if user.auth_source != 'local' or not verify_password(old, user.password_hash):
+                raise HTTPException(400, 'Web administrator setup password could not be verified')
+            try:
+                validate_setup_password(new, old)
+            except AuthError as exc:
+                raise HTTPException(422, str(exc)) from None
+            user.password_hash = hash_password(new)
+            user.must_change_password = False
+            user.password_changed_at = user.updated_at = datetime.now(timezone.utc)
+            await session_service.revoke_all_sessions(db, user.id, by=user.username, reason='password changed')
+            await write_audit_log(db, actor=user, action='user.password_change',
+                                  resource_type='user', resource_id=str(user.id),
+                                  metadata={'username': user.username, 'source': 'appliance setup'})
+            await db.commit()
+            return {'message': 'Web administrator password saved'}
         if operation == 'license':
             row = (await db.execute(text('SELECT plan,status,started_at,expires_at,max_devices,max_service_checks,max_users FROM subscriptions ORDER BY started_at DESC LIMIT 1'))).mappings().first()
             return dict(row) if row else {'status': 'unavailable'}
