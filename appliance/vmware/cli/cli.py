@@ -13,7 +13,7 @@ import syslog
 import termios
 import time
 from pathlib import Path
-from auth import AuthError, ConsoleAuth, atomic_private
+from auth import AuthError, ConsoleAuth, atomic_private, validate_setup_password
 import network
 
 SETUP_PASSWORD = 'Zentryc@Setup123'  # Public bootstrap only; never an operator secret.
@@ -194,39 +194,36 @@ def web_gate(open_access):
 
 
 def setup(auth, session):
+    complete = STATE / 'console-setup-complete.json'
+    if complete.exists() and not session['must_change_password']:
+        return session
+    password = None
     if session['must_change_password']:
-        print('\nFirst-time setup: replace the public console setup password.')
+        print('Choose one administrator password for the console and dashboard.')
+        print('Use 8 through 128 characters, including a letter and a number.')
         while True:
             try:
-                session = auth.change_password(new_password('console'), SETUP_PASSWORD)
-                atomic_private(STATE/'console-claimed.json', {'claimed_at':time.time()})
-                print('Console password saved. Web and console passwords are managed separately.')
+                password = new_password('administrator')
+                validate_setup_password(password, SETUP_PASSWORD)
                 break
             except (ValueError, AuthError) as exc:
-                print('% '+str(exc))
-    # Do not reset a web administrator that already completed setup.
+                print('% ' + str(exc))
+        session = auth.claim(password, SETUP_PASSWORD)
     try:
         status = app('setup-status')
-    except ValueError:
-        print('Web initialization is unavailable. Dashboard access stays closed.')
-        print('Use show services and system initialization retry, then setup to finish.')
+        if status['must_change_password'] and not complete.exists():
+            if password is None:
+                password = read('Re-enter your current console password to finish dashboard setup: ', secret=True)
+                auth.authenticate(session['username'], password)
+            app('setup-web-password', current_password=SETUP_PASSWORD, new_password=password)
+    except ValueError as exc:
+        print('% ' + str(exc))
+        print('Console password saved. Use setup to retry dashboard initialization.')
         return session
-    if status['must_change_password']:
-        print('\nNow replace the public web administrator setup password.')
-        print('You may use the same password as the console or choose a different password.')
-        print('Use 12 through 128 characters; avoid common passwords and your username.')
-        while True:
-            try:
-                password = new_password('web administrator')
-                app('setup-web-password', current_password=SETUP_PASSWORD, new_password=password)
-                (STATE/'initial-login.json').unlink(missing_ok=True)
-                print('Web administrator password saved.')
-                break
-            except ValueError as exc:
-                print('% '+str(exc))
-    if not (STATE/'console-setup-complete.json').exists():
+    (STATE / 'initial-login.json').unlink(missing_ok=True)
+    if not complete.exists():
         web_gate(True)
-        print('Setup complete. HTTPS dashboard access is now enabled.')
+        print('Setup complete. Sign in to the HTTPS dashboard as admin.')
     return session
 
 
@@ -476,7 +473,7 @@ def main():
             print('\n  ZENTRYC | ZenPlus Appliance\n  Authorized console access only.\n')
             if auth._read(auth.path)['must_change_password']:
                 print('First-time setup login: admin / '+SETUP_PASSWORD)
-                print('Both console and web passwords must be changed before dashboard access.')
+                print('Choose one administrator password to enable dashboard access.')
             session=auth.authenticate(read('Username: ').strip(),read('Password: ',secret=True))
             session=setup(auth,session)
             CLI(auth,session).loop()

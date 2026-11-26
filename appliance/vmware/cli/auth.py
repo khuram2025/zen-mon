@@ -12,6 +12,15 @@ class AuthError(Exception):
     pass
 
 
+def validate_setup_password(password, factory):
+    if not isinstance(password, str) or not 8 <= len(password) <= 128:
+        raise AuthError('Use 8 through 128 characters for the administrator password')
+    if not any(c.isalpha() for c in password) or not any(c.isdigit() for c in password):
+        raise AuthError('Include at least one letter and one number')
+    if password == factory:
+        raise AuthError('Choose a password different from the setup password')
+
+
 def password_context():
     import logging
     logging.getLogger('passlib.handlers.bcrypt').setLevel(logging.ERROR)
@@ -114,6 +123,15 @@ class ConsoleAuth:
             raise AuthError('Initial console password must be changed')
         return current
 
+    def claim(self, password, factory):
+        validate_setup_password(password, factory)
+        with self.locked():
+            current = self._read(self.path)
+            if not current['must_change_password']:
+                raise AuthError('Console already configured; sign in again')
+            atomic_private(self.directory / 'console-claimed.json', {'claimed_at': self.clock()})
+            return self._save_password(current, password)
+
     def change_password(self, new_password, setup_password):
         with self.locked():
             return self._change_password(new_password, setup_password)
@@ -131,6 +149,9 @@ class ConsoleAuth:
         current = self._read(self.path)
         if self.crypto.verify(new_password, current['password_hash']):
             raise AuthError('Choose a password different from the current password')
+        return self._save_password(current, new_password)
+
+    def _save_password(self, current, new_password):
         current.update(password_hash=self.crypto.hash(new_password),
                        must_change_password=False, revision=current['revision'] + 1)
         atomic_private(self.path, current)

@@ -152,46 +152,33 @@ class ParserTests(unittest.TestCase):
 
 
 class SetupTests(unittest.TestCase):
-    def test_two_changes_gate_opens_last(self):
+    def test_one_confirmed_password_and_resume(self):
         with tempfile.TemporaryDirectory() as folder:
-            auth=ConsoleAuth(folder,owner_uid=os.getuid())
+            auth = ConsoleAuth(folder, owner_uid=os.getuid())
             auth.initialize(cli.SETUP_PASSWORD)
-            session=auth.authenticate('admin',cli.SETUP_PASSWORD)
-            events=[]
-            def app(operation,**kw):
-                events.append(operation)
-                return {'must_change_password':True} if operation=='setup-status' else {}
-            def gate(_):
-                self.assertFalse(auth._read(auth.path)['must_change_password'])
-                self.assertEqual(events,['setup-status','setup-web-password'])
-            with patch.object(cli,'STATE',Path(folder)),patch.object(cli,'new_password',side_effect=[NEW,OTHER]),patch.object(cli,'app',side_effect=app),patch.object(cli,'web_gate',side_effect=gate):
-                final=cli.setup(auth,session)
-            self.assertFalse(final['must_change_password'])
-    def test_same_or_different_password_is_operator_choice(self):
-        for web_password in (NEW,OTHER):
-            with self.subTest(same_password=web_password==NEW),tempfile.TemporaryDirectory() as folder:
-                auth=ConsoleAuth(folder,owner_uid=os.getuid())
-                auth.initialize(cli.SETUP_PASSWORD)
-                session=auth.authenticate('admin',cli.SETUP_PASSWORD)
-                events=[]
-                def app(operation,**values):
-                    events.append(operation)
-                    if operation=='setup-status':
-                        return {'must_change_password':True}
-                    self.assertEqual(values['current_password'],cli.SETUP_PASSWORD)
-                    self.assertEqual(values['new_password'],web_password)
-                    return {}
-                def gate(open_access):
-                    self.assertTrue(open_access)
-                    self.assertEqual(events,['setup-status','setup-web-password'])
-                    auth.authenticate('admin',NEW)
-                    with self.assertRaises(AuthError):
-                        auth.authenticate('admin',cli.SETUP_PASSWORD)
-                with patch.object(cli,'STATE',Path(folder)),patch.object(cli,'new_password',side_effect=[NEW,web_password]) as prompts,patch.object(cli,'app',side_effect=app),patch.object(cli,'web_gate',side_effect=gate) as web_gate:
-                    final=cli.setup(auth,session)
-                self.assertFalse(final['must_change_password'])
-                self.assertEqual(prompts.call_count,2)
-                web_gate.assert_called_once_with(True)
+            session = auth.authenticate('admin', cli.SETUP_PASSWORD)
+            # Eight lowercase letters/digits, without a symbol or uppercase.
+            chosen = 'branch42'
+            status = {'must_change_password': True}
+            with patch.object(cli, 'STATE', Path(folder)), patch.object(cli, 'web_gate') as gate:
+                with patch.object(cli, 'new_password', side_effect=['short1', 'noletters'.upper(),
+                                  '12345678', chosen]) as prompts, patch.object(cli, 'app',
+                                  side_effect=[status, ValueError('database unavailable')]) as app:
+                    session = cli.setup(auth, session)
+                    self.assertEqual(prompts.call_count, 4)
+                    app.assert_called_with('setup-web-password', current_password=cli.SETUP_PASSWORD,
+                                           new_password=chosen)
+                    gate.assert_not_called()
+                auth.authenticate('admin', chosen)
+                with self.assertRaises(AuthError):
+                    auth.authenticate('admin', cli.SETUP_PASSWORD)
+                with patch.object(cli, 'read', return_value=chosen), patch.object(cli, 'app',
+                                  side_effect=[status, {}]) as app:
+                    cli.setup(auth, session)
+                    app.assert_called_with('setup-web-password', current_password=cli.SETUP_PASSWORD,
+                                           new_password=chosen)
+                gate.assert_called_once_with(True)
+
     def test_existing_web_password_preserved(self):
         with tempfile.TemporaryDirectory() as folder:
             auth=unittest.mock.Mock()
