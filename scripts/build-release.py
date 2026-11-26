@@ -1289,7 +1289,7 @@ def build_package(version: str, changelog: str, severity: str,
     return output_path
 
 
-def sign_and_archive(build_dir, manifest, version, provenance):
+def sign_and_archive(build_dir, manifest, version, provenance, *, filename=None):
     # The signature must cover the payload, not only the instructions: list the
     # SHA-256 of every file that will be in the package, and name the commit.
     manifest[INVENTORY_KEY] = release_source.payload_inventory(build_dir)
@@ -1332,7 +1332,7 @@ def sign_and_archive(build_dir, manifest, version, provenance):
             "release payload changed after the manifest was signed; refusing to package it")
 
     # Create tar.gz
-    output_path = RELEASE_DIR / f"update-{version}.zup"
+    output_path = RELEASE_DIR / (filename or f"update-{version}.zup")
     with tarfile.open(output_path, "w:gz") as tar:
         for item in sorted(build_dir.iterdir()):
             tar.add(str(item), arcname=item.name, filter=public_payload_member)
@@ -1350,6 +1350,25 @@ def sign_and_archive(build_dir, manifest, version, provenance):
     print(f"{'='*60}\n")
 
     return output_path
+
+
+def build_reporting_component(version, changelog):
+    import os_report_component as component
+    provenance = release_source.git_provenance(ZENPLUS_DIR)
+    if (version != component.VERSION or provenance["tag"] != component.TAG
+            or release_source.source_problems(provenance, allow_dirty=False, require_tag=True)):
+        raise ValueError("Reporting component requires its qualified clean source tag")
+    RELEASE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="zenplus-report-component-") as tmp:
+        directory = Path(tmp)
+        for name, data in component.payload(ZENPLUS_DIR).items():
+            (directory / name).write_bytes(data)
+        manifest = {"format_version": 2, "release_profile": component.PROFILE,
+                    "version": version, "supported_firmware": [component.BASE],
+                    "release_date": datetime.now(timezone.utc).isoformat(),
+                    "update_id": str(uuid4()), "changelog": changelog}
+        return sign_and_archive(directory, manifest, version, provenance,
+                                filename=f"{component.TAG}.zup")
 
 
 def build_reporting_release(version, changelog, severity, minimum):
@@ -1435,6 +1454,9 @@ def publish_package(zup_path: Path, version: str, changelog: str,
     except Exception as exc:
         print(f"ERROR: Refusing to publish an unsigned or invalid package: {exc}")
         sys.exit(1)
+
+    if manifest.get("release_profile") == "zenplus-os-patch-reporter":
+        raise ValueError("Standalone components cannot be published as firmware")
 
     requested_min_version = min_version or None
     signed_min_version = manifest.get("min_version") or None
@@ -1665,6 +1687,7 @@ Examples:
     build_p.add_argument("--severity", "-s", default="normal",
                          choices=["critical", "security", "normal", "optional"])
     build_p.add_argument("--min-version", default=None, help="Minimum version to upgrade from")
+    build_p.add_argument("--os-report-component", action="store_true", help="Build standalone legacy reporting component")
     build_p.add_argument("--os-patch-report-only", action="store_true", help="Build the two-file reporting overlay")
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
     build_p.add_argument("--skip-go", action="store_true", help="Skip Go binary build")
@@ -1739,6 +1762,12 @@ Examples:
     args = parser.parse_args()
 
     if args.command == "build":
+        if args.os_report_component:
+            if (not args.skip_agent_artifacts or args.min_version or args.os_patch_report_only
+                    or args.include_migrations or args.migration or args.agent_artifact_dir):
+                parser.error("Reporting component requires appliance-only scope and its own base policy")
+            build_reporting_component(args.version, args.changelog)
+            return
         if args.os_patch_report_only:
             if not args.skip_agent_artifacts or args.include_migrations or args.migration or args.agent_artifact_dir:
                 parser.error("Reporting-only build requires appliance-only scope and no migrations")
